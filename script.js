@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      2.146.0
+// @version      2.147.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '2.146.0';
+  const SCRIPT_VERSION = '2.147.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -80,6 +80,16 @@
     // ou qu'un bon goût + quelques bonus y arrive, sans exiger la totalité des signaux à la fois.
     discoverLegendaryScore: 2.5,
     discoverNotableScore: 1.5,
+    // Score de goût (voir tasteScore) : points retirés par genre jamais regardé, ET
+    // nombre MAX de genres jamais regardés réellement comptés contre une série. Sans ce
+    // plafond, une série à beaucoup de genres (ex. 6) accumule les malus un par un et son
+    // goût moyen plonge même si 2-3 genres matchent parfaitement — il devient alors quasi
+    // impossible d'atteindre « légendaire » dès qu'une série a beaucoup de genres, alors
+    // que c'est souvent juste le signe d'un synopsis riche (ex. « Action, Aventure, Fantasy,
+    // Drame, Surnaturel, Comédie »). Au-delà de ce plafond, les genres jamais regardés
+    // supplémentaires sont neutres (ni bonus, ni malus) plutôt que punitifs.
+    discoverMissPenalty: 0.5,
+    discoverMaxPenalizedGenres: 2,
     discoverMaxSeasons: 3,     // 3 saisons ou moins accepté (fix : c'était < 3 avant)
     discoverExcludeCategories: ['romance', 'hentai'], // genres exclus par défaut de Découverte
                                // ET du Calendrier — bloc Nouveautés (slugs Crunchyroll en
@@ -424,6 +434,27 @@
       impact: 'discover' },
     { key: 'legendaryMaxPages', label: '🎲 Dé légendaire — profondeur de scan', type: 'int', min: 12, max: 100, unit: 'pages',
       help: 'Jusqu’où le dé légendaire scanne le classement popularité pour dénicher ses pépites. Plus haut = plus long, mais plus de chances de trouver assez de légendaires.',
+      impact: 'discover' },
+    { key: 'discoverMissPenalty', label: '✨ Légendaire — malus par genre jamais regardé', type: 'float', min: 0, max: 1, step: 0.05,
+      help: 'Points retirés du score de goût pour chaque genre d’une série que tu ne regardes jamais. Plus bas = plus tolérant, plus facile d’obtenir « légendaire ». 0 = les genres jamais regardés n’handicapent plus du tout.',
+      impact: 'discover' },
+    { key: 'discoverMaxPenalizedGenres', label: '✨ Légendaire — genres jamais regardés max pénalisés', type: 'int', min: 0, max: 10,
+      help: 'Au-delà de ce nombre, les genres jamais regardés d’une série ne comptent plus contre elle. Évite qu’une série à beaucoup de genres (ex. 6) soit écrasée juste parce qu’elle en liste beaucoup, même si 2-3 correspondent parfaitement à tes goûts. Monte-le pour redevenir plus strict, baisse-le (voire 0) pour être très tolérant.',
+      impact: 'discover' },
+    { key: 'discoverLegendaryScore', label: '✨ Légendaire — score minimum requis', type: 'float', min: 0.5, max: 5, step: 0.1,
+      help: 'Score « pépite » à atteindre pour décrocher le ruban ✨ Légendaire. Composé du goût (jusqu’à ±2.5) + bonus note/popularité (jusqu’à +1.5). Baisse-le pour en trouver plus souvent.',
+      impact: 'discover' },
+    { key: 'discoverNotableScore', label: 'Notable — score minimum requis', type: 'float', min: 0.5, max: 5, step: 0.1,
+      help: 'Score « pépite » à partir duquel une série est marquée « notable » (un cran sous légendaire). Doit rester inférieur au score légendaire ci-dessus.',
+      impact: 'discover' },
+    { key: 'discoverWellRatedThreshold', label: '🏆 Note « très bien notée »', type: 'float', min: 3, max: 5, step: 0.1,
+      help: 'Note AniList à partir de laquelle le badge 🏆 s’affiche, et qui donne un bonus de +0.5 au score pépite.',
+      impact: 'discover' },
+    { key: 'discoverSuperRatedThreshold', label: 'Note « exceptionnelle » (bonus supplémentaire)', type: 'float', min: 3, max: 5, step: 0.1,
+      help: 'Note AniList à partir de laquelle un second bonus de +0.5 s’ajoute au score pépite (cumulable avec le bonus « très bien notée » ci-dessus).',
+      impact: 'discover' },
+    { key: 'discoverVeryPopularRank', label: '🔥 Rang « très populaire »', type: 'int', min: 10, max: 2000, unit: 'rang',
+      help: 'Une série classée avant ce rang dans le classement popularité (toutes pages scannées confondues) décroche le badge 🔥 et un bonus de +0.5 au score pépite.',
       impact: 'discover' },
     { key: 'discoverExcludeCategories', label: 'Genres exclus (Découverte & Nouveautés)',
       type: 'list',
@@ -4844,18 +4875,29 @@
   // parce que la comédie te plaît, alors que sport et drame — que tu ne regardes pas — étaient
   // simplement écartés du calcul. Désormais CHAQUE genre compte :
   //   • présent dans ton profil → contribution positive (d'autant plus forte que tu le regardes) ;
-  //   • jamais regardé → malus (MISS_PENALTY).
-  // La moyenne sur TOUS les genres fait qu'un seul genre aimé, noyé dans des genres qui te
-  // sont étrangers, donne un solde faible ou négatif — donc pas un bon match global.
+  //   • jamais regardé → malus (CFG.discoverMissPenalty).
+  // La moyenne sur les genres comptés fait qu'un seul genre aimé, noyé dans des genres qui
+  // te sont étrangers, donne un solde faible ou négatif — donc pas un bon match global.
+  //
+  // (fix) Plafond CFG.discoverMaxPenalizedGenres : au-delà de ce nombre de genres jamais
+  // regardés, les suivants sont IGNORÉS (ni ajoutés au malus, ni au dénominateur) au lieu
+  // de continuer à diluer/plomber la moyenne. Sans ça, une série à beaucoup de genres (ex.
+  // 6) était mécaniquement écrasée par ses genres non regardés même quand 2-3 genres
+  // matchaient parfaitement — « légendaire » devenait quasi inatteignable dès qu'une série
+  // listait beaucoup de genres, ce qui n'a rien à voir avec la qualité du match.
   function tasteScore(cats, profile) {
     if (!profile || !profile.max || !cats.length) return 0;
-    const MISS_PENALTY = 0.5;   // points retirés par genre jamais regardé
-    let sum = 0;
+    const MISS_PENALTY = CFG.discoverMissPenalty;
+    const maxPenalized = Math.max(0, CFG.discoverMaxPenalizedGenres ?? cats.length);
+    let sum = 0, denom = 0, missedCounted = 0;
     for (const c of cats) {
       const w = profile.weights[c];
-      sum += w ? (w / profile.max) : -MISS_PENALTY;
+      if (w) { sum += w / profile.max; denom++; continue; }
+      if (missedCounted >= maxPenalized) continue;   // genre en trop : ignoré, pas pénalisé
+      sum -= MISS_PENALTY; denom++; missedCounted++;
     }
-    return Math.max(-1, Math.min(1, sum / cats.length));
+    if (!denom) return 0;   // tous les genres sont « en trop » (cap à 0) : neutre plutôt que 0/0
+    return Math.max(-1, Math.min(1, sum / denom));
   }
 
   // Signaux d'une carte Découverte : icônes parlantes + couleur du liseré dominant.
