@@ -1,0 +1,9585 @@
+
+
+// ==UserScript==
+// @name         Mon Crunchy
+// @namespace    reste-a-voir
+// @version      2.137.0
+// @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
+// @author       toi
+// @match        https://www.crunchyroll.com/*
+// @noframes
+// @run-at       document-start
+// @grant        GM_xmlhttpRequest
+// @grant        GM.xmlHttpRequest
+// @connect      anilist.co
+// @connect      graphql.anilist.co
+// @updateURL    https://gist.githubusercontent.com/GeoffreyOfficial/7a01fea8605a49a32a0a2537dfeb1ed1/raw
+// @downloadURL  https://gist.githubusercontent.com/GeoffreyOfficial/7a01fea8605a49a32a0a2537dfeb1ed1/raw
+// @supportURL   https://gist.github.com/GeoffreyOfficial/7a01fea8605a49a32a0a2537dfeb1ed1
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  const LOG = (...a) => console.log('%c[reste-à-voir]', 'color:#f47521;font-weight:bold', ...a);
+  // Version du script = source unique de vérité. Elle sert AUSSI de clé de compatibilité
+  // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
+  // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
+  // l'en-tête @version tout en haut du fichier.
+  const SCRIPT_VERSION = '2.136.1';
+  LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
+
+  // ─────────────────────────────────────────────────────────────
+  //  Réglages
+  // ─────────────────────────────────────────────────────────────
+  const CFG = {
+    refreshMinutes: 15,
+    concurrency: 5,
+    prefetchTabs: true,          // précharge « Hors listes » à l'inactivité (voir prefetchIdle)
+    tvMode: false,               // affichage « salon » : lecture à distance, pilotage télécommande
+    showSearchBar: false,        // barre de recherche globale masquée par défaut (en-tête sur une
+                                  // seule ligne) — activable ici ou d'un tap sur 🔍 dans l'en-tête
+    locale: 'fr-FR',
+    preferredAudio: 'ja-JP',   // langue de référence pour LISTER les épisodes
+                               // (le comptage des vus couvre toutes les versions audio)
+    watchedRatio: 0.9,         // (1) épisode dépassé à 90 % = vu, même sans flag Crunchyroll
+    airingWindowDays: 21,      // (3)(10) dernier épisode plus récent que ça = série en diffusion
+    cacheHoursAiring: 1,       // (3) cache court pour les séries en cours
+    cacheHoursFinished: 48,    // (3) cache long pour les séries terminées
+    playheadBatch: 500,        // GUID par requête /playheads — 500 validé par probeBatch()
+                               // (résultats identiques aux lots de 100, 5× moins de requêtes)
+    hideMovies: false,         // Crunchyroll range les films dans une « série » à 1 épisode.
+                               // Passe à true pour les masquer.
+    showHero: false,           // carte « à la une » (série bientôt finie) en haut de Reste à voir,
+                               // masquée par défaut — activable dans les réglages.
+
+    // Onglet Découverte : séries populaires jamais vues, hors de toutes tes listes
+    discoverMinRating: 4.5,
+    discoverMaxSeasons: 3,     // 3 saisons ou moins accepté (fix : c'était < 3 avant)
+    discoverExcludeCategories: ['romance', 'hentai'], // genres exclus par défaut de Découverte
+                               // ET du Calendrier — bloc Nouveautés (slugs Crunchyroll en
+                               // minuscule côté Découverte, noms de genre AniList en minuscule
+                               // côté Nouveautés — la comparaison se fait insensible à la casse).
+                               // 'hentai' exclu par défaut : Nouveautés interroge le catalogue
+                               // AniList au complet (pas seulement Crunchyroll, qui n'héberge
+                               // pas ce contenu), retirable ici si tu veux le réintégrer.
+    discoverPageSize: 50,      // taille de page de l'API popularité
+    discoverMaxPages: 12,      // garde-fou : on arrête de scanner après ça
+    discoverTarget: 30,        // nombre de résultats visés
+    legendaryMaxPages: 40,     // 🎲 dé légendaire : scan bien plus profond dans le classement
+    legendaryTarget: 15,       // 🎲 dé légendaire : nombre de LÉGENDAIRES visées (pas de candidats bruts)
+
+    // Onglet Calendrier : bloc « Nouveautés » — épisodes 1 tout juste sortis, repérés
+    // via AniList (voir loadNewPremieres — AniList plutôt que Crunchyroll : source fiable
+    // et documentée, déjà utilisée ailleurs dans ce script). Une série sort d'elle-même de
+    // ce bloc dès que son épisode 2 est publié : rien à nettoyer, ni cache ni code.
+    discoverNewPremieres: true,   // activé par défaut, réglable dans Configurer
+    newPremieresPageSize: 50,     // taille de page AniList (plafond de l'API : 50)
+    newPremieresMaxPages: 2,      // garde-fou pages — largement assez pour une fenêtre de
+                                   // quelques jours, même en pleine saison de simulcasts
+    newPremieresTarget: 18,       // nombre de nouveautés affichées
+    newPremieresWindowDays: 10,   // « déjà sorties » : épisode 1 sorti il y a moins de … jours
+    newPremieresUpcomingDays: 7,  // « à venir » : épisode 1 prévu dans moins de … jours (pas
+                                   // encore diffusé) — les deux cas cohabitent dans le bloc,
+                                   // visuellement distingués (voir newPremiereCard)
+    historyMaxEntries: 8000,     // plafond d'entrées d'historique scannées (l'API en sert ~100/requête)
+    historyGenreEnrichMax: 80,   // Stats : nb max de séries hors-listes dont on va chercher les
+                               // genres au panel complet (watch-history ne les porte pas).
+                               // (pré-filtre rapide mais partiel ; le filet de sécurité,
+                               // c'est la vérification /playheads par candidat survivant)
+    discoverHistoryCacheHours: 1, // Fraîcheur de l'historique pour Découverte / Hors listes.
+                               // Valait 6 h quand un rescan coûtait ~80 requêtes. Depuis le
+                               // scan incrémental (on s'arrête au repère du scan précédent),
+                               // il en coûte 1 à 2 : on peut donc être bien plus frais, et
+                               // cesser de proposer une série finie le matin même.
+
+    // AniList : total d'épisodes prévu + date de fin de saison (voir section 3bis) ET
+    // genres détaillés (voir mergeGenreLists/translateAniGenres) fusionnés dans
+    // s.categories — Crunchyroll ne remonte souvent que 1-2 genres génériques par série,
+    // ce qui vidait les tops genres des Stats et le profil de goût de Découverte.
+    // Enrichissement en fond, sur toutes les séries suivies (pas seulement en diffusion,
+    // pour couvrir aussi les séries terminées de l'historique). Passe à false pour
+    // désactiver TOUTE requête AniList (planning ET genres).
+    anilistSchedule: true,
+
+    // Ajout direct depuis Découverte vers une Crunchylist (« mes listes »), watchlist
+    // exclue. defaultListId : liste ciblée par défaut — null tant que l'utilisateur n'a
+    // rien choisi, auto-résolu à la première liste détectée (voir getMyLists/effectiveListId).
+    // askListEachTime : si activé, un choix de liste est proposé à chaque ajout au lieu
+    // d'utiliser directement la liste par défaut.
+    defaultListId: null,
+    askListEachTime: false,
+
+    // Force l'ouverture de l'appli Crunchyroll native (via intent Android) plutôt que le
+    // navigateur pour tous les liens série/épisode — nécessaire pour lire une vidéo depuis
+    // une PWA/onglet Edge sur téléphone (voir crUrl). Sans effet hors Android.
+    openInApp: true,
+  };
+
+  const LS = 'crrav:';
+  const RAW_FETCH = window.fetch.bind(window);
+  const DAY = 86400e3;
+
+  // Appel réseau vers un domaine EXTERNE (hors crunchyroll.com) — utilisé uniquement pour
+  // AniList. `fetch()` depuis la page est soumis à la CSP de Crunchyroll (directive
+  // connect-src), qui n'autorise a priori que ses propres domaines : un fetch direct vers
+  // anilist.co peut donc être bloqué par le navigateur (« NetworkError when attempting to
+  // fetch resource », sans détail CORS/HTTP exploitable). GM_xmlhttpRequest s'exécute hors
+  // du contexte de la page (sandbox du gestionnaire de scripts) et n'est PAS soumis à cette
+  // CSP — d'où le grant @connect anilist.co dans l'en-tête. Repli sur fetch() si l'API GM
+  // n'est pas disponible (ancien gestionnaire, ou script lancé hors extension) : ça peut
+  // remarcher selon la CSP réellement en place, mieux vaut essayer que renoncer d'office.
+  const GM_XHR = (typeof GM_xmlhttpRequest === 'function') ? GM_xmlhttpRequest
+    : (typeof GM !== 'undefined' && typeof GM.xmlHttpRequest === 'function') ? GM.xmlHttpRequest
+    : null;
+
+  function externalFetch(url, opts = {}) {
+    if (!GM_XHR) {
+      // Canal fetch : on renvoie le MÊME contrat que le canal GM (dont getHeader), pour que
+      // l'appelant n'ait pas à savoir quel canal a servi.
+      return RAW_FETCH(url, opts).then((res) => ({
+        ok: res.ok, status: res.status,
+        json: () => res.json(), text: () => res.text(),
+        getHeader: (nm) => { try { return res.headers.get(nm); } catch (_) { return null; } },
+      }));
+    }
+    return new Promise((resolve, reject) => {
+      const control = GM_XHR({
+        method: opts.method || 'GET',
+        url,
+        headers: opts.headers || {},
+        data: opts.body,
+        timeout: 15000,
+        onload: (res) => {
+          // responseHeaders est une chaîne brute « clé: valeur\r\n… » : parsée à la demande
+          // en table insensible à la casse (sert surtout à lire Retry-After).
+          let hmap = null;
+          const getHeader = (nm) => {
+            if (hmap === null) {
+              hmap = {};
+              String(res.responseHeaders || '').split(/\r?\n/).forEach((ln) => {
+                const i = ln.indexOf(':');
+                if (i > 0) hmap[ln.slice(0, i).trim().toLowerCase()] = ln.slice(i + 1).trim();
+              });
+            }
+            return hmap[String(nm).toLowerCase()] || null;
+          };
+          resolve({
+            ok: res.status >= 200 && res.status < 300,
+            status: res.status,
+            json: async () => JSON.parse(res.responseText),
+            text: async () => res.responseText,
+            getHeader,
+          });
+        },
+        onerror: () => reject(new Error('GM_xmlhttpRequest : échec réseau')),
+        ontimeout: () => reject(new Error('GM_xmlhttpRequest : délai dépassé')),
+        onabort: () => reject(new Error('GM_xmlhttpRequest : annulé')),
+      });
+      // Relie l'AbortController maison (utilisé par anilistQuery pour son propre délai de
+      // 12 s) à l'annulation réelle de la requête GM, sinon le "timeout" de anilistQuery
+      // n'annule rien côté réseau avec ce chemin (seul le timeout GM de 15 s le ferait).
+      if (opts.signal && control && typeof control.abort === 'function') {
+        opts.signal.addEventListener('abort', () => control.abort());
+      }
+    });
+  }
+
+  // ─── Mode debug + point d'entrée unique pour les erreurs avalées ───────────
+  // Avant : 22 `catch (_) {}` disséminés dans le fichier, dont une erreur de quota
+  // localStorage qui passait totalement inaperçue. Maintenant : tout catch silencieux
+  // passe par safeCall() (ou son .log() pour les catch imbriqués dans une boucle),
+  // qui logge en console — uniquement en mode debug, pour ne rien afficher chez la
+  // plupart des gens. Active avec resteAVoir.debug(true) (persiste entre sessions).
+  let DEBUG = false;
+  try { DEBUG = localStorage.getItem(LS + 'debug') === '1'; } catch (e) { /* pas de localStorage, tant pis */ }
+
+  function safeCall(fn, fallback, label) {
+    try {
+      return fn();
+    } catch (e) {
+      safeCall.log(e, label);
+      return fallback;
+    }
+  }
+  safeCall.log = function (e, label) {
+    if (DEBUG) LOG(`⚠ erreur avalée${label ? ' [' + label + ']' : ''} :`, e);
+  };
+  safeCall.setDebug = function (on) {
+    DEBUG = !!on;
+    try { localStorage.setItem(LS + 'debug', DEBUG ? '1' : '0'); } catch (e) { /* ignore */ }
+    LOG('mode debug', DEBUG ? 'activé — les erreurs avalées seront loggées' : 'désactivé');
+    return DEBUG;
+  };
+
+  // ─── État utilisateur unifié (réglages + filtres + ignorées + empreinte diffusion) ──
+  // Avant la 2.44 : 4 clés localStorage séparées (settings/filters/ignored/airsnap).
+  // Une migration de format touchant l'une sans les autres pouvait les désynchroniser
+  // (ex. IGNORED réinitialisée pendant qu'un vieux format de filters traînait encore).
+  // Une seule clé versionnée = un seul point de lecture/écriture, migration atomique.
+  const STATE_SCHEMA_VERSION = 1;
+  const STATE_KEY = LS + 'state';
+
+  // Reprend les 4 anciennes clés si la nouvelle n'existe pas encore (mise à jour
+  // depuis une version < 2.44). Ne s'exécute qu'une fois : les anciennes clés sont
+  // supprimées une fois la fusion faite.
+  function migrateLegacyState() {
+    const legacy = {};
+    let found = false;
+    for (const field of ['settings', 'filters', 'ignored', 'airsnap']) {
+      const raw = localStorage.getItem(LS + field);
+      if (raw != null) {
+        found = true;
+        legacy[field] = safeCall(() => JSON.parse(raw), null, 'migrateLegacyState:' + field);
+      }
+    }
+    return found ? legacy : null;
+  }
+
+  function persistState(state) {
+    const payload = JSON.stringify({ ...state, v: STATE_SCHEMA_VERSION });
+    try {
+      localStorage.setItem(STATE_KEY, payload);
+      checkQuota();
+      return true;
+    } catch (e) {
+      // Les réglages ne doivent JAMAIS se perdre silencieusement : contrairement au
+      // cache (jetable), c'est de la donnée utilisateur. On purge le cache le plus
+      // dispensable et on réessaie une fois avant d'abandonner (et de prévenir).
+      safeCall.log(e, 'persistState');
+      evictOldest(0.25);
+      try {
+        localStorage.setItem(STATE_KEY, payload);
+        checkQuota();
+        return true;
+      } catch (e2) {
+        safeCall.log(e2, 'persistState:retry');
+        STATE.quotaWarning = `localStorage plein (${fmtBytes(lsBytes())}) — tes derniers réglages ` +
+          `n'ont pas pu être sauvegardés. Ouvre resteAVoir.stats() ou vide le cache.`;
+        forceRender();
+        return false;
+      }
+    }
+  }
+
+  function loadState() {
+    const fallback = { v: STATE_SCHEMA_VERSION, settings: {}, filters: {}, ignored: {}, airsnap: {} };
+    const raw = safeCall(() => JSON.parse(localStorage.getItem(STATE_KEY) || 'null'), null, 'loadState');
+    if (raw && typeof raw === 'object') return { ...fallback, ...raw };
+
+    const legacy = migrateLegacyState();
+    if (!legacy) return fallback;
+    const merged = { ...fallback, ...legacy };
+    persistState(merged);
+    for (const field of ['settings', 'filters', 'ignored', 'airsnap']) {
+      safeCall(() => localStorage.removeItem(LS + field), undefined, 'migrateLegacyState:cleanup');
+    }
+    LOG('migration : réglages/filtres/ignorées/empreinte fusionnés dans une seule clé');
+    return merged;
+  }
+
+  let APP_STATE = loadState();
+
+  // ─── Compatibilité du cache : PALIER dédié, indépendant de la version ───────────
+  // Le cache n'est purgé que lorsque le FORMAT des données change, pas à chaque mise à
+  // jour du script. Avant, il était estampillé avec SCRIPT_VERSION : la moindre
+  // correction cosmétique relançait un scan complet de l'historique (~80 requêtes).
+  // À n'incrémenter QUE si la structure d'une entrée de cache change.
+  const CACHE_TIER = '7';
+
+  // Le cache re-téléchargeable (épisodes, notes, historique, instantané, teintes…) est
+  // Le cache re-téléchargeable est estampillé du palier qui l'a écrit, dans la clé
+  // « schema ». Au démarrage, si l'estampille est ABSENTE ou DIFFÉRENTE du palier courant,
+  // tout le cache est vidé d'un coup. L'état utilisateur (réglages, filtres, séries
+  // ignorées, empreinte diffusion) est toujours préservé.
+  function enforceCacheSchema() {
+    const stored = safeCall(() => localStorage.getItem(LS + 'schema'), null, 'enforceCacheSchema:read');
+    if (stored === CACHE_TIER) return;                     // format compatible : on garde tout
+    const spared = new Set([STATE_KEY, LS + 'schema', LS + 'debug']);
+    const keys = Object.keys(localStorage).filter((k) => k.startsWith(LS) && !spared.has(k));
+    keys.forEach((k) => safeCall(() => localStorage.removeItem(k), undefined, 'enforceCacheSchema:evict'));
+    safeCall(() => localStorage.setItem(LS + 'schema', CACHE_TIER), undefined, 'enforceCacheSchema:write');
+    if (stored !== null || keys.length) {
+      LOG(stored === null
+        ? `cache sans palier — vidé par sécurité (${keys.length} entrées), estampillé T${CACHE_TIER}`
+        : `cache au format T${stored}, script en T${CACHE_TIER} — ${keys.length} entrées invalidées`);
+    }
+  }
+  enforceCacheSchema();
+
+  // ─── Réglages modifiables depuis l'interface ────────────────
+  // Les valeurs ci-dessus restent les défauts ; celles enregistrées les écrasent.
+  // Seuls ces champs sont éditables : les autres (locale, preferredAudio…) touchent
+  // au format du cache et méritent une modification volontaire du fichier.
+  // Chaque réglage porte son IMPACT, pour relancer juste ce qu'il faut au lieu de tout
+  // rescanner (ta contrainte : pas de requête inutile) :
+  //  'suivi'   → invalide le cache épisodes + relance le scan principal
+  //  'discover'→ vide les résultats Découverte + relance la recherche
+  //  'history' → invalide l'historique (rescanné au besoin)
+  //  'display' → simple ré-affichage, AUCUNE requête
+  const SETTINGS_SCHEMA = [
+    { key: 'watchedRatio', label: 'Épisode compté comme vu à partir de', type: 'percent',
+      min: 50, max: 100, step: 1, help: 'Crunchyroll ne marque pas toujours la fin d’un épisode.',
+      impact: 'suivi' },
+    { key: 'refreshMinutes', label: 'Rafraîchissement automatique', type: 'int', min: 1, max: 240, unit: 'min',
+      help: 'Fréquence de mise à jour en arrière-plan pendant que le panneau est ouvert.',
+      impact: 'display' },
+    { key: 'airingWindowDays', label: 'Considérée « en diffusion » si un épisode date de moins de',
+      type: 'int', min: 1, max: 120, unit: 'j',
+      help: 'Au-delà de ce délai sans nouvel épisode, la série est traitée comme terminée ou en pause.',
+      impact: 'suivi' },
+    { key: 'concurrency', label: 'Requêtes simultanées (plafond)', type: 'int', min: 1, max: 10,
+      help: 'Plafond. Le script part de cette valeur, redescend seul si Crunchyroll renvoie une erreur 429, puis remonte progressivement.',
+      impact: 'display' },
+    { key: 'discoverHistoryCacheHours', label: 'Fraîcheur de l’historique',
+      type: 'int', min: 0, max: 24, unit: 'h',
+      help: 'Utilisé par Découverte et Hors listes. Le scan étant devenu incrémental (1 à 2 requêtes), 1 h est peu coûteux. Monte à 6 si tu veux économiser des requêtes.',
+      impact: 'history' },
+    { key: 'anilistSchedule', label: 'Total prévu, fin de saison + genres enrichis (AniList)', type: 'bool',
+      help: 'Va chercher sur AniList le nombre total d\'épisodes annoncé et la date du dernier épisode (séries en diffusion), ainsi que les genres détaillés de toutes tes séries suivies — Crunchyroll n\'en donne souvent que 1 ou 2, AniList complète. Sert aussi de repli genres pour Hors listes/Stats. Interrupteur général : à false, plus aucune requête AniList.',
+      impact: 'anilist' },
+    { key: 'openInApp', label: 'Forcer l’ouverture dans l’appli Crunchyroll (Android)', type: 'bool',
+      help: 'Sur téléphone, la vidéo ne se lance pas dans une PWA/un onglet de navigateur : ce réglage redirige les liens série et épisode vers l’appli Crunchyroll installée (repli automatique sur le navigateur si elle est absente). Sans effet sur iOS/desktop.',
+      impact: 'display' },
+    { key: 'tvMode', label: 'Mode TV / salon', type: 'bool',
+      help: 'Gros caractères lisibles à 3 m, marges anti-rognage et repères de sélection très visibles pour la télécommande. Détecté automatiquement sur un grand écran sans souris ; ce réglage force l’affichage.',
+      impact: 'display' },
+    { key: 'showSearchBar', label: 'Toujours afficher la barre de recherche', type: 'bool',
+      help: 'Masquée par défaut pour libérer de la place en haut. Un tap sur 🔍 dans l’en-tête l’affiche ponctuellement ; ce réglage la garde affichée en permanence.',
+      impact: 'display' },
+    { key: 'prefetchTabs', label: 'Précharger « Hors listes » en arrière-plan', type: 'bool',
+      help: 'Prépare l’onglet pendant que tu lis, pour qu’il s’ouvre instantanément.',
+      impact: 'display' },
+    { key: 'playheadBatch', label: 'GUID par requête de progression', type: 'int', min: 10, max: 500,
+      help: 'Moins de requêtes = plus rapide. Vérifie avec resteAVoir.probeBatch(N) avant de monter.',
+      impact: 'display' },
+    { key: 'hideMovies', label: 'Masquer les films et one-shots', type: 'bool',
+      help: 'Crunchyroll range les films dans une « série » à 1 épisode.', impact: 'suivi' },
+    { key: 'showHero', label: 'Carte « à la une » en haut de Reste à voir', type: 'bool',
+      help: 'Met en avant, tout en haut, la série commencée la plus proche de la fin. Masquée par défaut pour aller droit à la liste.',
+      impact: 'suivi' },
+    { key: 'cacheHoursAiring', label: 'Cache des séries en cours', type: 'int', min: 0, max: 72, unit: 'h',
+      help: 'Durée avant de retélécharger les infos des séries en diffusion.',
+      impact: 'display' },
+    { key: 'cacheHoursFinished', label: 'Cache des séries terminées', type: 'int', min: 1, max: 720, unit: 'h',
+      help: 'Elles ne changent presque plus : un cache long est sûr et économe en requêtes.',
+      impact: 'display' },
+    { key: 'discoverMinRating', label: 'Note minimale', type: 'float', min: 0, max: 5, step: 0.5,
+      help: 'Écarte les séries en dessous de cette note. 0 = aucun filtre de note.',
+      impact: 'discover' },
+    { key: 'discoverMaxSeasons', label: 'Saisons maximum', type: 'int', min: 1, max: 20, unit: 'saisons',
+      help: 'Écarte les séries trop longues à rattraper.',
+      impact: 'discover' },
+    { key: 'discoverTarget', label: 'Nombre de pépites visées', type: 'int', min: 5, max: 100,
+      help: 'Combien de suggestions viser dans l’onglet Découverte.',
+      impact: 'discover' },
+    { key: 'legendaryTarget', label: '🎲 Dé légendaire — nombre visé', type: 'int', min: 3, max: 50,
+      help: 'Combien de pépites LÉGENDAIRES (3 signaux ou plus) viser quand tu lances le dé légendaire.',
+      impact: 'discover' },
+    { key: 'legendaryMaxPages', label: '🎲 Dé légendaire — profondeur de scan', type: 'int', min: 12, max: 100, unit: 'pages',
+      help: 'Jusqu’où le dé légendaire scanne le classement popularité pour dénicher ses pépites. Plus haut = plus long, mais plus de chances de trouver assez de légendaires.',
+      impact: 'discover' },
+    { key: 'discoverExcludeCategories', label: 'Genres exclus (Découverte & Nouveautés)',
+      type: 'list',
+      help: 'Séparés par des virgules. S’applique à Découverte (relance une recherche) et au bloc Nouveautés du Calendrier (relance au prochain rafraîchissement). « hentai » y est exclu par défaut.',
+      impact: 'discover' },
+    { key: 'defaultListId', label: 'Liste de destination par défaut (bouton + dans Découverte)',
+      type: 'listselect',
+      help: 'Tes Crunchylists sont détectées automatiquement (watchlist exclue). Sans choix ici, la première liste détectée est utilisée.',
+      impact: 'discover' },
+    { key: 'askListEachTime', label: 'Demander la liste à chaque ajout depuis Découverte', type: 'bool',
+      help: 'Désactivé : le bouton + ajoute directement à la liste par défaut ci-dessus. Activé : un choix de liste est proposé à chaque ajout.',
+      impact: 'discover' },
+    { key: 'discoverNewPremieres', label: 'Calendrier — bloc « Nouveautés » (épisode 1 tout juste sorti)',
+      type: 'bool',
+      help: 'Repère, via AniList, les séries dont l’épisode 1 vient de sortir et l’épisode 2 pas encore — une façon de découvrir les nouveaux simulcasts. Les cartes renvoient vers une recherche Crunchyroll (pas de fiche précise : AniList ne connaît pas les identifiants Crunchyroll). Si tu ne l’ajoutes pas à une liste, une série disparaît d’elle-même du bloc dès que l’épisode 2 sort.',
+      impact: 'newpremieres' },
+    { key: 'newPremieresWindowDays', label: 'Nouveautés — « déjà sorti » depuis moins de',
+      type: 'int', min: 1, max: 60, unit: 'j',
+      help: 'Une série quitte le bloc une fois ce délai dépassé (ou dès que l’épisode 2 sort, ce qui arrive en premier).',
+      impact: 'newpremieres' },
+    { key: 'newPremieresUpcomingDays', label: 'Nouveautés — « à venir » dans moins de',
+      type: 'int', min: 1, max: 60, unit: 'j',
+      help: 'Épisode 1 pas encore sorti mais prévu dans ce délai (badge « Bientôt »).',
+      impact: 'newpremieres' },
+    { key: 'newPremieresTarget', label: 'Nouveautés — nombre de cartes affichées',
+      type: 'int', min: 1, max: 60, unit: 'cartes',
+      impact: 'newpremieres' },
+    { key: 'historyMaxEntries', label: 'Historique — entrées maximum scannées',
+      type: 'int', min: 100, max: 20000, step: 100,
+      help: 'L\'API sert ~100 entrées par requête. 8000 entrées ≈ 80 requêtes. Plus haut = plus complet mais plus long.',
+      impact: 'history' },
+  ];
+  const SETTINGS_KEYS = SETTINGS_SCHEMA.map((s) => s.key);
+  const CFG_DEFAULTS = { ...CFG };
+
+  function applySettings() {
+    const saved = (APP_STATE.settings && typeof APP_STATE.settings === 'object') ? APP_STATE.settings : {};
+    for (const k of SETTINGS_KEYS) {
+      if (saved[k] !== undefined) CFG[k] = saved[k];
+    }
+  }
+  function saveSettings(patch) {
+    if (!APP_STATE.settings || typeof APP_STATE.settings !== 'object') APP_STATE.settings = {};
+    Object.assign(APP_STATE.settings, patch);
+    persistState(APP_STATE);
+    Object.assign(CFG, patch);
+  }
+  function resetSettings() {
+    APP_STATE.settings = {};
+    persistState(APP_STATE);
+    Object.assign(CFG, CFG_DEFAULTS);
+  }
+  applySettings();
+
+  // ─── Séries ignorées (masquées sans être marquées vues) ─────
+  // Table id → { titre, source }. La source ('watchlist' ou 'discover') distingue
+  // les exclusions faites depuis Reste à voir/Hors listes de celles faites depuis
+  // Découverte : chaque onglet a sa propre vue "Ignorées" pour restaurer, sans quoi
+  // une pépite ignorée depuis Découverte (absente de la watchlist) ne réapparaît
+  // nulle part une fois exclue des résultats de recherche.
+  let IGNORED = new Map();
+  safeCall(() => {
+    const raw = APP_STATE.ignored;
+    if (Array.isArray(raw)) {
+      // Format < 2.8.2 : simple liste d'identifiants, titres et source inconnus.
+      for (const id of raw) IGNORED.set(id, { title: '', source: 'watchlist' });
+    } else if (raw && typeof raw === 'object') {
+      for (const [id, val] of Object.entries(raw)) {
+        if (val && typeof val === 'object') {
+          // Format ≥ 2.12 : { title, source }. Format ≥ 2.87 : + { poster, synopsis }
+          // pour pouvoir les afficher dans les vues « Ignorées » sans refaire d'appel réseau.
+          IGNORED.set(id, {
+            title: val.title || '', source: val.source || 'watchlist',
+            poster: val.poster || '', synopsis: val.synopsis || '',
+          });
+        } else {
+          // Format 2.8.2–2.11 : titre en simple chaîne, source inconnue → on suppose
+          // watchlist (comportement historique) pour ne rien perdre à la migration.
+          IGNORED.set(id, { title: val || '', source: 'watchlist' });
+        }
+      }
+    }
+  }, undefined, 'ignored:load');
+
+  function saveIgnored() {
+    const obj = {};
+    for (const [id, v] of IGNORED) obj[id] = v;
+    APP_STATE.ignored = obj;
+    persistState(APP_STATE);
+  }
+  function toggleIgnored(id, title, source, poster, synopsis) {
+    if (IGNORED.has(id)) IGNORED.delete(id);
+    else IGNORED.set(id, {
+      title: title || '', source: source || 'watchlist',
+      poster: poster || '', synopsis: synopsis || '',
+    });
+    saveIgnored();
+  }
+  function ignoredCount(source) {
+    let n = 0;
+    for (const v of IGNORED.values()) if (v.source === source) n++;
+    return n;
+  }
+
+  // ─── Backfill jaquette/résumé pour les séries ignorées avant la 2.87 ────────
+  // Avant cette version, IGNORED ne gardait que { title, source } : passée cette mise
+  // à jour, jaquette et résumé restent vides pour les entrées déjà ignorées tant
+  // qu'on ne les a pas réactualisées. Ici on comble ça après coup, en best-effort :
+  // - lazy — déclenché seulement à l'ouverture d'une vue qui en a besoin (Réglages ou
+  //   Découverte → Ignorées), jamais au chargement, pour ne rien demander à des gens
+  //   qui n'ouvrent jamais ces panneaux ;
+  // - silencieux — un échec par série (série retirée du catalogue, etc.) ne bloque
+  //   pas les autres, et n'est pas retenté dans la même session (BACKFILL_TRIED).
+  const BACKFILL_TRIED = new Set();
+  let backfillRunning = false;
+  async function backfillIgnoredMeta() {
+    if (backfillRunning) return;
+    const missing = [...IGNORED.entries()].filter(([id, v]) => !v.poster && !BACKFILL_TRIED.has(id));
+    if (!missing.length) return;
+    backfillRunning = true;
+    try {
+      await pool(missing, async ([id]) => {
+        BACKFILL_TRIED.add(id);
+        try {
+          const panel = await getSeriesPanel(id);
+          const v = IGNORED.get(id);       // peut avoir été réaffichée entre-temps
+          if (!panel || !v) return;
+          v.poster = posterOf(panel);
+          v.synopsis = panel.description || '';
+        } catch (e) { safeCall.log(e, 'backfillIgnoredMeta:' + id); }
+      }, Math.max(2, Math.min(4, CFG.concurrency)));
+      saveIgnored();
+      forceRender();
+    } finally {
+      backfillRunning = false;
+    }
+  }
+
+  // ─── Empreinte des dates de diffusion à la dernière visite ──
+  // Sert à repérer les séries qui ont reçu un épisode depuis. L'empreinte n'est
+  // mise à jour qu'à la FERMETURE du panneau : un rafraîchissement auto pendant
+  // que tu regardes ne doit pas effacer les pastilles sous tes yeux.
+  function loadAirSnapshot() {
+    return (APP_STATE.airsnap && typeof APP_STATE.airsnap === 'object') ? APP_STATE.airsnap : {};
+  }
+  let AIR_SNAP = loadAirSnapshot();
+  function markNew(list) {
+    for (const s of list) {
+      const prev = AIR_SNAP[s.id];
+      // Première rencontre : pas de pastille, sinon tout serait « nouveau » au premier lancement.
+      s.isNew = prev != null && s.maxAir != null && s.maxAir > prev;
+    }
+    return list;
+  }
+  function commitAirSnapshot() {
+    const snap = { ...AIR_SNAP };
+    for (const s of [...STATE.series, ...STATE.orphan.series]) {
+      if (s.maxAir != null) snap[s.id] = s.maxAir;
+    }
+    AIR_SNAP = snap;
+    APP_STATE.airsnap = snap;
+    persistState(APP_STATE);
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  1. Session — token capté OU fabriqué, et surtout rafraîchi
+  // ─────────────────────────────────────────────────────────────
+  // Un token Crunchyroll expire en ~5 min. Le bug « réessayer » sur mobile venait de
+  // là : on gardait le token capté sans jamais le renouveler, et au retour sur
+  // l'onglet il était périmé. Ici on date chaque token, on le renouvelle avant
+  // expiration, et un 401 déclenche un vrai renouvellement plutôt qu'un abandon.
+  let sniffedToken = null;
+  let token = null;
+  let tokenExp = 0;            // timestamp d'expiration estimé (ms)
+  let refreshing = null;      // promesse de renouvellement en cours (évite les doublons)
+
+  function readAuth(headers) {
+    if (!headers) return null;
+    return safeCall(() => {
+      if (typeof headers.get === 'function') return headers.get('authorization');
+      if (Array.isArray(headers)) {
+        const h = headers.find((p) => String(p[0]).toLowerCase() === 'authorization');
+        return h ? h[1] : null;
+      }
+      for (const k of Object.keys(headers)) {
+        if (k.toLowerCase() === 'authorization') return headers[k];
+      }
+      return null;
+    }, null, 'readAuth');
+  }
+
+  // Capte le token que l'application émet, avec une expiration prudente (4 min) :
+  // on ne connaît pas la vraie durée, on renouvelle donc un peu en avance.
+  function captureToken(a) {
+    if (a && /^Bearer\s/i.test(a) && a !== sniffedToken) {
+      sniffedToken = a;
+      token = a;
+      tokenExp = Date.now() + 4 * 60e3;
+    }
+  }
+
+  const origFetch = window.fetch;
+  window.fetch = function (input, init) {
+    safeCall(() => captureToken(readAuth((init && init.headers) || (input && input.headers))), undefined, 'fetch:captureToken');
+    return origFetch.apply(this, arguments);
+  };
+
+  const origSetHeader = XMLHttpRequest.prototype.setRequestHeader;
+  XMLHttpRequest.prototype.setRequestHeader = function (k, v) {
+    safeCall(() => { if (String(k).toLowerCase() === 'authorization') captureToken(v); }, undefined, 'xhr:captureToken');
+    return origSetHeader.apply(this, arguments);
+  };
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // Fabrique un token depuis le cookie de session (etp_rt). Contrairement à l'écoute
+  // passive, ça marche À LA DEMANDE — même si la page n'a rien émis récemment, ce qui
+  // est justement le cas au retour sur l'onglet mobile. On lit aussi expires_in pour
+  // dater précisément le token.
+  async function tokenFromCookie() {
+    for (const basic of ['Y3Jfd2ViOg==', 'bm9haWhkZXZtXzZpeWcwYThsMHE6']) {
+      try {
+        const r = await RAW_FETCH('https://www.crunchyroll.com/auth/v1/token', {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            Authorization: 'Basic ' + basic,
+          },
+          body: 'grant_type=etp_rt_cookie',
+        });
+        if (!r.ok) continue;
+        const j = await r.json();
+        if (j.access_token) {
+          const ttl = (j.expires_in ? j.expires_in : 300) * 1000;
+          tokenExp = Date.now() + Math.max(30e3, ttl - 30e3);   // marge de 30 s
+          LOG('token obtenu via /auth/v1/token (valide', Math.round(ttl / 1000), 's)');
+          return `${j.token_type || 'Bearer'} ${j.access_token}`;
+        }
+      } catch (e) { safeCall.log(e, 'tokenFromCookie'); }
+    }
+    return null;
+  }
+
+  // (#3) Canal le plus fiable sur mobile : lire le token là où l'application le range
+  // elle-même. Crunchyroll conserve sa session dans IndexedDB et/ou localStorage ;
+  // on y pioche l'access_token sans dépendre d'une requête de la page.
+  function scanForToken(obj, depth = 0) {
+    if (!obj || depth > 4) return null;
+    if (typeof obj === 'string') {
+      // Un access_token JWT commence par "ey" et fait plus de 40 caractères.
+      if (/^ey[\w-]+\.[\w-]+\.[\w-]+$/.test(obj)) return obj;
+      return safeCall(() => {
+        const p = JSON.parse(obj);
+        return (p && typeof p === 'object') ? scanForToken(p, depth + 1) : null;
+      }, null, 'scanForToken');
+    }
+    if (typeof obj !== 'object') return null;
+    // Champs les plus probables d'abord.
+    for (const k of ['access_token', 'accessToken', 'token']) {
+      if (typeof obj[k] === 'string' && obj[k].length > 40) return obj[k];
+    }
+    for (const v of Object.values(obj)) {
+      const found = scanForToken(v, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  function tokenFromLocalStorage() {
+    return safeCall(() => {
+      for (const k of Object.keys(localStorage)) {
+        if (!/cr|auth|token|session|etp/i.test(k)) continue;
+        const found = scanForToken(localStorage.getItem(k));
+        if (found) return `Bearer ${found}`;
+      }
+      return null;
+    }, null, 'tokenFromLocalStorage');
+  }
+
+  function tokenFromIndexedDB() {
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (v) => { if (!done) { done = true; resolve(v); } };
+      setTimeout(() => finish(null), 1500);   // ne jamais bloquer le chargement
+      try {
+        if (!indexedDB.databases) { finish(null); return; }
+        indexedDB.databases().then((dbs) => {
+          const targets = (dbs || []).filter((d) => /cr|auth|firebase|session/i.test(d.name || ''));
+          if (!targets.length) { finish(null); return; }
+          let pending = targets.length;
+          for (const meta of targets) {
+            let req;
+            try { req = indexedDB.open(meta.name); } catch (_) { if (--pending === 0) finish(null); continue; }
+            req.onerror = () => { if (--pending === 0) finish(null); };
+            req.onsuccess = () => {
+              const db = req.result;
+              let stores;
+              try { stores = [...db.objectStoreNames]; } catch (_) { stores = []; }
+              if (!stores.length) { db.close(); if (--pending === 0) finish(null); return; }
+              try {
+                const tx = db.transaction(stores, 'readonly');
+                let sPending = stores.length;
+                for (const name of stores) {
+                  const all = tx.objectStore(name).getAll();
+                  all.onsuccess = () => {
+                    const found = scanForToken(all.result);
+                    if (found) finish(`Bearer ${found}`);
+                    if (--sPending === 0) { db.close(); if (--pending === 0) finish(null); }
+                  };
+                  all.onerror = () => { if (--sPending === 0) { db.close(); if (--pending === 0) finish(null); } };
+                }
+              } catch (_) { db.close(); if (--pending === 0) finish(null); }
+            };
+          }
+        }).catch(() => finish(null));
+      } catch (_) { finish(null); }
+    });
+  }
+
+  // Réveille l'application Crunchyroll pour qu'elle émette un token. Sur mobile, quand
+  // le cookie /auth/v1/token est refusé, c'est le SEUL moyen d'obtenir un token frais :
+  // on déclenche un appel que l'app signera, et on capte le token au passage.
+  async function pokeApp() {
+    const before = sniffedToken;
+    // Ces endpoints internes provoquent une requête authentifiée de l'app.
+    safeCall(() => {
+      RAW_FETCH('https://www.crunchyroll.com/content/v2/discover/account_info', {
+        credentials: 'include',
+      }).catch(() => {});
+    }, undefined, 'pokeApp');
+    // Laisse aussi l'app respirer : un simple changement de visibilité la fait souvent
+    // renouveler son token.
+    for (let i = 0; i < 40; i++) {
+      await sleep(200);
+      if (sniffedToken && sniffedToken !== before) return sniffedToken;
+    }
+    return null;
+  }
+
+  // Vérifie qu'un token fonctionne vraiment, plutôt que de le supposer valide.
+  async function tokenWorks(t) {
+    try {
+      const r = await RAW_FETCH('https://www.crunchyroll.com/accounts/v1/me', {
+        credentials: 'include',
+        headers: { Authorization: t, Accept: 'application/json' },
+      });
+      return r.ok;
+    } catch (_) { return false; }
+  }
+
+  // Force un nouveau token. Coalesce les appels concurrents : si dix requêtes prennent
+  // un 401 en même temps, un seul renouvellement part, les autres l'attendent.
+  function refreshToken() {
+    if (refreshing) return refreshing;
+    refreshing = (async () => {
+      // 1. le cookie : actif, ne dépend pas de la page — mais souvent refusé sur mobile
+      const fromCookie = await tokenFromCookie();
+      if (fromCookie && await tokenWorks(fromCookie)) { token = fromCookie; return token; }
+
+      // 2. un token fraîchement capté de la page, s'il est arrivé entre-temps
+      if (sniffedToken && sniffedToken !== token && await tokenWorks(sniffedToken)) {
+        token = sniffedToken; tokenExp = Date.now() + 4 * 60e3; return token;
+      }
+
+      // 3. (#3) le stockage interne de l'app : le canal le plus fiable sur mobile
+      const stored = tokenFromLocalStorage() || await tokenFromIndexedDB();
+      if (stored && await tokenWorks(stored)) {
+        token = stored; tokenExp = Date.now() + 4 * 60e3; return token;
+      }
+
+      // 4. réveiller l'app pour qu'elle en émette un neuf
+      const poked = await pokeApp();
+      if (poked && await tokenWorks(poked)) {
+        token = poked; tokenExp = Date.now() + 4 * 60e3; return token;
+      }
+
+      // 5. dernier recours : le token capté, mais SEULEMENT s'il répond encore. Renvoyer
+      //    un token mort ici (comme avant) déclenchait des 401 en boucle, avalés au fond
+      //    des vagues de requêtes : l'appli semblait « ne plus rien faire », sans erreur.
+      //    On renonce proprement → ensureToken lève une erreur VISIBLE (bannière + bouton).
+      if (sniffedToken && await tokenWorks(sniffedToken)) {
+        token = sniffedToken; tokenExp = Date.now() + 60e3; return token;
+      }
+      token = null; tokenExp = 0;
+      return null;
+    })().finally(() => { refreshing = null; });
+    return refreshing;
+  }
+
+  // Détection ACTIVE de la « perte d'efficacité » du token (typique du retour d'arrière-
+  // plan mobile) : au lieu d'attendre un 401 souvent avalé, on teste si le token répond
+  // encore et on le remplace immédiatement sinon. Coalescé, comme refreshToken.
+  let revalidating = null;
+  function revalidateToken() {
+    if (revalidating) return revalidating;
+    const prevSniff = sniffedToken;
+    revalidating = (async () => {
+      try {
+        // 1. le token courant fonctionne-t-il toujours ?
+        if (token && await tokenWorks(token)) { tokenExp = Math.max(tokenExp, Date.now() + 60e3); return token; }
+        // 2. courte fenêtre : au réveil, l'app Crunchyroll refait souvent des requêtes et
+        //    émet un token frais qu'on capte. On l'attend brièvement avant de forcer.
+        for (let i = 0; i < 8; i++) {
+          await sleep(200);
+          if (sniffedToken && sniffedToken !== prevSniff && sniffedToken !== token
+              && await tokenWorks(sniffedToken)) {
+            token = sniffedToken; tokenExp = Date.now() + 4 * 60e3; return token;
+          }
+        }
+        // 3. renouvellement actif complet (cookie / stockage interne / réveil de l'app).
+        token = null; tokenExp = 0;
+        return await refreshToken();
+      } finally { revalidating = null; }
+    })();
+    return revalidating;
+  }
+
+  // ─── Filet anti « mort aveugle » ────────────────────────────────────────────
+  // Dès qu'une requête authentifiée échoue sans récupération possible, on lève un signal
+  // GLOBAL (sessionLost) au lieu de compter sur chaque appelant : même si l'erreur est
+  // avalée au fond d'une vague parallèle de requêtes, la bannière ET la reconnexion, elles,
+  // se déclenchent. C'est ce qui supprime le « ça ne marche plus mais rien ne le montre ».
+  let sessionLost = false;
+  let recovering = false;
+
+  function markSessionLost() {
+    if (sessionLost) return;
+    sessionLost = true;
+    STATE.reconnecting = true;   // bannière douce « reconnexion… » (pas l'erreur dure)
+    STATE.error = null;
+    LOG('session perdue — reconnexion automatique lancée');
+    safeCall(render, undefined, 'markSessionLost:render');
+    startRecoveryLoop();
+  }
+
+  // Boucle de reconnexion : réessaie de revalider le token jusqu'à ce que ça remarche, puis
+  // relance ce qui était affiché. C'est ce qui supprime le « je dois recharger la page ».
+  // Backoff plafonné, en pause tant que l'onglet est en arrière-plan, bascule en erreur
+  // dure (avec bouton recharger) seulement après épuisement des tentatives.
+  async function startRecoveryLoop() {
+    if (recovering) return;
+    recovering = true;
+    let tries = 0;
+    try {
+      while (sessionLost && tries < 20) {
+        if (document.visibilityState !== 'visible') { await sleep(1500); continue; }
+        tries++;
+        let t = null;
+        try { t = await revalidateToken(); } catch (_) {}
+        if (t && await tokenWorks(t)) {
+          sessionLost = false; STATE.reconnecting = false; STATE.error = null;
+          LOG('session rétablie automatiquement après', tries, 'tentative(s)');
+          safeCall(render, undefined, 'recovery:render');
+          if (root && root.style.display !== 'none') safeCall(refreshActive, undefined, 'recovery:refresh');
+          return;
+        }
+        await sleep(Math.min(1000 * tries, 5000));
+      }
+      if (sessionLost) {
+        STATE.reconnecting = false;
+        STATE.error = 'Session Crunchyroll perdue. Touche « Recharger la page » pour te reconnecter.';
+        safeCall(render, undefined, 'recovery:giveup');
+      }
+    } finally { recovering = false; }
+  }
+
+  async function ensureToken(force) {
+    if (!force && token && Date.now() < tokenExp) return token;
+    const t = await refreshToken();
+    if (t) return t;
+    markSessionLost();   // signal global + reconnexion auto : jamais d'échec muet
+    throw new Error('Session Crunchyroll introuvable. Reconnexion automatique en cours…');
+  }
+
+  // Regroupe les URL variables sous un nom stable, pour agréger les temps.
+  function endpointKey(path) {
+    if (path.includes('/playheads')) return 'playheads';
+    if (path.includes('/episodes')) return 'episodes';
+    if (path.includes('/seasons')) return 'seasons';
+    if (path.includes('/watchlist')) return 'watchlist';
+    if (path.includes('/custom-lists')) return 'custom-lists';
+    if (path.includes('/rating/')) return 'notes';
+    if (path.includes('/accounts/v1/me')) return 'profil';
+    if (path.includes('/watch-history')) return 'historique';
+    if (path.includes('/browse')) return 'popularité';
+    if (path.includes('/cms/series/')) return 'série';
+    return path;
+  }
+
+  let inFlight = 0;
+  // Pour distinguer MES appels de ceux de l'application Crunchyroll dans les
+  // mesures de performance du navigateur.
+  const OUR_URLS = new Set();
+  safeCall(() => performance.setResourceTimingBufferSize(2000), undefined, 'resourceTimingBufferSize');
+
+  async function api(path, params = {}, attempt = 0) {
+    await ensureToken();
+    const url = new URL(path, 'https://www.crunchyroll.com');
+    for (const [k, v] of Object.entries(params)) {
+      if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, v);
+    }
+    STATS.requests++;
+    OUR_URLS.add(url.toString());
+    // Borne : sans ça, chaque appel retient son URL à vie (fuite lente sur une longue
+    // session). On garde les plus récentes — cohérent avec le buffer de resource timing.
+    if (OUR_URLS.size > 3000) {
+      const it = OUR_URLS.values();
+      for (let k = OUR_URLS.size - 3000; k > 0; k--) OUR_URLS.delete(it.next().value);
+    }
+    const key = endpointKey(path);
+    const t0 = performance.now();
+    inFlight++;
+    STATS.maxParallel = Math.max(STATS.maxParallel, inFlight);
+    let res;
+    // Timeout : sur mobile, une requête peut pendre sans jamais répondre ni échouer.
+    // Sans garde-fou, une seule requête figée bloque toute une vague parallèle (et donc
+    // le scan entier). On abandonne au-delà de 20 s et on réessaie.
+    const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(() => ctrl.abort(), 20000) : null;
+    try {
+      res = await RAW_FETCH(url.toString(), {
+        credentials: 'include',
+        headers: { Authorization: token, Accept: 'application/json' },
+        signal: ctrl ? ctrl.signal : undefined,
+      });
+    } catch (e) {
+      // Abandon (timeout) ou erreur réseau : on réessaie quelques fois avant d'abandonner.
+      if (attempt < 3) {
+        LOG(`requête ${key} échouée (${e.name === 'AbortError' ? 'timeout' : e.message}) — nouvel essai ${attempt + 1}`);
+        await sleep(500 * (attempt + 1));
+        return api(path, params, attempt + 1);
+      }
+      throw e;
+    } finally {
+      if (timer) clearTimeout(timer);
+      inFlight--;
+      const ms = performance.now() - t0;
+      const e = STATS.byEndpoint[key] || (STATS.byEndpoint[key] = { n: 0, ms: 0, max: 0, urlMax: 0 });
+      e.n++; e.ms += ms; e.max = Math.max(e.max, ms);
+      e.urlMax = Math.max(e.urlMax, url.toString().length);
+    }
+    if (res.status === 401) {
+      // Token expiré en cours de route. On tente un renouvellement actif ; si on n'obtient
+      // rien (ou si le 401 persiste après essais), on lève le SIGNAL GLOBAL de session
+      // perdue AVANT de propager l'erreur — ainsi, même avalée par une vague parallèle,
+      // la reconnexion automatique et la bannière partent quand même. Plus de mort muette.
+      if (attempt < 2) {
+        LOG(`401 sur ${key} — renouvellement du token (tentative ${attempt + 1})`);
+        token = null; tokenExp = 0;
+        const t = await refreshToken();
+        if (t) return api(path, params, attempt + 1);
+      }
+      markSessionLost();
+      throw new Error(`401 (session) sur ${path}`);
+    }
+    if (res.status === 429) {
+      STATS.rate429++;
+      paceOnThrottle();                     // on lève le pied tout de suite
+      if (attempt < 4) {
+        await sleep(800 * Math.pow(2, attempt));
+        return api(path, params, attempt + 1);
+      }
+      throw new Error(`429 (limite atteinte) sur ${path}`);
+    }
+    if (!res.ok) throw new Error(`${res.status} sur ${path}`);
+    paceOnSuccess();
+    const json = await res.json();
+    // (#2) Détection de changement d'API : les endpoints de collection renvoient un
+    // tableau `data`. S'il disparaît, l'API a changé de forme — on le dit clairement
+    // plutôt que de laisser une erreur surgir dix lignes plus loin, sans contexte.
+    if (/\/(watchlist|playheads|episodes|seasons|browse|custom-lists)/.test(path)
+        && json && !Array.isArray(json.data)) {
+      LOG(`⚠ forme inattendue sur ${key} : "data" absent ou non-tableau`, json);
+      STATE.apiWarning = `L'API Crunchyroll « ${key} » a changé de forme. ` +
+        `Le script a peut-être besoin d'une mise à jour.`;
+    }
+    return json;
+  }
+
+  // Écriture (POST) authentifiée — même token/erreurs que api(), mais corps JSON et
+  // pas de paramètre de requête. Utilisée pour l'ajout d'une série à une Crunchylist
+  // (voir addToCustomList) ; 204 (pas de corps) et 200/201 (corps JSON) sont tous deux
+  // traités comme un succès.
+  async function apiWrite(path, body, attempt = 0) {
+    await ensureToken();
+    const url = new URL(path, 'https://www.crunchyroll.com');
+    const key = endpointKey(path);
+    let res;
+    const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(() => ctrl.abort(), 20000) : null;
+    try {
+      res = await RAW_FETCH(url.toString(), {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          Authorization: token,
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body || {}),
+        signal: ctrl ? ctrl.signal : undefined,
+      });
+    } catch (e) {
+      if (attempt < 2) {
+        LOG(`écriture ${key} échouée (${e.name === 'AbortError' ? 'timeout' : e.message}) — nouvel essai ${attempt + 1}`);
+        await sleep(500 * (attempt + 1));
+        return apiWrite(path, body, attempt + 1);
+      }
+      throw e;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+    if (res.status === 401) {
+      if (attempt < 2) {
+        token = null; tokenExp = 0;
+        const t = await refreshToken();
+        if (t) return apiWrite(path, body, attempt + 1);
+      }
+      markSessionLost();
+      throw new Error(`401 (session) sur ${path}`);
+    }
+    if (res.status === 429) {
+      if (attempt < 3) { await sleep(800 * Math.pow(2, attempt)); return apiWrite(path, body, attempt + 1); }
+      throw new Error(`429 (limite atteinte) sur ${path}`);
+    }
+    if (!res.ok) {
+      // 409/422 typiquement « déjà dans la liste » selon les endpoints Crunchyroll — on
+      // laisse l'appelant décider quoi en faire plutôt que de masquer l'info ici.
+      let detail = '';
+      try { detail = await res.text(); } catch (_) { /* corps illisible, tant pis */ }
+      const err = new Error(`${res.status} sur ${path}${detail ? ` — ${detail.slice(0, 200)}` : ''}`);
+      err.status = res.status;
+      throw err;
+    }
+    if (res.status === 204) return null;
+    try { return await res.json(); } catch (_) { return null; }
+  }
+
+  // Ajoute une série à une Crunchylist (endpoint non documenté officiellement, identifié
+  // par rétro-ingénierie communautaire du client web Crunchyroll — POST content_id sur
+  // /content/v2/{accountId}/custom-lists/{listId}). 409 traité comme un succès silencieux :
+  // la série est déjà dans la liste, l'effet recherché par l'utilisateur est déjà atteint.
+  async function addToCustomList(listId, seriesId) {
+    const accountId = await getAccountId();
+    try {
+      await apiWrite(`/content/v2/${accountId}/custom-lists/${listId}`, { content_id: seriesId });
+      return true;
+    } catch (e) {
+      if (e && e.status === 409) return true;
+      throw e;
+    }
+  }
+
+  // Orchestre un ajout depuis un bouton de Découverte : état visuel busy → done/erreur,
+  // disparition de la carte (via STATE.addedToList, lu par visibleDiscover), et toast.
+  async function handleAddToList(seriesId, title, listId) {
+    if (!listId) {
+      showToast('✗ Aucune liste détectée — ouvre les réglages pour vérifier tes Crunchylists');
+      return;
+    }
+    STATE.addingId = seriesId;
+    forceRender();
+    try {
+      await addToCustomList(listId, seriesId);
+      STATE.addedToList.add(seriesId);
+      const listTitle = (STATE.myLists.items.find((l) => l.id === listId) || {}).title || 'ta liste';
+      showToast(`✓ ${title || 'Série'} ajoutée à « ${listTitle} »`);
+    } catch (e) {
+      console.warn('[reste-à-voir] ajout à la liste échoué', e);
+      showToast('✗ Ajout impossible — réessaie dans un instant');
+    } finally {
+      STATE.addingId = null;
+      forceRender();
+    }
+  }
+
+  // ─── Concurrence ADAPTATIVE ─────────────────────────────────────────────────
+  // La concurrence réglée par l'utilisateur devient un PLAFOND, pas une constante fixe :
+  // on démarre à cette valeur, on redescend d'un cran à chaque 429, puis on remonte
+  // après une série de requêtes sans incident. Objectif : ne plus s'effondrer sur une
+  // limitation passagère, sans jamais dépasser ce que l'utilisateur a autorisé.
+  // Note : un pool en cours garde la concurrence qu'il avait au démarrage ; le nouveau
+  // rythme s'applique au pool suivant.
+  const PACE = { limit: CFG.concurrency, ok: 0, floor: 2 };
+  function paceLimit() {
+    const ceiling = Math.max(1, CFG.concurrency);
+    return Math.max(1, Math.min(PACE.limit, ceiling));
+  }
+  function paceOnSuccess() {
+    // Après une série de requêtes sans 429, on s'autorise un cran de plus.
+    if (PACE.limit >= CFG.concurrency) return;
+    if (++PACE.ok >= 20) { PACE.ok = 0; PACE.limit++; LOG(`rythme : concurrence portée à ${PACE.limit}`); }
+  }
+  function paceOnThrottle() {
+    PACE.ok = 0;
+    if (PACE.limit > PACE.floor) {
+      PACE.limit = Math.max(PACE.floor, PACE.limit - 1);
+      LOG(`429 — concurrence réduite à ${PACE.limit}`);
+    }
+  }
+
+  async function pool(items, worker, limit = paceLimit(), onTick) {
+    const out = new Array(items.length);
+    let i = 0, done = 0;
+    async function run() {
+      while (i < items.length) {
+        const idx = i++;
+        try { out[idx] = await worker(items[idx], idx); }
+        catch (e) { out[idx] = null; console.warn('[reste-à-voir]', e); }
+        done++;
+        if (onTick) onTick(done, items.length);
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, run));
+    return out;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  2. Cache
+  // ─────────────────────────────────────────────────────────────
+  // Compteurs de diagnostic : on mesure au lieu de supposer.
+  const STATS = { hit: 0, miss: 0, requests: 0, rate429: 0, writeFail: 0, evicted: 0,
+    guids: 0, maxParallel: 0, byEndpoint: {} };
+
+  // Remise à zéro : byEndpoint est un objet, pas un compteur — le passer à 0
+  // casserait l'agrégation par endpoint.
+  function resetCounters() {
+    PACE.limit = Math.max(1, CFG.concurrency); PACE.ok = 0;
+    STATS.hit = STATS.miss = STATS.requests = STATS.rate429 = 0;
+    STATS.writeFail = STATS.evicted = STATS.guids = STATS.maxParallel = 0;
+    STATS.byEndpoint = {};
+    warnedQuota = false;
+  }
+
+  function lsBytes() {
+    let n = 0;
+    for (const k of Object.keys(localStorage)) {
+      if (!k.startsWith(LS)) continue;
+      n += k.length + (localStorage.getItem(k) || '').length;
+    }
+    return n * 2;                       // UTF-16 : 2 octets par caractère
+  }
+  const fmtBytes = (n) => n > 1e6 ? `${(n / 1e6).toFixed(1)} Mo` : `${Math.round(n / 1e3)} ko`;
+
+  // (16) Alerte proactive avant l'échec : la limite de ~5 Mo est une convention de
+  // navigateur, pas une valeur exposée par l'API — on l'estime donc en pratique.
+  // Dès 85 % atteints, on prévient et on purge un peu de cache de nous-même, au lieu
+  // d'attendre que setItem() échoue une première fois (et perde potentiellement des
+  // réglages avant que le mécanisme de retry n'existe pour ce point d'écriture).
+  const LS_QUOTA_ESTIMATE = 5 * 1024 * 1024;
+  let quotaWarnedProactively = false;
+  function checkQuota() {
+    const used = lsBytes();
+    if (used < LS_QUOTA_ESTIMATE * 0.85) { quotaWarnedProactively = false; return; }
+    if (quotaWarnedProactively) return;
+    quotaWarnedProactively = true;
+    const n = evictOldest(0.2);
+    LOG(`⚠ localStorage à ${Math.round((used / LS_QUOTA_ESTIMATE) * 100)}% (${fmtBytes(used)}) — purge préventive de ${n} entrées.`);
+    STATE.quotaWarning = `Cache proche de la limite du navigateur (${fmtBytes(used)} sur ~5 Mo) — ` +
+      `un nettoyage a été fait automatiquement.`;
+    forceRender();
+  }
+
+  // (19) Le cache episodes-par-série (`eps3:<id>`) vivait en une clé localStorage par
+  // série. Sur une watchlist de 100+ séries, ça fait autant de lectures synchrones +
+  // JSON.parse séparés à chaque vérification de fraîcheur — le genre de chose déjà
+  // consolidée ailleurs (réglages/filtres/ignorées/empreinte → STATE_KEY, cf. plus haut).
+  // Ici : un seul objet { [seriesId]: {ts, v} }, chargé une fois en mémoire, avec les
+  // écritures groupées (debounce) pour ne pas réécrire tout le blob à chaque série.
+  const EPS3_KEY = LS + 'eps3all';
+  let eps3Store = null;           // objet en mémoire, chargé paresseusement
+  let eps3Dirty = false;
+  let eps3FlushTimer = null;
+
+  function loadEps3Store() {
+    if (eps3Store) return eps3Store;
+    eps3Store = safeCall(() => JSON.parse(localStorage.getItem(EPS3_KEY) || '{}'), {}, 'eps3:load') || {};
+
+    // Migration depuis les anciennes clés individuelles `eps3:<id>`, si présentes
+    // (mise à jour depuis une version antérieure à cette consolidation).
+    const prefix = LS + 'eps3:';
+    const legacyKeys = Object.keys(localStorage).filter((k) => k.startsWith(prefix));
+    if (legacyKeys.length) {
+      for (const k of legacyKeys) {
+        const raw = safeCall(() => JSON.parse(localStorage.getItem(k)), null, 'eps3:migrate');
+        if (raw) eps3Store[k.slice(prefix.length)] = raw;
+        safeCall(() => localStorage.removeItem(k), undefined, 'eps3:migrate:cleanup');
+      }
+      LOG(`migration : ${legacyKeys.length} caches d'épisodes fusionnés dans une seule clé`);
+      eps3Dirty = true;
+      flushEps3Store();
+    }
+    return eps3Store;
+  }
+
+  function flushEps3Store() {
+    clearTimeout(eps3FlushTimer);
+    eps3FlushTimer = null;
+    if (!eps3Dirty || !eps3Store) return;
+    eps3Dirty = false;
+    try {
+      localStorage.setItem(EPS3_KEY, JSON.stringify(eps3Store));
+      checkQuota();
+    } catch (e) {
+      safeCall.log(e, 'eps3:flush');
+      evictOldest(0.25);
+      safeCall(() => localStorage.setItem(EPS3_KEY, JSON.stringify(eps3Store)), undefined, 'eps3:flush:retry');
+    }
+  }
+  function scheduleEps3Flush() {
+    eps3Dirty = true;
+    clearTimeout(eps3FlushTimer);
+    // 400 ms : le temps que les séries d'une même vague (pool concurrent) s'écrivent
+    // toutes avant de sérialiser le blob une seule fois, plutôt qu'une fois par série.
+    eps3FlushTimer = setTimeout(flushEps3Store, 400);
+  }
+  // Ne pas perdre les dernières écritures si l'onglet se ferme avant les 400 ms.
+  window.addEventListener('pagehide', flushEps3Store);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') flushEps3Store();
+  });
+
+  function eps3ReadRaw(seriesId) {
+    return loadEps3Store()[seriesId] || null;
+  }
+  function eps3Write(seriesId, v) {
+    loadEps3Store()[seriesId] = { ts: Date.now(), v };
+    scheduleEps3Flush();
+  }
+  // Purge les entrées les plus vieilles du blob eps3 (utilisé par evictOldest).
+  function eps3EvictOldest(fraction) {
+    const store = loadEps3Store();
+    const entries = Object.entries(store).sort((a, b) => (a[1].ts || 0) - (b[1].ts || 0));
+    const n = Math.ceil(entries.length * fraction);
+    for (let i = 0; i < n && i < entries.length; i++) delete store[entries[i][0]];
+    if (n > 0) { eps3Dirty = true; flushEps3Store(); }
+    return Math.min(n, entries.length);
+  }
+
+  function cacheReadRaw(key) {
+    try {
+      const raw = localStorage.getItem(LS + key);
+      return raw ? JSON.parse(raw) : null;
+    } catch (_) { return null; }
+  }
+  // Lecture SANS contrainte d'âge : sert au scan incrémental, qui repart de l'ancien
+  // résultat même expiré (il ne le fait pas confiance, il le complète).
+  function cacheGetStale(key) {
+    const o = cacheReadRaw(key);
+    return o ? o.v : null;
+  }
+
+  function cacheGet(key, maxAgeMs) {
+    const o = cacheReadRaw(key);
+    if (!o || Date.now() - o.ts > maxAgeMs) return null;
+    return o.v;
+  }
+
+  // Quota plein = plus AUCUNE écriture, donc plus aucun cache, donc tout se
+  // retélécharge à chaque fois. La lenteur s'installe alors progressivement,
+  // à mesure que le cache grossit. On purge les entrées les plus vieilles.
+  // (eps3: n'est plus une clé individuelle mais le blob consolidé ci-dessus,
+  // purgé en premier — c'est généralement le plus gros contributeur.)
+  const EVICTABLE = ['rating:', 'series:', 'series-en:', 'seasoncount:', 'snapshot', 'crmatch:'];
+  function evictOldest(fraction) {
+    let evicted = eps3EvictOldest(fraction);
+    const entries = [];
+    for (const k of Object.keys(localStorage)) {
+      if (!k.startsWith(LS)) continue;
+      if (!EVICTABLE.some((p) => k.startsWith(LS + p))) continue;
+      const ts = safeCall(() => (JSON.parse(localStorage.getItem(k)) || {}).ts || 0, 0, 'evictOldest');
+      entries.push([k, ts]);
+    }
+    entries.sort((a, b) => a[1] - b[1]);
+    const n = Math.max(evicted ? 0 : 1, Math.ceil(entries.length * fraction));
+    for (let i = 0; i < n && i < entries.length; i++) localStorage.removeItem(entries[i][0]);
+    evicted += Math.min(n, entries.length);
+    STATS.evicted += evicted;
+    return evicted;
+  }
+
+  let warnedQuota = false;
+  function cacheSet(key, v) {
+    const payload = JSON.stringify({ ts: Date.now(), v });
+    try {
+      localStorage.setItem(LS + key, payload);
+      checkQuota();
+      return true;
+    } catch (e) {
+      // Une seule tentative de purge, puis on réessaie.
+      const n = evictOldest(0.25);
+      if (!warnedQuota) {
+        warnedQuota = true;
+        LOG(`⚠ localStorage plein (${fmtBytes(lsBytes())}) — purge de ${n} entrées de cache.`);
+      }
+      try {
+        localStorage.setItem(LS + key, payload);
+        return true;
+      } catch (_) {
+        STATS.writeFail++;
+        return false;
+      }
+    }
+  }
+
+  // L'API met ~2,1 s par requête — pour l'application Crunchyroll comme pour ce script.
+  // Impossible d'aller plus vite. En revanche, on peut afficher le dernier état connu
+  // immédiatement et actualiser derrière. L'instantané est allégé : les GUID de versions
+  // audio (le gros du volume) ne servent qu'au calcul, jamais à l'affichage.
+  function snapshotSave() {
+    safeCall(() => {
+      cacheSet('snapshot', STATE.series.map((s) => ({
+        ...s,
+        episodes: s.episodes.map((e) => ({
+          n: e.n, season: e.season, title: e.title, dur: e.dur, seen: e.seen, started: e.started,
+        })),
+        next: s.next ? { id: s.next.id, season: s.next.season, n: s.next.n, dur: s.next.dur } : null,
+      })));
+    }, undefined, 'snapshotSave');
+  }
+  function snapshotLoad() {
+    const v = cacheGet('snapshot', 7 * DAY);
+    return Array.isArray(v) && v.length ? v : null;
+  }
+
+  const isAiring = (maxAir) => !!maxAir && Date.now() - maxAir < CFG.airingWindowDays * DAY;
+
+  // ─────────────────────────────────────────────────────────────
+  //  3. Données Crunchyroll
+  // ─────────────────────────────────────────────────────────────
+  let ACCOUNT_ID = null;
+  async function getAccountId() {
+    if (ACCOUNT_ID) return ACCOUNT_ID;
+    const me = await api('/accounts/v1/me');
+    ACCOUNT_ID = me.account_id || me.external_id;
+    return ACCOUNT_ID;
+  }
+
+  // (2) garde-fou : on compare ce qu'on reçoit à ce que l'API annonce.
+  async function getWatchlist(accountId) {
+    const items = [];
+    let start = 0, announced = null;
+    for (let page = 0; page < 40; page++) {
+      const r = await api(`/content/v2/discover/${accountId}/watchlist`, {
+        n: 100, start, locale: CFG.locale, order: 'desc',
+      });
+      const data = r.data || [];
+      if (announced === null && typeof r.total === 'number') announced = r.total;
+      if (!data.length) break;
+      const before = items.length;
+      items.push(...data);
+      if (items.length === before) break;            // page vide : on arrête
+      if (announced !== null && items.length >= announced) break;
+      if (data.length < 100) break;
+      start += 100;
+    }
+    STATE.announced = announced;
+    if (announced !== null && items.length < announced) {
+      STATE.warning = `Crunchyroll annonce ${announced} entrées dans ta watchlist mais n'en a renvoyé ` +
+        `que ${items.length}. Des séries peuvent manquer.`;
+      LOG('⚠ pagination incomplète :', items.length, '/', announced);
+    }
+    LOG('watchlist :', items.length, 'entrées · total annoncé :', announced);
+    return items;
+  }
+
+  // Séries actuellement présentes dans UNE de tes listes — watchlist ET Crunchylists
+  // (« mes listes »). C'est la relecture « à chaud » qui permet d'exclure de Découverte une
+  // série que tu viens d'ajouter, SANS re-télécharger/ré-analyser toute la collection.
+  // Important : « Ajouter à une liste » sur Crunchyroll écrit dans une Crunchylist, PAS dans
+  // la watchlist — ne consulter que la watchlist (bug précédent) ratait donc ces ajouts.
+  // Best-effort : chaque source qui échoue est simplement ignorée.
+  async function getListMemberIds(accountId) {
+    const out = new Set();
+    // 1. watchlist : la page la plus récente suffit (ajouts en tête, order=desc).
+    try {
+      const r = await api(`/content/v2/discover/${accountId}/watchlist`, {
+        n: 100, start: 0, locale: CFG.locale, order: 'desc',
+      });
+      for (const it of (r.data || [])) {
+        const ref = extractSeriesRef(it);
+        if (ref && ref.id) out.add(ref.id);
+      }
+    } catch (e) { console.warn('[reste-à-voir] watchlist récente indisponible', e); }
+    // 2. Crunchylists : là où atterrit « Ajouter à une liste ». Relues entièrement
+    //    (peu d'entrées en général) pour capter l'ajout tout frais.
+    try {
+      const cl = await getCustomLists(accountId);
+      for (const it of cl) {
+        const ref = extractSeriesRef(it);
+        if (ref && ref.id) out.add(ref.id);
+      }
+    } catch (e) { console.warn('[reste-à-voir] Crunchylists indisponibles', e); }
+    return out;
+  }
+
+  // Les Crunchylists (« mes listes ») vivent sur d'autres endpoints que la watchlist.
+  // Indisponibles ? On continue avec la watchlist seule plutôt que de tout planter.
+  async function getCustomLists(accountId) {
+    try {
+      const r = await api(`/content/v2/${accountId}/custom-lists`, { locale: CFG.locale });
+      const lists = r.data || [];
+      LOG('listes personnalisées :', lists.length, lists.map((l) => l.title || l.list_id));
+      if (!lists.length) return [];
+      const pages = await pool(lists, async (l) => {
+        const id = l.list_id || l.id;
+        if (!id) return [];
+        const items = [];
+        let start = 0;
+        for (let page = 0; page < 40; page++) {
+          const ir = await api(`/content/v2/${accountId}/custom-lists/${id}`, {
+            locale: CFG.locale, n: 100, start,
+          });
+          const data = ir.data || [];
+          if (!data.length) break;
+          items.push(...data);
+          if (data.length < 100) break;
+          start += 100;
+        }
+        LOG(`  · « ${l.title || id} » :`, items.length, 'entrées');
+        return items;
+      }, 3);
+      return pages.filter(Boolean).flat();
+    } catch (e) {
+      console.warn('[reste-à-voir] listes personnalisées indisponibles', e);
+      return [];
+    }
+  }
+
+  // Liste légère des Crunchylists (id + titre seulement, pas leurs items) — pour le
+  // sélecteur d'ajout depuis Découverte. Séparée de getCustomLists (qui elle pagine
+  // aussi les items de chaque liste, coûteux) : ici on veut juste savoir QUELLES listes
+  // existent, une seule requête suffit.
+  async function fetchMyListsMeta() {
+    const accountId = await getAccountId();
+    const r = await api(`/content/v2/${accountId}/custom-lists`, { locale: CFG.locale });
+    return (r.data || [])
+      .map((l) => ({ id: l.list_id || l.id, title: l.title || '(sans nom)' }))
+      .filter((l) => l.id);
+  }
+
+  // Charge (avec cache mémoire simple) et renvoie { loading, items, error }. Le
+  // rendu synchrone lit STATE.myLists ; ce chargeur le peuple en tâche de fond puis
+  // déclenche un re-rendu. Pas de watchlist ici : elle vit sur un endpoint séparé et
+  // n'apparaît jamais dans /custom-lists.
+  async function ensureMyListsLoaded() {
+    if (STATE.myLists.items.length || STATE.myLists.loading) return;
+    STATE.myLists.loading = true;
+    try {
+      const items = await fetchMyListsMeta();
+      STATE.myLists.items = items;
+      STATE.myLists.error = null;
+      // Auto-résolution de la liste par défaut : la première détectée, tant que
+      // l'utilisateur n'a rien choisi explicitement dans les réglages.
+      if (!CFG.defaultListId && items.length) CFG.defaultListId = items[0].id;
+    } catch (e) {
+      console.warn('[reste-à-voir] chargement de mes listes indisponible', e);
+      STATE.myLists.error = 'Impossible de charger tes listes.';
+    } finally {
+      STATE.myLists.loading = false;
+      forceRender();
+    }
+  }
+
+  function effectiveListId() {
+    if (CFG.defaultListId) return CFG.defaultListId;
+    return STATE.myLists.items[0] ? STATE.myLists.items[0].id : null;
+  }
+
+  function extractSeriesRef(item) {
+    if (!item || typeof item !== 'object') return null;
+
+    // PRIORITÉ watch-history : l'entrée a parent_id + parent_type="series" À LA RACINE,
+    // à côté d'un sous-objet `panel` qui décrit l'ÉPISODE (dont l'id est celui de
+    // l'épisode, pas de la série). Il faut donc lire parent_id AVANT de descendre dans
+    // panel — sinon on récupère un id d'épisode inexploitable, ou rien. C'était la vraie
+    // cause du « 2 hors listes » : chaque entrée d'historique était mal résolue.
+    if (item.parent_type === 'series' && item.parent_id) {
+      return { id: item.parent_id, panel: null };
+    }
+    // Autre forme possible : series_id directement à la racine.
+    if (item.series_id) return { id: item.series_id, panel: null };
+
+    const p = (item.panel || item.object) || item;
+    if (!p || typeof p !== 'object') return null;
+    const type = p.type || p.__class__;
+    if (type === 'series') return { id: p.id, panel: p };
+    if (type === 'episode') {
+      const meta = p.episode_metadata || p;
+      const sid = meta.series_id || meta.parent_id;
+      return sid ? { id: sid, panel: null } : null;
+    }
+    if (!type && p.series_metadata && p.id) return { id: p.id, panel: p };
+
+    // Derniers recours : series_id / parent_id où qu'ils soient dans le panel.
+    const sid = p.series_id
+      || (p.episode_metadata && p.episode_metadata.series_id)
+      || p.parent_id;
+    if (sid) return { id: sid, panel: null };
+
+    return null;
+  }
+
+  // Historique de visionnage : sert à exclure de l'onglet Découverte les séries
+  // déjà entamées même si elles ne sont dans aucune liste. Best-effort : si
+  // l'endpoint n'existe pas ou échoue, on continue sans (5).
+  // Vrai si le dernier scan a parcouru l'intégralité de l'historique Crunchyroll.
+  let historyComplete = false;
+  // Détail agrégé de l'historique (par série), rempli par le scan. Sert aux stats
+  // « hors listes » : épisodes, heures, top séries, genres — sans requête en plus.
+  let HISTORY_DETAIL = null;
+
+  // Lit l'historique de visionnage DÉJÀ en cache, sans jamais lancer de requête.
+  // Renvoie null si aucun historique n'a encore été chargé (via Découverte).
+  function cachedWatchedIds() {
+    try {
+      const accountId = ACCOUNT_ID;
+      if (!accountId) return null;
+      const cached = cacheGet('watchedids:' + accountId, CFG.discoverHistoryCacheHours * 3600e3);
+      if (!cached) return null;
+      const ids = Array.isArray(cached) ? cached : (cached.ids || []);
+      return {
+        ids: new Set(ids),
+        complete: Array.isArray(cached) ? false : !!cached.complete,
+        detail: (!Array.isArray(cached) && cached.detail) ? cached.detail : null,
+      };
+    } catch (_) { return null; }
+  }
+
+  // Clé d'identité d'une entrée d'historique : sert de repère (« watermark ») pour savoir
+  // où s'était arrêté le scan précédent.
+  function historyMark(it) {
+    const panel = it.panel || {};
+    const em = panel.episode_metadata || {};
+    // UNIQUEMENT l'identifiant de l'entrée. Y mêler date_played ou la progression rendait
+    // le repère instable : ces valeurs changent quand on continue de regarder le même
+    // épisode, le repère ne correspondait plus et le scan complet repartait pour rien.
+    // L'id, lui, est stable — et une entrée d'historique est unique par épisode.
+    return panel.id || em.id || '';
+  }
+
+  // Le détail est stocké AVEC la liste des clés d'épisodes : sans elles, impossible de
+  // fusionner un scan partiel avec l'ancien sans recompter les épisodes déjà connus.
+  function serializeDetail(detail) {
+    return [...detail.entries()]
+      .map(([id, d]) => ({
+        id, title: d.title,
+        episodes: d.eps.size,
+        seconds: [...d.eps.values()].reduce((a, b) => a + b, 0),
+        eps: [...d.eps.keys()],
+        genres: [...d.genres],
+      }))
+      .sort((a, b) => b.seconds - a.seconds || b.episodes - a.episodes);
+  }
+
+  // Fusionne le détail du scan PRÉCÉDENT sous celui qu'on vient de lire. Appelée
+  // uniquement quand le repère a été retrouvé (donc que le socle ancien est valide) :
+  // fusionner à l'aveugle conserverait des séries disparues d'un historique effacé.
+  // Les données fraîches priment ; l'ancien ne comble que ce qui manque.
+  function mergeDetail(prevArr, detail, ids) {
+    for (const d of prevArr || []) {
+      if (!d || !d.id) continue;
+      ids.add(d.id);
+      let cur = detail.get(d.id);
+      if (!cur) {
+        cur = { title: d.title || '', eps: new Map(), genres: new Set() };
+        detail.set(d.id, cur);
+      }
+      if (!cur.title) cur.title = d.title || '';
+      for (const g of d.genres || []) cur.genres.add(g);
+      const keys = d.eps || [];
+      // Durée moyenne par épisode : le détail stocké ne garde qu'un total, et seule
+      // la somme est utilisée — le total reste donc exact.
+      const per = keys.length ? Math.round((d.seconds || 0) / keys.length) : 0;
+      for (const k of keys) if (!cur.eps.has(k)) cur.eps.set(k, per);
+    }
+  }
+
+  // Transforme la progression brute du scan d'historique ({done,total,series,scanned})
+  // en libellé lisible pour les indicateurs de chargement. Sans repère de total (scan
+  // instantané / 1re page pas encore revenue), on retombe sur le texte neutre.
+  function historyScanLabel(p) {
+    if (!p || !p.total) return 'Historique de visionnage…';
+    const bits = [`page ${p.done}/${p.total}`];
+    if (p.scanned) bits.push(`${p.scanned} entrées`);
+    if (p.series)  bits.push(`${p.series} séries`);
+    return 'Historique de visionnage… ' + bits.join(' · ');
+  }
+
+  // Préfixe un message de progression par son numéro d'étape dans le pipeline en cours
+  // (« Étape 2/4 · Récupération de ta watchlist… ») — donne un repère de fin même quand
+  // l'étape elle-même n'a pas de compteur i/total (profil, listes, historique…).
+  function stepLabel(n, total, msg) {
+    return `Étape ${n}/${total} · ${msg}`;
+  }
+
+  async function getWatchedSeriesIds(accountId, onProgress, force) {
+    // (fix) Cache court : sans lui, on rescannait tout l'historique — jusqu'à
+    // historyMaxEntries entrées (~100 par requête) — à CHAQUE ouverture de l'onglet
+    // Découverte. C'était une cause majeure de lenteur.
+    // `force` : on IGNORE le cache frais et on relance un scan (incrémental, donc 1-2
+    // requêtes : il s'arrête au repère du dernier scan). Utilisé quand tu relances /
+    // demandes « 30 autres » : de quoi capter ce que tu viens de regarder à l'instant.
+    const cacheKey = 'watchedids:' + accountId;
+    const cached = force ? null : cacheGet(cacheKey, CFG.discoverHistoryCacheHours * 3600e3);
+    if (cached) {
+      const ids = Array.isArray(cached) ? cached : (cached.ids || []);
+      historyComplete = Array.isArray(cached) ? false : !!cached.complete;
+      // On mémorise aussi le détail agrégé s'il est présent (format 2.40+).
+      HISTORY_DETAIL = (!Array.isArray(cached) && cached.detail) ? cached.detail : null;
+      LOG('historique de visionnage : (cache)', ids.length, 'séries',
+        historyComplete ? '— scan complet' : '— scan partiel');
+      return new Set(ids);
+    }
+
+    // ── Scan INCRÉMENTAL ────────────────────────────────────────────────────────
+    // L'historique est trié du plus récent au plus ancien : tout ce qui se trouve
+    // sous l'entrée la plus récente du scan précédent est DÉJÀ connu. On repart donc
+    // de l'ancien résultat et on s'arrête dès qu'on retombe dessus — en usage courant,
+    // 1 à 2 requêtes au lieu de ~80. Repli automatique sur un scan complet si le repère
+    // est introuvable (historique effacé, entrée supprimée, premier lancement).
+    const prev = cacheGetStale(cacheKey);
+    const prevMark = (prev && !Array.isArray(prev) && prev.mark) ? prev.mark : null;
+    const incremental = !!(prevMark && prev.detail && prev.ids);
+    let stopAtMark = false;
+
+    const ids = new Set();
+    // Détail par série, extrait de l'historique SANS requête supplémentaire : chaque
+    // entrée porte l'épisode, sa durée (episode_metadata) et le titre/genres de la série.
+    // seriesId -> { title, eps:Map(epId->secondes), genres:Set }. On indexe par ÉPISODE
+    // LOGIQUE (saison + numéro), et NON par panel.id : watch-history renvoie une entrée par
+    // VERSION AUDIO (VO japonaise, dub EN, FR, ES…) et par reprise, chacune avec un panel.id
+    // distinct. Compter les panel.id gonflait le total (ex. ~170 épisodes × plusieurs
+    // langues ≈ 1100). Regrouper par (saison, numéro) donne le vrai nombre d'épisodes ; la
+    // durée est retenue une seule fois par épisode.
+    const detail = new Map();
+    let newMark = null;
+    const addFrom = (data) => {
+      for (const it of data) {
+        if (!newMark) newMark = historyMark(it) || null;   // 1re entrée vue = nouveau repère
+        // Repère atteint : tout ce qui suit a déjà été scanné, on peut s'arrêter là.
+        const mk = historyMark(it);
+        if (incremental && prevMark && mk && mk === prevMark) { stopAtMark = true; return; }
+        const ref = extractSeriesRef(it);
+        if (!ref || !ref.id) continue;
+        ids.add(ref.id);
+
+        const panel = it.panel || {};
+        const em = panel.episode_metadata || {};
+        let d = detail.get(ref.id);
+        if (!d) {
+          d = { title: '', eps: new Map(), genres: new Set() };
+          detail.set(ref.id, d);
+        }
+        // Clé d'épisode LOGIQUE : (saison, numéro) regroupe toutes les versions audio et
+        // toutes les reprises d'un même épisode. On ne retombe sur l'id brut que si le
+        // numéro d'épisode manque (spéciaux, films), pour ne pas fusionner deux épisodes.
+        const sNum = em.season_number, eNum = em.episode_number;
+        const epId = (sNum != null && eNum != null) ? `s${sNum}e${eNum}` : (panel.id || em.id || null);
+        if (epId) {
+          const durMs = em.duration_ms || 0;
+          const sec = durMs ? Math.round(durMs / 1000) : (it.playhead || 0);
+          // Meilleure estimation de durée par épisode distinct (pas de cumul des reprises).
+          if (sec > (d.eps.get(epId) || 0)) d.eps.set(epId, sec);
+        }
+        // Titre de la série : porté par episode_metadata dans watch-history.
+        if (!d.title) d.title = em.series_title || panel.series_title || '';
+        // Genres : selon la réponse, ils sont sur le panel ou dans episode_metadata.
+        for (const g of extractGenres(panel)) d.genres.add(g);
+        for (const g of extractGenres(em)) d.genres.add(g);
+      }
+    };
+
+    // VRAIE pagination Crunchyroll (observée dans les requêtes du site) :
+    //   ?page=N&page_size=100&preferred_audio_language=ja-JP
+    // L'API paginait par `page`/`page_size`, PAS par `n`/`start` — d'où le bug : mes
+    // requêtes `start=25,50…` étaient ignorées et renvoyaient toujours la page 1.
+    const PAGE_SIZE = 100;
+    const first = await api(`/content/v2/${accountId}/watch-history`, {
+      page: 1, page_size: PAGE_SIZE, locale: CFG.locale, preferred_audio_language: 'ja-JP',
+    });
+    const firstData = first.data || [];
+    LOG('watch-history brut (page 1) :', first);
+    const total = typeof first.total === 'number' ? first.total : null;
+    addFrom(firstData);
+    let scanned = firstData.length;
+
+    const cap = Math.max(100, CFG.historyMaxEntries || 8000);
+    const maxEntries = total !== null ? Math.min(total, cap) : cap;
+    const lastPage = Math.max(1, Math.ceil(maxEntries / PAGE_SIZE));
+
+    let reachedEnd = firstData.length < PAGE_SIZE || lastPage <= 1;
+    if (stopAtMark) {
+      // Rattrapage terminé dès la 1re page : rien de plus à lire.
+      LOG(`historique : scan incrémental — ${scanned} entrées relues, repère atteint`);
+      reachedEnd = true;
+    }
+    if (!reachedEnd) {
+      const pageNums = [];
+      for (let pg = 2; pg <= lastPage; pg++) pageNums.push(pg);
+      const totalReq = pageNums.length + 1;
+      let doneReq = 1;
+      if (onProgress) onProgress({ done: doneReq, total: totalReq, series: ids.size, scanned });
+
+      let stop = stopAtMark;
+      for (let i = 0; i < pageNums.length && !stop; i += CFG.concurrency) {
+        const wave = pageNums.slice(i, i + CFG.concurrency);
+        const pages = await pool(wave, async (pg) => {
+          const r = await api(`/content/v2/${accountId}/watch-history`, {
+            page: pg, page_size: PAGE_SIZE, locale: CFG.locale, preferred_audio_language: 'ja-JP',
+          });
+          return r.data || [];
+        }, CFG.concurrency);
+        for (const data of pages) {
+          if (!data) continue;
+          scanned += data.length;
+          addFrom(data);
+          if (data.length < PAGE_SIZE) stop = true;   // dernière page (partielle ou vide)
+          if (stopAtMark) stop = true;                 // repère du scan précédent atteint
+        }
+        doneReq += wave.length;
+        if (onProgress) onProgress({ done: doneReq, total: totalReq, series: ids.size, scanned });
+      }
+      // On n'a atteint la VRAIE fin de l'historique que si une page partielle est apparue
+      // (stop). Si la boucle s'est arrêtée parce que le plafond historyMaxEntries était
+      // atteint, le scan est INCOMPLET : le déclarer « complet » faisait sauter le filet
+      // de sécurité playheads de Découverte, qui proposait alors des séries déjà finies
+      // situées au-delà de la fenêtre scannée. (Le cas « total réellement atteint » reste
+      // couvert par la clause scanned >= total juste en dessous.)
+      reachedEnd = stop;
+    }
+
+    // Un scan incrémental hérite de l'exhaustivité du scan précédent : on n'a relu que
+    // le sommet, mais le socle en dessous provient d'un scan déjà validé.
+    historyComplete = (incremental && stopAtMark)
+      ? !!prev.complete
+      : (reachedEnd || (total !== null && scanned >= total));
+    LOG('historique de visionnage :', ids.size, 'séries (', scanned, '/', total ?? '?',
+      'entrées scannées ·', PAGE_SIZE, 'par page )',
+      historyComplete ? '— COMPLET' : '— partiel (limite atteinte)');
+    // Convertit le détail en structure sérialisable (Set -> tableau), triée par
+    // nombre d'épisodes décroissant pour le top séries.
+    // Rattrapage confirmé : on recolle le socle du scan précédent sous les nouveautés.
+    if (incremental && stopAtMark) {
+      mergeDetail(prev.detail, detail, ids);
+      LOG(`historique : incrémental — ${scanned} entrées relues, socle de ${prev.ids.length} séries réutilisé`);
+    }
+
+    const detailArr = serializeDetail(detail);
+    HISTORY_DETAIL = detailArr;
+    cacheSet(cacheKey, {
+      ids: [...ids], complete: historyComplete, detail: detailArr, mark: newMark,
+    });
+    return ids;
+  }
+
+  // Enrichit les genres MANQUANTS des séries de l'historique QUI SONT HORS DE TES LISTES,
+  // en lisant le panel complet /cms/series (en cache 7 j). Nécessaire car watch-history ne
+  // porte pas les genres de série : sans ça, le bloc « Genres hors listes » des stats reste
+  // vide. Différé, borné (historyGenreEnrichMax) et priorisé par temps regardé ; les séries
+  // déjà en cache ne coûtent aucune requête. Le résultat est réécrit dans le cache
+  // d'historique pour ne pas refetcher au prochain affichage.
+  // Complément AniList (voir CFG.anilistSchedule) : le panel CR ne donne souvent que 1-2
+  // genres génériques, parfois aucun — quand c'est le cas, on interroge AniList par titre
+  // (même appariement que fetchAnilistSchedule) et on fusionne (jamais ne remplace), pour
+  // que ce bloc reflète tes VRAIS genres les plus regardés, listes comprises.
+  let enrichingHistoryGenres = false;
+  const historyGenreTried = new Set();   // évite de reréessayer en boucle une série sans genre
+  async function enrichHistoryGenres() {
+    if (enrichingHistoryGenres) return;
+    const detail = HISTORY_DETAIL;
+    const accountId = ACCOUNT_ID;
+    if (!Array.isArray(detail) || !detail.length || !accountId) return;
+
+    const inLists = new Set(STATE.series.map((s) => s.id));
+    // Cibles : hors listes, sans genre connu, jamais tentées — les plus regardées d'abord
+    // (le détail est déjà trié par temps décroissant).
+    const targets = detail
+      .filter((d) => d && d.id && !inLists.has(d.id)
+        && !(d.genres && d.genres.length) && !historyGenreTried.has(d.id))
+      .slice(0, CFG.historyGenreEnrichMax || 80);
+    if (!targets.length) return;
+
+    // Coupe-circuit partagé avec enrichAnilistSchedule : pas la peine de tenter un appel
+    // AniList par cible si l'API a récemment refusé (403/429). Le repli CR seul continue.
+    const aniOk = CFG.anilistSchedule && anilistCooldownRemainingMs() <= 0;
+
+    enrichingHistoryGenres = true;
+    STATE.historyGenreProgress = { done: 0, total: targets.length, startedAt: Date.now() };
+    render();
+    try {
+      let changed = false;
+      await pool(targets, async (d) => {
+        historyGenreTried.add(d.id);               // tentée : on ne la repassera pas
+        let g = [];
+        try {
+          const panel = await getSeriesPanel(d.id);
+          g = panel ? extractGenres(panel) : [];
+        } catch (_) { /* best-effort */ }
+        if (aniOk && g.length < 2) {
+          try {
+            const { media } = await anilistSearch(d.title);
+            const best = aniPickMatch(media, { title: d.title });
+            if (best && best.genres && best.genres.length) {
+              g = mergeGenreLists(g, translateAniGenres(best.genres));
+            }
+          } catch (_) { /* best-effort, silencieux comme le repli CR */ }
+        }
+        if (g.length) { d.genres = g; changed = true; }
+      }, CFG.concurrency, (done, total) => {
+        STATE.historyGenreProgress = { done, total, startedAt: STATE.historyGenreProgress.startedAt };
+        render();
+      });
+
+      if (changed) {
+        // On persiste le détail enrichi dans le cache d'historique (même clé), sans toucher
+        // au reste (ids / mark / complete), pour éviter tout refetch au prochain affichage.
+        const cacheKey = 'watchedids:' + accountId;
+        const prev = cacheGetStale(cacheKey);
+        if (prev && !Array.isArray(prev)) cacheSet(cacheKey, { ...prev, detail });
+        render();
+      }
+    } finally {
+      enrichingHistoryGenres = false;
+      STATE.historyGenreProgress = null;
+    }
+  }
+
+  async function getSeriesPanel(seriesId) {
+    const cached = cacheGet('series:' + seriesId, 7 * DAY);
+    if (cached) return cached;
+    const r = await api(`/content/v2/cms/series/${seriesId}`, { locale: CFG.locale });
+    const panel = (r.data || [])[0];
+    if (panel) cacheSet('series:' + seriesId, panel);
+    return panel;
+  }
+
+  // Depuis une carte « Reste à voir » : bascule sur Découverte pré-filtrée par les genres
+  // de CETTE série. On ne réinvente pas de moteur — on réutilise tout le pipeline Découverte
+  // (pool populaire, note minimale, exclusion des séries vues/listées), en posant simplement
+  // le filtre « garder uniquement ces genres ». Résultat : des séries du même genre,
+  // populaires et bien notées, que l'utilisateur n'a pas vues. Un re-scan (force) est lancé
+  // pour repêcher les bons candidats dans le pool, comme le fait un changement de filtre genre.
+  async function discoverSimilarTo(id, title, knownCats) {
+    // On fait confiance en priorité aux genres déjà connus (posés sur la carte d'origine,
+    // via s.categories) — pas besoin de retaper l'API, et ça évite le faux « introuvables »
+    // quand ce second appel échoue ou ne remonte rien pour ce titre précis. Le fetch reste
+    // en filet de sécurité pour les cas où aucun genre n'était encore connu.
+    let genres = Array.isArray(knownCats) ? knownCats.filter(Boolean) : [];
+    if (!genres.length) {
+      try {
+        const panel = await getSeriesPanel(id);
+        genres = panel ? extractGenres(panel) : [];
+      } catch (e) { safeCall.log(e, 'discoverSimilarTo'); }
+    }
+    STATE.tab = 'decouverte';
+    STATE.filters.globalQ = '';
+    STATE.filters.discoverQ = '';
+    STATE.filters.showIgnoredDiscover = false;
+    STATE.filters.discoverCatsEx = [];
+    // Genres de la série source comme filtre « garder uniquement ». Si aucun genre n'a pu
+    // être résolu, on NE pose PAS de filtre (sinon ce serait tout le pool) et on le signale
+    // honnêtement via le bandeau (similarTo.genres vide) plutôt que de prétendre « similaire ».
+    STATE.filters.discoverCatsIn = genres.slice();
+    STATE.filters.discoverCatsInMode = 'all';
+    STATE.discover.similarTo = { id, title: title || '', genres };
+    STATE.discover.series = [];
+    render();
+    ensureMyListsLoaded();
+    // refresh (pas relaunch) : on re-scanne le pool popularité pour repêcher les candidats du
+    // genre, mais l'historique de visionnage reste servi par son cache — inutile de le refaire.
+    refreshDiscover();
+  }
+
+  // Même série (même series_id Crunchyroll), titre en anglais plutôt que dans la locale
+  // d'affichage (fr-FR). Crunchyroll ne fournit AUCUN identifiant croisé vers
+  // AniList/MAL/AniDB (vérifié : aucun outil tiers n'y arrive autrement que par titre),
+  // mais son propre endpoint accepte un paramètre `locale` — on peut donc redemander LA
+  // MÊME fiche en anglais. Le titre anglais colle presque toujours de bien plus près au
+  // titre AniList (romaji/anglais) que le titre français affiché, d'où un bien meilleur
+  // taux de match. Coût : 1 requête de plus, UNIQUEMENT quand le titre fr-FR n'a rien
+  // donné — et mise en cache longue durée (le titre anglais d'une série ne change pas).
+  async function getSeriesEnglishTitle(seriesId) {
+    const cached = cacheGet('series-en:' + seriesId, 30 * DAY);
+    if (cached != null) return cached || null;
+    try {
+      const r = await api(`/content/v2/cms/series/${seriesId}`, { locale: 'en-US' });
+      const title = ((r.data || [])[0] || {}).title || '';
+      cacheSet('series-en:' + seriesId, title);   // '' mis en cache aussi : évite de réessayer en boucle
+      return title || null;
+    } catch (e) { safeCall.log(e, 'getSeriesEnglishTitle'); return null; }
+  }
+
+  // La note n'est pas dans le panel série : endpoint dédié, 1 requête par série,
+  // mise en cache 7 jours. Un échec ne doit jamais casser le chargement.
+  // Note DÉJÀ en cache, sans requête. Le chargement principal n'utilise que celle-ci :
+  // récupérer les notes en ligne coûtait 1 requête PAR SÉRIE sur le chemin critique,
+  // alors qu'elles ne servent qu'à l'affichage et au filtre « Notées 4★+ ». Les
+  // manquantes sont complétées en tâche de fond après le premier affichage.
+  function getRatingCached(seriesId) {
+    const c = cacheGet('rating:' + seriesId, 7 * DAY);
+    return (c && 'r' in c) ? c.r : null;
+  }
+
+  // Complète les notes absentes APRÈS affichage, sans bloquer, puis rafraîchit l'écran.
+  let ratingPassRunning = false;
+  async function fillMissingRatings(list) {
+    if (ratingPassRunning) return;
+    const todo = (list || []).filter((s) => s && s.id && cacheGet('rating:' + s.id, 7 * DAY) == null);
+    if (!todo.length) return;
+    ratingPassRunning = true;
+    try {
+      let changed = 0;
+      await pool(todo, async (s) => {
+        const val = await getRating(s.id);
+        if (val != null) { s.rating = val; changed++; }
+      }, Math.max(2, Math.min(4, CFG.concurrency)));
+      if (changed) { LOG(`notes complétées en fond : ${changed}`); render(); }
+    } catch (e) { safeCall.log(e, 'fillMissingRatings'); }
+    finally { ratingPassRunning = false; }
+  }
+
+  async function getRating(seriesId) {
+    const c = cacheGet('rating:' + seriesId, 7 * DAY);
+    if (c && 'r' in c) return c.r;
+    try {
+      const r = await api(`/content-reviews/v2/rating/series/${seriesId}`);
+      const src = r.data || r;
+      const raw = src.average ?? src.rating ?? null;
+      const num = raw === null ? NaN : parseFloat(String(raw).replace(',', '.'));
+      const val = Number.isFinite(num) ? num : null;
+      cacheSet('rating:' + seriesId, { r: val });
+      return val;
+    } catch (_) {
+      cacheSet('rating:' + seriesId, { r: null });
+      return null;
+    }
+  }
+
+  // Nombre de saisons distinctes, en cache 30 jours (utilisé par l'onglet Découverte).
+  // Le classement popularité renvoie déjà le nombre de saisons : le lire ici évite
+  // une requête /seasons par candidat, pour une info qu'on a déjà sous la main.
+  function panelSeasons(p) {
+    const m = (p && p.series_metadata) || p || {};
+    const n = m.season_count;
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }
+
+  async function getSeasonCount(seriesId) {
+    const c = cacheGet('seasoncount:' + seriesId, 30 * DAY);
+    if (c !== null) return c;
+    try {
+      const r = await api(`/content/v2/cms/series/${seriesId}/seasons`, { locale: CFG.locale });
+      const seasons = dedupeSeasons(r.data || []);
+      const nums = new Set(seasons.map((s) => s.season_number ?? 0));
+      const count = nums.size || seasons.length;
+      cacheSet('seasoncount:' + seriesId, count);
+      return count;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function dedupeSeasons(seasons) {
+    const byKey = new Map();
+    for (const s of seasons) {
+      const orig = (s.versions || []).find((v) => v.original);
+      const key = orig ? orig.guid : `n:${s.season_number ?? 0}|${s.season_sequence_number ?? ''}`;
+      const prev = byKey.get(key);
+      if (!prev) { byKey.set(key, s); continue; }
+      const isOriginal = (x) => orig && x.id === orig.guid;
+      if (isOriginal(s) && !isOriginal(prev)) byKey.set(key, s);
+    }
+    return [...byKey.values()];
+  }
+
+  // Renvoie { episodes, maxAir }. Cache adaptatif (3) : court si la série diffuse encore.
+  async function getEpisodes(seriesId) {
+    const raw = eps3ReadRaw(seriesId);
+    if (raw && raw.v) {
+      const ttl = (isAiring(raw.v.maxAir) ? CFG.cacheHoursAiring : CFG.cacheHoursFinished) * 3600e3;
+      if (Date.now() - raw.ts < ttl) { STATS.hit++; return raw.v; }
+    }
+    STATS.miss++;
+
+    const sr = await api(`/content/v2/cms/series/${seriesId}/seasons`, {
+      locale: CFG.locale, preferred_audio_language: CFG.preferredAudio,
+    });
+    const seasonsAll = dedupeSeasons(sr.data || []);
+
+    // (26) Crunchyroll range parfois les OAD/spéciaux comme des « saisons » à part
+    // entière (season_number brut distinct), alors qu'ils n'apparaissent PAS comme
+    // « Saison N » dans le sélecteur natif du site — ils y gardent leur propre titre
+    // (ex. « Le rêve de Coleus »). Résultat sans filtrage : le rang affiché (S6) grimpe
+    // à cause d'un spécial, et « dernier vu » peut pointer dessus au lieu de la vraie
+    // saison suivante. On ne garde que les groupes qui suivent la convention
+    // « Saison N » / « Season N » du titre — SAUF si aucune saison de la série ne la
+    // suit (certaines séries à saison unique n'ont jamais ce libellé) : dans ce cas on
+    // ne filtre que les titres explicitement marqués OAD/OVA/spécial, pour ne rien
+    // casser sur les séries sans convention de nommage.
+    const SEASON_LABEL_RE = /^(saison|season)\s*\d+\b/i;
+    const SPECIAL_MARK_RE = /\b(OAD|OVA|OAV|special|sp[ée]cial|bonus|hors[\s-]?s[ée]rie)\b/i;
+    const hasLabeledSeasons = seasonsAll.some((s) => SEASON_LABEL_RE.test(s.title || ''));
+    const seasons = seasonsAll.filter((s) => {
+      const t = String(s.title || '');
+      if (SPECIAL_MARK_RE.test(t)) return false;
+      return hasLabeledSeasons ? SEASON_LABEL_RE.test(t) : true;
+    });
+
+    const lists = await pool(seasons, async (s) => {
+      const er = await api(`/content/v2/cms/seasons/${s.id}/episodes`, { locale: CFG.locale });
+      return (er.data || [])
+        .filter((e) => e.episode_number !== null && e.episode_number !== undefined)
+        .map((e) => {
+          const ids = [e.id, ...(e.versions || []).map((v) => v.guid)].filter(Boolean);
+          const air = Date.parse(e.episode_air_date || e.upload_date || '') || null;
+          // Heure RÉELLE de mise en ligne. episode_air_date est souvent une date SANS
+          // heure (minuit UTC) : s'en servir pour l'heure affichait « 02h » pour tout le
+          // monde (minuit UTC = 02h à Paris en été). availability_starts porte, lui,
+          // l'horodatage réel de publication — c'est la bonne source pour l'heure.
+          const avail = Date.parse(e.availability_starts || e.premium_available_date || '') || null;
+          return {
+            id: e.id,
+            ids: [...new Set(ids)],
+            n: e.episode_number,
+            season: e.season_number ?? s.season_number ?? 1,
+            title: e.title || '',
+            dur: e.duration_ms ? Math.round(e.duration_ms / 1000) : 0,   // (1)(5) secondes
+            air, avail,
+          };
+        });
+    }, 3);
+
+    const seenGuid = new Set();
+    const episodes = [];
+    for (const list of lists) {
+      if (!list) continue;
+      for (const e of list) {
+        if (e.ids.some((id) => seenGuid.has(id))) continue;
+        e.ids.forEach((id) => seenGuid.add(id));
+        episodes.push(e);
+      }
+    }
+    episodes.sort((a, b) => a.season - b.season || a.n - b.n);
+    const maxAir = episodes.reduce((m, e) => (e.air && e.air > m ? e.air : m), 0) || null;
+
+    const out = { episodes, maxAir };
+    eps3Write(seriesId, out);
+    return out;
+  }
+
+  // Taille de lot vérifiée empiriquement via resteAVoir.probeBatch() : à 300 GUID,
+  // l'API renvoie exactement les mêmes résultats qu'en lots de 100, en 3× moins de
+  // requêtes. Une troncature silencieuse ici fausserait les compteurs « vu » sans
+  // rien signaler — d'où la sonde de contrôle plutôt qu'un pari.
+  // Mémo MÉMOIRE (jamais persisté) des progressions : c'est la donnée qui bouge le plus,
+  // donc TTL court. Il évite de retélécharger les mêmes GUID quand on passe d'un onglet
+  // à l'autre (Reste à voir et Hors listes demandaient chacun les leurs séparément).
+  const PH_MEMO = new Map();               // contentId -> { v, ts }
+  const PH_MEMO_TTL = 3 * 60e3;
+  function phMemoGet(id) {
+    const e = PH_MEMO.get(id);
+    if (!e) return null;
+    if (Date.now() - e.ts > PH_MEMO_TTL) { PH_MEMO.delete(id); return null; }
+    return e.v;
+  }
+
+  async function getPlayheads(accountId, ids) {
+    const ph = new Map();
+    // On ne redemande que ce qui n'est pas déjà connu et frais.
+    const missing = [];
+    for (const id of ids) {
+      const hit = phMemoGet(id);
+      if (hit) ph.set(id, hit); else missing.push(id);
+    }
+    if (!missing.length) return ph;
+    const size = Math.max(10, Math.min(500, CFG.playheadBatch || 300));
+    const chunks = [];
+    for (let i = 0; i < missing.length; i += size) chunks.push(missing.slice(i, i + size));
+    await pool(chunks, async (chunk) => {
+      const r = await api(`/content/v2/${accountId}/playheads`, { content_ids: chunk.join(',') });
+      for (const p of r.data || []) {
+        // date_played : quand tu as regardé l'épisode. Sert au tri « Dernier vu ».
+        const v = {
+          p: p.playhead || 0,
+          full: !!p.fully_watched,
+          t: Date.parse(p.date_played || p.last_modified || '') || 0,
+        };
+        ph.set(p.content_id, v);
+        PH_MEMO.set(p.content_id, { v, ts: Date.now() });
+      }
+    });
+    return ph;
+  }
+
+  // Après une action qui modifie la progression (ou un rafraîchissement manuel), le mémo
+  // doit repartir de zéro pour ne pas masquer un épisode fraîchement vu.
+  function clearPlayheadMemo() { PH_MEMO.clear(); }
+
+  function posterOf(panel) {
+    try {
+      const arr = (panel.images.poster_tall || [])[0] || [];
+      const pick = arr.filter((i) => i.width >= 240)[0] || arr[arr.length - 1];
+      return pick ? pick.source : '';
+    } catch (_) { return ''; }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  3bis. AniList — total d'épisodes PRÉVU + date de fin de saison
+  // ─────────────────────────────────────────────────────────────
+  // Crunchyroll ne liste que les épisodes DÉJÀ sortis (d'où « 1/18 » pour une série de
+  // 24 encore en diffusion) et ne donne aucune date pour un épisode à venir. AniList,
+  // lui, connaît le nombre total d'épisodes annoncé et le calendrier de diffusion futur.
+  // API GraphQL publique, sans clé, CORS autorisé → interrogeable depuis crunchyroll.com.
+  // Enrichissement en TÂCHE DE FOND, uniquement pour les séries EN DIFFUSION (une poignée),
+  // fortement mis en cache. L'appariement titre CR ↔ AniList n'est jamais parfait : un
+  // garde-fou de confiance (nom + année/statut) évite d'afficher un faux total ; en cas de
+  // doute, on ne montre RIEN et l'affichage habituel reste inchangé.
+  const ANILIST_URL = 'https://graphql.anilist.co';
+  const ANILIST_QUERY = `query ($q: String) {
+    Page(perPage: 8) {
+      media(search: $q, type: ANIME, sort: SEARCH_MATCH) {
+        id
+        title { romaji english native }
+        synonyms
+        format
+        status
+        episodes
+        startDate { year }
+        nextAiringEpisode { episode airingAt }
+        airingSchedule(perPage: 60) { nodes { episode airingAt } }
+      }
+    }
+  }`;
+  const EMPTY_ANI = { plannedTotal: null, seasonEndTs: null, plannedApprox: false, anilistStatus: null, nextEpTs: null, nextEpNum: null, genres: [] };
+  // Version du FORMAT du cache AniList : à incrémenter quand la logique de calcul change,
+  // pour re-questionner AniList sans vider tout le reste du cache (pas de rescan complet).
+  const ANILIST_CACHE_VER = 5;   // 4 : ajout du repli titre anglais CR (voir fetchAnilistSchedule)
+                                  // 5 : ajout des genres AniList (voir translateAniGenres)
+                                  // → force un nouvel essai des séries jusque-là non matchées.
+
+  // Traduit un corps de réponse d'erreur AniList en raison lisible. Un 403 sur
+  // graphql.anilist.co n'est JAMAIS un blocage CSP/grant (là, la requête n'aboutit pas
+  // du tout → onerror, sans statut HTTP) : c'est AniList qui répond. Documenté par AniList :
+  // soit l'API a été volontairement désactivée pour soulager leurs serveurs (« temporarily
+  // disabled… », ça revient seul), soit l'IP est bloquée pour trop de requêtes, soit c'est
+  // un blocage Cloudflare (page HTML de challenge au lieu de JSON).
+  function anilistReason(status, bodyText) {
+    const body = String(bodyText || '');
+    let msg = '';
+    try { const j = JSON.parse(body); if (j && j.errors && j.errors[0]) msg = j.errors[0].message || ''; } catch (_) { /* pas du JSON */ }
+    if (msg) return msg;
+    if (/cloudflare|cf-ray|attention required|<!DOCTYPE/i.test(body)) {
+      return status === 403 ? 'blocage Cloudflare / IP (trop de requêtes vers AniList)'
+        : 'réponse Cloudflare (' + status + ')';
+    }
+    if (status === 403) return 'API AniList indisponible ou IP bloquée (côté AniList, pas côté script)';
+    if (status === 429) return 'trop de requêtes — AniList limite le débit (réessaie plus tard)';
+    return 'HTTP ' + status;
+  }
+
+  // ─── Coupe-circuit AniList ──────────────────────────────────────────────
+  // Sur 403/429, inutile (et risqué) de continuer à marteler AniList : chaque requête de
+  // plus rapproche un blocage d'IP « manuel » (documenté par AniList). On pose un délai de
+  // grâce global ; l'enrichissement en fond s'abstient jusqu'à son expiration. Le bouton
+  // « Tester AniList » (test manuel volontaire) n'en tient pas compte. Le délai s'allonge
+  // si les refus s'enchaînent : 30 min → 1 h → 2 h (plafonné).
+  const ANILIST_COOLDOWN_KEY = 'anilist:cooldown';
+  function anilistTripCooldown(status, retryAfterMs) {
+    const prev = cacheReadRaw(ANILIST_COOLDOWN_KEY);
+    const strikes = (prev && prev.v && Number(prev.v.strikes)) ? prev.v.strikes + 1 : 1;
+    const backoffMin = Math.min(120, 30 * Math.pow(2, strikes - 1));   // 30, 60, 120, 120…
+    // Si AniList/Cloudflare a précisé un Retry-After, on le respecte (jamais moins que notre
+    // propre back-off) : ni martèlement prématuré, ni ETA fantaisiste affichée à l'utilisateur.
+    const mins = Math.max(backoffMin, Math.ceil((retryAfterMs || 0) / 60000));
+    cacheSet(ANILIST_COOLDOWN_KEY, { until: Date.now() + mins * 60000, status, strikes });
+    if (DEBUG) LOG(`AniList ${status} → pause enrichissement ${mins} min (essai ${strikes}${retryAfterMs ? ', Retry-After respecté' : ''})`);
+  }
+  function anilistCooldownRemainingMs() {
+    const o = cacheReadRaw(ANILIST_COOLDOWN_KEY);
+    return (o && o.v && o.v.until) ? Math.max(0, o.v.until - Date.now()) : 0;
+  }
+  function anilistClearCooldown() {
+    try { localStorage.removeItem(LS + ANILIST_COOLDOWN_KEY); } catch (_) { /* ignore */ }
+  }
+  // Témoin permanent du DERNIER appel AniList (résultat + motif + horodatage). Sert au bloc
+  // d'état toujours affiché dans le diagnostic : sur mobile (sans console) c'est la seule
+  // source de vérité fiable, indépendante du minutage des bannières.
+  const ANILIST_LAST_KEY = 'anilist:last';
+  function anilistNoteStatus(ok, status, reason) {
+    cacheSet(ANILIST_LAST_KEY, { ok: !!ok, status: status || null, reason: reason || '', ts: Date.now() });
+  }
+  function anilistLastStatus() {
+    const o = cacheReadRaw(ANILIST_LAST_KEY);
+    return (o && o.v) ? o.v : null;
+  }
+
+  // Un échec AniList n'est pas l'autre. Transitoire (coupure réseau, délai dépassé, 429,
+  // 5xx) → une reprise a du sens. Mur d'accès (403 « API désactivée » / IP bloquée, autres
+  // 4xx) → inutile d'insister : on pose le coupe-circuit et on remonte l'erreur. Cette
+  // distinction évite À LA FOIS de perdre une donnée sur un simple hoquet ET de marteler
+  // AniList quand c'est réellement fermé.
+  function anilistRetryable(status, isTransport) {
+    if (isTransport) return true;
+    if (status === 429) return true;
+    if (status >= 500 && status <= 599) return true;
+    return false;
+  }
+  // Retry-After : soit un entier de secondes, soit une date HTTP. Plafonné à 1 h, jamais négatif.
+  function parseRetryAfterMs(hdr) {
+    if (!hdr) return 0;
+    const raw = String(hdr).trim();
+    if (/^\d+$/.test(raw)) return Math.min(3600, parseInt(raw, 10)) * 1000;
+    const at = Date.parse(raw);
+    return Number.isFinite(at) ? Math.max(0, Math.min(3600000, at - Date.now())) : 0;
+  }
+
+  async function anilistQuery(query, variables) {
+    const MAX_ATTEMPTS = 3;                 // 1 essai + jusqu'à 2 reprises, transitoire uniquement
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      const t = ctrl ? setTimeout(() => ctrl.abort(), 12000) : null;
+      let r = null, transportErr = null;
+      try {
+        r = await externalFetch(ANILIST_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({ query, variables }),
+          signal: ctrl ? ctrl.signal : undefined,
+        });
+      } catch (e) { transportErr = e; }
+      finally { if (t) clearTimeout(t); }
+
+      // Succès plein : on renvoie (et on distingue une éventuelle erreur GraphQL applicative).
+      if (!transportErr && r && r.ok) {
+        const j = await r.json();
+        if (j.errors && j.errors.length) {
+          anilistNoteStatus(false, 200, j.errors[0].message || 'erreur GraphQL');
+          throw new Error('AniList: ' + (j.errors[0].message || 'erreur'));
+        }
+        anilistNoteStatus(true, 200, '');
+        return j.data;
+      }
+
+      const status = (!transportErr && r) ? r.status : 0;
+      const retryAfterMs = (!transportErr && r && r.getHeader) ? parseRetryAfterMs(r.getHeader('retry-after')) : 0;
+      if (anilistRetryable(status, !!transportErr) && attempt < MAX_ATTEMPTS - 1) {
+        const backoff = retryAfterMs || (600 * Math.pow(2, attempt));   // 600 ms, 1200 ms…
+        if (DEBUG) LOG(`AniList ${status || 'réseau'} — reprise dans ${backoff} ms (${attempt + 1}/${MAX_ATTEMPTS - 1})`);
+        await sleep(backoff);
+        continue;
+      }
+
+      // Plus de reprise : on consigne le motif, on pose le coupe-circuit si mur d'accès, on lève.
+      let reason;
+      if (transportErr) {
+        reason = (transportErr.message || String(transportErr)) || 'échec réseau';
+      } else {
+        let bodyText = '';
+        try { bodyText = await r.text(); } catch (_) { /* corps illisible */ }
+        reason = anilistReason(status, bodyText);
+      }
+      anilistNoteStatus(false, status || null, reason);
+      if (status === 403 || status === 429) anilistTripCooldown(status, retryAfterMs);
+      const err = new Error('AniList ' + (status || 'réseau') + ' — ' + reason);
+      err.httpStatus = status || null;
+      throw err;
+    }
+  }
+
+  // Fragment commun des champs Media qu'on lit (réutilisé par la recherche groupée).
+  const ANILIST_FRAGMENT = `fragment F on Media {
+    id
+    title { romaji english native }
+    synonyms
+    format
+    status
+    episodes
+    genres
+    startDate { year }
+    nextAiringEpisode { episode airingAt }
+    airingSchedule(perPage: 60) { nodes { episode airingAt } }
+  }`;
+
+  // Variantes de recherche à partir du titre Crunchyroll. Problème observé : un titre
+  // composé « Tsugai - Daemons of the Shadow Realm » ne correspond à AUCUN titre AniList
+  // pris en entier (romaji « Yomi no Tsugai », anglais « Daemons of the Shadow Realm ») →
+  // 0 résultat. On cherche donc aussi CHAQUE partie séparée par «  - / : / | / ~  » (avec
+  // espaces autour, pour ne pas casser « Re:Zero » ou « Re-Zero »). Parties les plus
+  // longues d'abord (plus discriminantes). Max 3 → une seule requête groupée.
+  function anilistSearchTerms(title) {
+    const t = String(title || '').trim();
+    const terms = [];
+    const push = (x) => {
+      x = String(x || '').trim();
+      if (x.length >= 2 && !terms.some((y) => y.toLowerCase() === x.toLowerCase())) terms.push(x);
+    };
+    push(t);
+    const parts = t.split(/\s+[-–—:|~]\s+/).map((s) => s.trim()).filter((s) => s.length >= 2);
+    parts.sort((a, b) => b.length - a.length);
+    for (const part of parts) push(part);
+    return terms.slice(0, 3);
+  }
+
+  // Construit UNE requête GraphQL qui lance plusieurs recherches (une par terme) via des
+  // alias p0/p1/p2 — un seul aller-retour réseau au lieu de trois.
+  function anilistBuildMultiQuery(terms) {
+    const vars = terms.map((_, i) => `$q${i}: String`).join(', ');
+    const pages = terms.map((_, i) =>
+      `p${i}: Page(perPage: 6) { media(search: $q${i}, type: ANIME, sort: SEARCH_MATCH) { ...F } }`
+    ).join('\n');
+    return `query (${vars}) {\n${pages}\n}\n${ANILIST_FRAGMENT}`;
+  }
+
+  // Recherche AniList tolérante : plusieurs variantes de titre en une requête, résultats
+  // fusionnés et dédoublonnés par id. Renvoie { media, terms, perTerm }.
+  async function anilistSearch(title) {
+    const terms = anilistSearchTerms(title);
+    if (!terms.length) return { media: [], terms: [], perTerm: [] };
+    const variables = {};
+    terms.forEach((t, i) => { variables['q' + i] = t; });
+    const data = await anilistQuery(anilistBuildMultiQuery(terms), variables);
+    const media = [];
+    const perTerm = [];
+    const seen = new Set();
+    for (let i = 0; i < terms.length; i++) {
+      const arr = (data && data['p' + i] && data['p' + i].media) || [];
+      perTerm.push(arr.length);
+      for (const m of arr) {
+        if (m && m.id != null && !seen.has(m.id)) { seen.add(m.id); media.push(m); }
+      }
+    }
+    return { media, terms, perTerm };
+  }
+
+  // Normalisation pour comparer des titres : minuscule, sans accents ni ponctuation.
+  function aniNorm(s) {
+    return String(s || '').toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]+/g, ' ').trim();
+  }
+  function aniBigrams(s) {
+    const t = aniNorm(s).replace(/\s+/g, '');
+    const set = new Set();
+    for (let i = 0; i < t.length - 1; i++) set.add(t.slice(i, i + 2));
+    return set;
+  }
+  // Coefficient de Dice sur bigrammes : robuste aux petites différences de titre.
+  function aniDice(a, b) {
+    const A = aniBigrams(a), B = aniBigrams(b);
+    if (!A.size || !B.size) return 0;
+    let inter = 0;
+    for (const x of A) if (B.has(x)) inter++;
+    return (2 * inter) / (A.size + B.size);
+  }
+  function aniTitleStrings(m) {
+    const t = m.title || {};
+    return [t.romaji, t.english, t.native, ...(m.synonyms || [])].filter(Boolean);
+  }
+  function aniPrimaryTitle(m) {
+    const t = m.title || {};
+    return t.english || t.romaji || t.native || '';
+  }
+
+  // AniList expose ses genres en anglais (liste fermée d'une vingtaine de valeurs), alors
+  // que les genres Crunchyroll affichés partout ailleurs dans ce script (s.categories,
+  // tops genres des Stats, profil de goût Découverte) sont dans la locale du compte
+  // (fr-FR ici, voir CFG.locale). Sans traduction, la fusion ferait cohabiter « Comédie »
+  // et « Comedy » comme deux genres distincts — on traduit donc vers le libellé français
+  // habituel de Crunchyroll avant toute fusion. Best-effort : un genre AniList absent de
+  // la table est conservé tel quel plutôt que perdu.
+  const ANILIST_GENRE_FR = {
+    action: 'Action', adventure: 'Aventure', comedy: 'Comédie', drama: 'Drame',
+    ecchi: 'Ecchi', fantasy: 'Fantastique', hentai: 'Hentai', horror: 'Horreur',
+    'mahou shoujo': 'Magical Girl', mecha: 'Mecha', music: 'Musique',
+    mystery: 'Mystère', psychological: 'Psychologique', romance: 'Romance',
+    'sci-fi': 'Science-fiction', 'slice of life': 'Tranche de vie', sports: 'Sport',
+    supernatural: 'Surnaturel', thriller: 'Thriller',
+  };
+  function translateAniGenres(list) {
+    return (Array.isArray(list) ? list : [])
+      .map((g) => ANILIST_GENRE_FR[String(g || '').trim().toLowerCase()] || g)
+      .filter(Boolean);
+  }
+  // Fusionne deux listes de genres sans doublon, en comparant via aniNorm (insensible à
+  // la casse/accents) — la base (généralement Crunchyroll) garde la priorité d'affichage,
+  // les entrées AniList absentes de la base viennent la compléter.
+  function mergeGenreLists(base, extra) {
+    const out = Array.isArray(base) ? [...base] : [];
+    const seen = new Set(out.map((g) => aniNorm(g)));
+    for (const g of (extra || [])) {
+      const norm = aniNorm(g);
+      if (norm && !seen.has(norm)) { seen.add(norm); out.push(g); }
+    }
+    return out;
+  }
+
+  // Choisit la meilleure fiche AniList pour une série CR, ou null si aucune n'est
+  // assez sûre. Score = similarité de titre, bonifiée si la fiche est « en diffusion »
+  // (comme la série CR) et si l'année de début concorde. Le garde-fou final exige un
+  // nom fort, OU un nom correct CORROBORÉ par l'année/le statut — sinon on renonce.
+  function aniPickMatch(media, s) {
+    if (!Array.isArray(media) || !media.length) return null;
+    const crNorm = aniNorm(s.title || '');
+    const crYear = (s.lastAired && s.lastAired.air) ? new Date(s.lastAired.air).getFullYear() : null;
+    let best = null, bestComposite = -1;
+    for (const m of media) {
+      if (!m) continue;
+      let titleScore = 0;
+      for (const t of aniTitleStrings(m)) {
+        const nt = aniNorm(t);
+        let sc = aniDice(s.title, t);
+        if (nt && nt === crNorm) sc = 1;
+        else if (nt && crNorm && (nt.includes(crNorm) || crNorm.includes(nt))) sc = Math.max(sc, 0.9);
+        if (sc > titleScore) titleScore = sc;
+      }
+      const releasing = m.status === 'RELEASING';
+      const yearMatch = !!(m.startDate && m.startDate.year && crYear
+        && Math.abs(m.startDate.year - crYear) <= 1);
+      m.__titleScore = titleScore; m.__releasing = releasing; m.__yearMatch = yearMatch;
+      const composite = titleScore + (releasing && s.airing ? 0.15 : 0) + (yearMatch ? 0.1 : 0);
+      if (composite > bestComposite) { bestComposite = composite; best = m; }
+    }
+    if (!best) return null;
+    const ok = best.__titleScore >= 0.9
+      || (best.__titleScore >= 0.6 && (best.__yearMatch || (best.__releasing && s.airing)));
+    return ok ? best : null;
+  }
+
+  // À partir d'une fiche AniList, calcule le total prévu et la date de diffusion du
+  // DERNIER épisode (= saison complète). Priorité : date exacte du calendrier AniList,
+  // sinon projection depuis le prochain épisode (date AniList exacte + semaines restantes).
+  function computeAniSchedule(m, s) {
+    const nodes = ((m.airingSchedule && m.airingSchedule.nodes) || [])
+      .filter((n) => n && n.episode && n.airingAt);
+    const next = m.nextAiringEpisode;
+    const nextEp = (next && next.episode) ? next.episode : 0;
+
+    // Total prévu : d'abord le champ officiel `episodes`. S'il est absent (fréquent tant
+    // qu'AniList n'a pas « officialisé » la durée d'une série en cours — le cas de Tsugai),
+    // on se rabat sur le PLUS HAUT numéro d'épisode DÉJÀ DATÉ dans le calendrier AniList.
+    // Condition de sûreté : il doit dépasser strictement le prochain épisode, sinon on ne
+    // ferait que recopier « prochain » et afficherait un total trop bas (faux).
+    let planned = (Number.isFinite(m.episodes) && m.episodes > 0) ? m.episodes : null;
+    const schedMax = nodes.reduce((mx, n) => Math.max(mx, n.episode), 0);
+    if (!planned && schedMax > nextEp && schedMax > 1) planned = schedMax;
+
+    let endTs = null, approx = false;
+    if (planned) {
+      const finalNode = nodes.find((n) => n.episode === planned);
+      if (finalNode) { endTs = finalNode.airingAt * 1000; approx = false; }
+      else if (next && next.airingAt && next.episode) {
+        const weeksLeft = planned - next.episode;              // 0 = le prochain EST le dernier
+        if (weeksLeft >= 0) { endTs = (next.airingAt + weeksLeft * 7 * 86400) * 1000; approx = weeksLeft > 0; }
+      } else if (nodes.length) {
+        const maxAt = Math.max(...nodes.map((n) => n.airingAt));
+        if (maxAt) { endTs = maxAt * 1000; approx = true; }
+      }
+    }
+    return {
+      plannedTotal: planned, seasonEndTs: endTs, plannedApprox: approx,
+      anilistStatus: m.status || null,
+      // Date/numéro EXACTS du prochain épisode (sert au calendrier).
+      nextEpTs: (next && next.airingAt) ? next.airingAt * 1000 : null,
+      nextEpNum: (next && next.episode) ? next.episode : null,
+      // Genres AniList, traduits vers le français (voir translateAniGenres) — fusionnés
+      // dans s.categories par enrichAnilistSchedule, jamais affichés bruts en anglais.
+      genres: translateAniGenres(m.genres || []),
+    };
+  }
+
+  // Durée de vie du cache AniList : court pour une série en cours (le calendrier bouge),
+  // long sinon et pour les non-matchs (évite de re-questionner en boucle une série
+  // qu'AniList ne connaît pas). Un match récent et frais n'est jamais re-téléchargé.
+  function anilistTtlMs(v) {
+    return ((v && v.anilistStatus === 'RELEASING') ? 12 : 24 * 7) * 3600e3;
+  }
+  function readAnilistCached(seriesId) {
+    const o = cacheReadRaw('anilist:' + seriesId);
+    if (!o || !o.v || o.v.av !== ANILIST_CACHE_VER) return EMPTY_ANI;   // absent/ancien format
+    if (Date.now() - o.ts > anilistTtlMs(o.v)) return EMPTY_ANI;        // périmé : sera re-fetché
+    return {
+      plannedTotal: o.v.plannedTotal ?? null,
+      seasonEndTs: o.v.seasonEndTs ?? null,
+      plannedApprox: !!o.v.plannedApprox,
+      anilistStatus: o.v.anilistStatus ?? null,
+      nextEpTs: o.v.nextEpTs ?? null,
+      nextEpNum: o.v.nextEpNum ?? null,
+      genres: Array.isArray(o.v.genres) ? o.v.genres : [],
+    };
+  }
+  function anilistNeedsFetch(seriesId) {
+    const o = cacheReadRaw('anilist:' + seriesId);
+    if (!o || !o.v || o.v.av !== ANILIST_CACHE_VER) return true;   // ancien format = à refaire
+    return Date.now() - o.ts > anilistTtlMs(o.v);
+  }
+
+  // Interroge AniList pour UNE série et met le résultat en cache. Un échec réseau ne met
+  // rien en cache (on réessaiera) ; un non-match, lui, est mis en cache (négatif) pour ne
+  // pas re-questionner à chaque affichage.
+  // Repli titre anglais : le titre affiché (s.title) est dans la locale du compte
+  // (souvent fr-FR), qui colle rarement au titre AniList. Si la recherche avec ce titre
+  // ne donne AUCUN match sûr, on redemande la MÊME série à Crunchyroll en anglais (même
+  // series_id, juste `locale=en-US`) et on retente avec CE titre — nettement plus proche
+  // des titres romaji/anglais d'AniList. Un seul aller-retour de plus, et seulement pour
+  // les séries qui en ont besoin.
+  async function fetchAnilistSchedule(s) {
+    let media = null, searchedTitle = s.title;
+    try {
+      const res = await anilistSearch(s.title);
+      media = res.media;
+    } catch (e) {
+      safeCall.log(e, 'fetchAnilistSchedule');
+      return { error: (e && (e.message || String(e))) || 'requête échouée' };
+    }
+    let best = aniPickMatch(media, s);
+    if (!best) {
+      const enTitle = await getSeriesEnglishTitle(s.id);
+      if (enTitle && aniNorm(enTitle) !== aniNorm(s.title)) {
+        try {
+          const res2 = await anilistSearch(enTitle);
+          // Fusionne avec les candidats déjà vus (dédoublonnés par id) : la recherche FR
+          // a pu manquer la bonne fiche, ou la retrouver sans le score suffisant.
+          const seen = new Set(media.map((m) => m.id));
+          for (const m of res2.media) if (!seen.has(m.id)) { seen.add(m.id); media.push(m); }
+          searchedTitle = enTitle;
+          best = aniPickMatch(media, { ...s, title: enTitle });
+        } catch (e) { safeCall.log(e, 'fetchAnilistSchedule (repli EN)'); }
+      }
+    }
+    const result = { matched: false, ...EMPTY_ANI, aniId: null, aniTitle: '', av: ANILIST_CACHE_VER };
+    if (best) Object.assign(result, computeAniSchedule(best, s),
+      { matched: true, aniId: best.id, aniTitle: aniPrimaryTitle(best) });
+    result.searchedTitle = searchedTitle;   // diagnostic : quel titre a permis le match, s'il y en a un
+    cacheSet('anilist:' + s.id, result);
+    return result;
+  }
+
+  // Série dont les genres CR sont trop pauvres pour être exploitables telles quelles
+  // (0 ou 1 catégorie) : celles-ci profitent le plus d'un passage AniList, même hors
+  // diffusion — c'est justement ce qui vidait les tops genres des Stats jusqu'ici.
+  function needsAniGenres(s) {
+    return !(s.categories && s.categories.length >= 2);
+  }
+
+  // Passe d'enrichissement, en tâche de fond, APRÈS le premier affichage. Cible les
+  // séries en diffusion (planning + genres) ET, au-delà, TOUTE série suivie dont les
+  // genres Crunchyroll sont pauvres (genres seuls, même terminée) — nécessaire pour que
+  // les tops genres des Stats et le profil de goût de Découverte reflètent tout
+  // l'historique, pas seulement ce qui est en cours. Concurrence basse (politesse envers
+  // l'API publique AniList, limitée en débit) ; cache 12 h (en diffusion) / 7 j (sinon)
+  // via anilistNeedsFetch, donc un passage complet ne se refait pas à chaque affichage.
+  let anilistPassRunning = false;
+  async function enrichAnilistSchedule(list) {
+    if (!CFG.anilistSchedule || anilistPassRunning) return;
+    // Coupe-circuit : AniList a refusé (403/429) récemment → on laisse retomber avant de
+    // relancer, sinon on risque un blocage d'IP. (Le diagnostic manuel, lui, passe outre.)
+    const cooldown = anilistCooldownRemainingMs();
+    if (cooldown > 0) {
+      STATE.anilistWarning = 'AniList a refusé les requêtes (403/429) — nouvelle tentative dans ~'
+        + Math.ceil(cooldown / 60000) + ' min. Blocage côté AniList (API désactivée ou IP '
+        + 'temporairement limitée), pas un problème d\'installation du script.';
+      forceRender();
+      return;
+    }
+    const targets = (list || []).filter((s) => s && s.id
+      && (s.airing || needsAniGenres(s)) && anilistNeedsFetch(s.id));
+    if (!targets.length) return;
+    anilistPassRunning = true;
+    STATE.anilistProgress = { done: 0, total: targets.length, startedAt: Date.now() };
+    render();
+    try {
+      let changed = 0, errors = 0, lastErrorMsg = '';
+      await pool(targets, async (s) => {
+        const v = await fetchAnilistSchedule(s);
+        if (!v || v.error) { errors++; lastErrorMsg = (v && v.error) || 'requête échouée'; return; }
+        s.plannedTotal = v.plannedTotal;
+        s.seasonEndTs = v.seasonEndTs;
+        s.plannedApprox = v.plannedApprox;
+        s.anilistStatus = v.anilistStatus;
+        s.aniNextTs = v.nextEpTs;
+        s.aniNextNum = v.nextEpNum;
+        // Fusion (jamais remplacement) : les genres Crunchyroll déjà posés sur la carte
+        // restent en tête, AniList vient seulement compléter ce qui manque (voir
+        // mergeGenreLists). Alimente directement les tops genres des Stats et le profil
+        // de goût de Découverte, qui lisent tous deux s.categories.
+        if (v.genres && v.genres.length) s.categories = mergeGenreLists(s.categories, v.genres);
+        if (v.matched && (v.plannedTotal || v.seasonEndTs || v.nextEpTs || v.genres.length)) changed++;
+      }, 2, (done, total) => {
+        // Léger throttle : un re-rendu à chaque item suffit pour un compte-rendu fluide
+        // (2 requêtes en parallèle max — voir la limite ci-dessus — donc jamais un flot
+        // de rendus intempestif).
+        STATE.anilistProgress = { done, total, startedAt: STATE.anilistProgress.startedAt };
+        render();
+      });
+      // Un échec isolé (timeout, série introuvable côté AniList) n'a rien d'alarmant et
+      // se résorbe seul au prochain passage. En revanche, si TOUTES les requêtes de ce
+      // passage échouent, c'est le signe d'un problème systémique (le plus souvent : la
+      // CSP de Crunchyroll qui bloque les appels vers anilist.co) — là, ça vaut la peine
+      // de le dire plutôt que de laisser croire que la fonctionnalité est juste inactive.
+      if (errors && errors === targets.length) {
+        STATE.anilistWarning = `AniList indisponible : les ${targets.length} requête(s) de ce passage ont ` +
+          `échoué (${lastErrorMsg}). Un « 403 » ici vient d'AniList (API volontairement désactivée le temps ` +
+          `de soulager leurs serveurs, ou IP temporairement limitée) : rien à voir avec l'installation du ` +
+          `script, et ça se rétablit tout seul. Détail : Réglages → diagnostic AniList (« Tester AniList »).`;
+        forceRender();
+      } else if (errors < targets.length) {
+        // Au moins une requête a réussi ce passage-ci : AniList répond → on lève l'alerte et
+        // le coupe-circuit (les refus précédents étaient passagers).
+        anilistClearCooldown();
+        if (STATE.anilistWarning) { STATE.anilistWarning = null; forceRender(); }
+      }
+      if (changed) { LOG(`AniList : ${changed} série(s) enrichie(s) (total prévu / fin de saison)`); render(); }
+    } catch (e) { safeCall.log(e, 'enrichAnilistSchedule'); }
+    finally { anilistPassRunning = false; STATE.anilistProgress = null; render(); }
+  }
+
+  // Date courte « 19 sept. » (année ajoutée seulement si différente de l'année en cours).
+  function fmtShortDate(ts) {
+    const d = new Date(ts), now = new Date();
+    const opts = { day: 'numeric', month: 'short' };
+    if (d.getFullYear() !== now.getFullYear()) opts.year = 'numeric';
+    return d.toLocaleDateString('fr-FR', opts).replace(/\.$/, '');
+  }
+  // Combien il reste à voir dans la saison EN COURS (celle du prochain épisode), en
+  // épisodes annoncés par AniList (`s.plannedTotal`) moins ceux de cette saison déjà vus
+  // (`s.targetSeasonSeen`). Nécessaire car `s.total`/`s.seen` cumulent TOUTES les saisons
+  // d'une fiche Crunchyroll (ex. 41/55) alors qu'AniList ne décrit qu'UNE saison (ex. 14
+  // épisodes) — comparer `plannedTotal` à `s.total` donnerait un résultat incohérent.
+  // Retourne null si le total prévu n'est pas connu.
+  function plannedRemaining(s) {
+    if (!s || s.plannedTotal == null) return null;
+    return Math.max(0, s.plannedTotal - (s.targetSeasonSeen || 0));
+  }
+  // Petit encart sous la carte : combien il reste à voir dans la saison en cours + date
+  // de fin de saison, quand c'est utile (il en reste, ou la fin est encore à venir) et
+  // connu via AniList.
+  // Petit rappel textuel du total annoncé par AniList à côté de « X/Y vus », pour ceux
+  // qui ne veulent pas compter les cases une par une (voir ticks). N'affiche rien si
+  // Crunchyroll a déjà tout sorti pour la saison en cours (le total prévu = le total connu).
+  function plannedTotalHint(s) {
+    if (!s || !s.airing || s.plannedTotal == null || s.targetSeason == null) return '';
+    const knownInSeason = s.episodes.filter((e) => e.season === s.targetSeason).length;
+    if (s.plannedTotal <= knownInSeason) return '';
+    return ` <span class="crrav-planned-hint" title="Total d'épisodes annoncé par AniList pour la saison en cours">(${s.plannedTotal} prévus)</span>`;
+  }
+
+  function plannedInfo(s, compact) {
+    if (!s || !s.airing) return '';
+    const end = s.seasonEndTs;
+    const endFuture = end && end > Date.now() - DAY;      // « aujourd'hui » toléré
+    if (!endFuture) return '';
+    // Le nombre d'épisodes restants est maintenant visible directement dans les cases
+    // (voir ticks : les épisodes pas encore sortis apparaissent en bleu clair), donc ce
+    // texte ne garde plus que la date de fin de saison.
+    const tip = "Date du dernier épisode de la saison en cours — source AniList"
+      + (s.plannedApprox ? ' (date estimée au rythme hebdomadaire)' : '');
+    // (5) vue liste : la carte encadrée (fond + bordure) prend trop de place sur une ligne
+    // déjà dense et passe souvent sur 2 lignes — variante compacte : texte simple, 1 ligne,
+    // tronqué avec une ellipse au besoin plutôt que d'empiler un second bloc visuel.
+    const cls = compact ? 'crrav-planned crrav-planned-compact' : 'crrav-planned';
+    return `<div class="crrav-planned-row"><span class="${cls}" title="${tip}">🗓 saison complète ${
+      s.plannedApprox ? '~' : 'le '}${fmtShortDate(end)}</span></div>`;
+  }
+
+
+  // ─────────────────────────────────────────────────────────────
+  //  4. État + filtres mémorisés (7)
+  // ─────────────────────────────────────────────────────────────
+  const DEFAULT_FILTERS = {
+    q: '', status: 'todo', sort: 'remaining', hideAiringSeason: false,
+    discoverQ: '', discoverSort: 'relevance',
+    orphanQ: '', orphanSort: 'remaining',
+    globalQ: '',               // (7) recherche unifiée — remplace les 3 barres par onglet
+    view: 'grid',              // 'grid' | 'list'
+    headerCollapsed: false,    // replie manuellement bannière + stats + contrôles, sur les 3 onglets
+    showIgnored: false,        // affiche UNIQUEMENT les séries ignorées (watchlist), pour les restaurer
+    showIgnoredDiscover: false, // idem, mais pour les pépites ignorées depuis Découverte
+    discoverCatsIn: [],        // genres à garder exclusivement (vide = tous)
+    discoverCatsInMode: 'any', // 'any' (filtre manuel, OR) ou 'all' (baguette magique, AND strict)
+    discoverCatsEx: [],        // genres à exclure, en plus de CFG.discoverExcludeCategories
+    // Filtres par genre sur Reste à voir / Hors listes (mêmes puces à 3 états que Découverte).
+    catsIn: [], catsEx: [],
+    orphanCatsIn: [], orphanCatsEx: [],
+    // Filtres par genre sur le bloc Nouveautés du Calendrier (mêmes puces à 3 états).
+    newPremCatsIn: [], newPremCatsEx: [],
+    onlyAiring: false,         // uniquement les séries encore en diffusion
+    onlyRated: false,          // uniquement celles que tu as notées 4★ ou plus
+    onlyShort: false,          // séries courtes : 12 épisodes ou moins au total
+    quickFinish: false,        // il te reste 3 épisodes ou moins
+  };
+
+  function loadFilters() {
+    // Le tri par note a été retiré : on rebascule les préférences mémorisées pour ne pas
+    // laisser un tri inexistant (qui retomberait silencieusement sur le tri par défaut).
+    const FALLBACK = { sort: 'remaining', orphanSort: 'remaining', discoverSort: 'relevance' };
+    if (APP_STATE.filters && typeof APP_STATE.filters === 'object') {
+      for (const k of Object.keys(FALLBACK)) {
+        if (APP_STATE.filters[k] === 'rating') APP_STATE.filters[k] = FALLBACK[k];
+      }
+    }
+    const saved = (APP_STATE.filters && typeof APP_STATE.filters === 'object') ? { ...APP_STATE.filters } : {};
+    // Migration : avant la 2.8.1, les puces n'excluaient que.
+    if (Array.isArray(saved.discoverCats) && !saved.discoverCatsEx) {
+      saved.discoverCatsEx = saved.discoverCats;
+    }
+    delete saved.discoverCats;
+    // la recherche ne se mémorise pour aucun des onglets
+    return { ...DEFAULT_FILTERS, ...saved, q: '', discoverQ: '', orphanQ: '', globalQ: '' };
+  }
+  function saveFilters() {
+    const { q, discoverQ, orphanQ, globalQ, ...rest } = STATE.filters;
+    APP_STATE.filters = rest;
+    persistState(APP_STATE);
+  }
+
+  const STATE = {
+    series: [], raw: [], loading: false, error: null, warning: null,
+    announced: null, lastSync: null, settingsOpen: false, apiWarning: null, quotaWarning: null, anilistWarning: null,
+    probeResult: null, probeRunning: false, reconnecting: false,
+    anilistDiag: null, anilistDiagRunning: false, anilistDiagTargetId: null,
+    fullDiag: null, fullDiagRunning: false, fullDiagText: '',
+    anilistProgress: null,   // { done, total, startedAt } pendant enrichAnilistSchedule (planning + genres), null sinon
+    historyGenreProgress: null,   // { done, total, startedAt } pendant enrichHistoryGenres (genres « hors listes »), null sinon
+    ignoredQ: '', ignoredSort: 'title-asc',   // (27) recherche/tri du panneau « Séries ignorées »
+    historyProgress: null,   // { done, total, series } pendant le scan, null sinon
+    fromSnapshot: false,
+    filters: loadFilters(),
+    tab: 'suivi',
+    discover: { series: [], loading: false, error: null, warning: null, lastSync: null, excludedIds: new Set(), searchedFilters: undefined, similarTo: null, legendaryHunt: false },
+    orphan: { series: [], loading: false, error: null, warning: null, lastSync: null },
+    newPremieres: { series: [], loading: false, error: null, lastSync: null, debug: null },
+    // Crunchylists détectées (id + titre), pour le bouton d'ajout depuis Découverte.
+    myLists: { items: [], loading: false, error: null },
+    // Ids ajoutés depuis Découverte dans CETTE session : masqués de la liste sans
+    // attendre un rechargement complet (voir mAddedThisSession dans render()).
+    addedToList: new Set(),
+    // id de série en cours d'ajout (désactive son bouton le temps de la requête) et,
+    // si un choix de liste est demandé (CFG.askListEachTime), la fiche en attente de choix.
+    addingId: null,
+    listPicker: null,   // { seriesId, title } ou null
+  };
+
+  // (1) vu = flag Crunchyroll OU plus de 90 % de l'épisode écoulé
+  function seenState(e, ph) {
+    let started = false;
+    for (const id of e.ids) {
+      const x = ph.get(id);
+      if (!x) continue;
+      if (x.full) return 'seen';
+      if (e.dur && x.p >= e.dur * CFG.watchedRatio) return 'seen';
+      if (x.p > 0) started = true;
+    }
+    return started ? 'started' : 'none';
+  }
+
+  // Extrait les noms de genres d'un panel de série, quel que soit le format renvoyé.
+  // tenant_categories est un tableau d'OBJETS { tenant_category, localization:{title} },
+  // pas de chaînes — d'où les genres cassés ("[object Object]") si on fait String(c).
+  // On privilégie le libellé localisé (français), sinon le slug technique.
+  function extractGenres(panel) {
+    const meta = (panel && panel.series_metadata) || panel || {};
+    const raw = meta.tenant_categories || meta.genres || meta.categories || [];
+    const out = [];
+    for (const c of raw) {
+      if (typeof c === 'string') { out.push(c); continue; }
+      if (c && typeof c === 'object') {
+        const label = (c.localization && c.localization.title)
+          || c.tenant_category || c.category || c.slug || c.name;
+        if (label) out.push(String(label));
+      }
+    }
+    // Dédoublonnage en préservant l'ordre.
+    return [...new Set(out)];
+  }
+
+  // Construit l'objet « série » utilisé par les cartes (onglets Reste à voir et
+  // Hors listes) à partir du panel, des épisodes, de la note et des playheads.
+  function buildSeriesEntry(panel, episodes, maxAir, rating, order, ph) {
+    // Date de visionnage la plus récente, tous épisodes confondus → tri « Dernier vu ».
+    let lastWatchedTs = 0;
+    const marked = episodes.map((e) => {
+      const st = seenState(e, ph);
+      for (const id of e.ids) {
+        const x = ph.get(id);
+        if (x && x.t && x.t > lastWatchedTs) lastWatchedTs = x.t;
+      }
+      return { ...e, seen: st === 'seen', started: st === 'started' };
+    });
+    const total = marked.length;
+    const seen = marked.filter((e) => e.seen).length;
+    // (#10) Reprise intelligente : si un épisode est commencé mais pas fini, c'est
+    // LUI qu'on reprend — pas le premier non-vu. On a déjà la progression en mémoire.
+    const firstUnseen = marked.find((e) => !e.seen);
+    const inProgressEp = marked.find((e) => e.started && !e.seen);
+    const next = inProgressEp || firstUnseen;
+    const resuming = !!inProgressEp;   // pour afficher « Reprendre » vs « Épisode suivant »
+    const secLeft = marked.filter((e) => !e.seen).reduce((a, e) => a + (e.dur || 0), 0);
+
+    // Diffusion évaluée saison par saison : si tu en es à la S1 déjà bouclée
+    // pendant que la S2 sort, ta saison à toi n'est pas « en cours ».
+    const seasonAir = new Map();
+    for (const e of marked) {
+      if (!e.air) continue;
+      if (!seasonAir.has(e.season) || e.air > seasonAir.get(e.season)) seasonAir.set(e.season, e.air);
+    }
+    const nextSeasonAiring = next ? isAiring(seasonAir.get(next.season)) : false;
+
+    // Saison de RÉFÉRENCE pour le total AniList : celle du prochain épisode à voir, ou
+    // à défaut la plus récente en mémoire. AniList décrit une saison à la fois (ex. 14
+    // épisodes prévus) alors que `total`/`seen` cumulent TOUTES les saisons de la fiche
+    // Crunchyroll (ex. 41/55) — les deux ne sont pas comparables directement, d'où le
+    // besoin de compter les épisodes déjà vus DANS cette seule saison (voir plannedInfo).
+    const targetSeason = next ? next.season
+      : marked.reduce((mx, e) => (e.season > mx ? e.season : mx), 0) || null;
+    const targetSeasonSeen = targetSeason == null ? 0
+      : marked.filter((e) => e.season === targetSeason && e.seen).length;
+
+    // Total prévu + fin de saison depuis le cache AniList (rempli en tâche de fond par
+    // enrichAnilistSchedule). Absent/périmé → champs nuls, l'affichage reste inchangé.
+    const ani = readAnilistCached(panel.id);
+
+    return {
+      id: panel.id,
+      title: panel.title,
+      slug: panel.slug_title,
+      poster: posterOf(panel),
+      rating,
+      synopsis: panel.description || '',
+      // Genres de la série : DÉJÀ présents dans le panel /cms/series (en cache), on ne
+      // les exploitait simplement pas ici — d'où des genres vides hors Découverte.
+      // Aucune requête ajoutée.
+      categories: extractGenres(panel),
+      episodes: marked,
+      total, seen,
+      inProgress: marked.filter((e) => e.started).length,
+      remaining: total - seen,
+      pct: total ? Math.round((seen / total) * 100) : 0,
+      secLeft,                       // (5)
+      airing: isAiring(maxAir),      // (3)(10)
+      nextSeasonAiring,
+      maxAir,
+      // Pour le calendrier : dernier épisode SORTI (le plus récent par date), et
+      // où tu en es réellement (dernier épisode vu). Tout est déjà en mémoire.
+      lastAired: (() => {
+        const withAir = marked.filter((e) => e.air);
+        if (!withAir.length) return null;
+        return withAir.reduce((a, e) => (e.air > a.air ? e : a), withAir[0]);
+      })(),
+      lastSeen: (() => {
+        const seenEps = marked.filter((e) => e.seen);
+        if (!seenEps.length) return null;
+        return seenEps.reduce((a, e) =>
+          (e.season > a.season || (e.season === a.season && e.n > a.n)) ? e : a, seenEps[0]);
+      })(),
+      next,
+      resuming,
+      order,
+      lastWatchedTs,
+      targetSeason, targetSeasonSeen,
+      // AniList (peut être null) : total d'épisodes annoncé et date de fin de saison.
+      plannedTotal: ani.plannedTotal,
+      seasonEndTs: ani.seasonEndTs,
+      plannedApprox: ani.plannedApprox,
+      anilistStatus: ani.anilistStatus,
+      aniNextTs: ani.nextEpTs,
+      aniNextNum: ani.nextEpNum,
+    };
+  }
+
+  // (8) Recalcule les champs dérivés d'une série après un marquage « vu » local,
+  // sans refaire tout buildSeriesEntry (pas de ph, pas de requête). Même logique
+  // de reprise intelligente que buildSeriesEntry, appliquée sur s.episodes déjà à jour.
+  // Chronomètre de phase : on mesure avant d'optimiser.
+  function timer() {
+    let t = performance.now();
+    const marks = [];
+    return {
+      lap(label) {
+        const now = performance.now();
+        marks.push([label, Math.round(now - t)]);
+        t = now;
+      },
+      report(total) {
+        const sum = marks.reduce((a, m) => a + m[1], 0);
+        LOG(`⏱ ${total} en ${(sum / 1000).toFixed(1)} s :`,
+          marks.map(([l, ms]) => `${l} ${(ms / 1000).toFixed(1)}s`).join(' · '));
+        LOG(`📊 cache ${STATS.hit} hits / ${STATS.miss} miss` +
+          ` · ${STATS.requests} requêtes · ${STATS.guids} GUID · ${STATS.rate429} erreurs 429` +
+          ` · parallélisme max ${STATS.maxParallel}` +
+          ` · localStorage ${fmtBytes(lsBytes())}` +
+          (STATS.evicted ? ` · ${STATS.evicted} entrées purgées` : '') +
+          (STATS.writeFail ? ` · ⚠ ${STATS.writeFail} ÉCRITURES DE CACHE ÉCHOUÉES` : ''));
+        const rows = Object.entries(STATS.byEndpoint)
+          .map(([k, e]) => ({
+            endpoint: k,
+            appels: e.n,
+            'total (s)': +(e.ms / 1000).toFixed(1),
+            'moyenne (ms)': Math.round(e.ms / e.n),
+            'pire (ms)': Math.round(e.max),
+            'URL max (car.)': e.urlMax,
+          }))
+          .sort((a, b) => b['total (s)'] - a['total (s)']);
+        console.log('%c[reste-à-voir] temps par endpoint', 'color:#f47521;font-weight:bold');
+        console.table(rows);
+      },
+    };
+  }
+
+  async function loadAll(onProgress) {
+    STATE.loading = true;
+    STATE.error = null;
+    STATE.warning = null;
+    STATE.apiWarning = null;
+    // Si un instantané est déjà affiché, on ne le remplace pas paquet par paquet :
+    // la grille passerait de 29 séries à 8 sous les yeux, puis remonterait.
+    const hadSnapshot = STATE.series.length > 0;
+    render();
+    const T = timer();
+    resetCounters();                                       // compteurs par chargement
+    try {
+      onProgress(stepLabel(1, 4, 'Lecture de ton profil…'));
+      const accountId = await getAccountId();
+      LOG('accountId =', accountId);
+      T.lap('profil');
+
+      onProgress(stepLabel(2, 4, 'Récupération de ta watchlist…'));
+      const wl = await getWatchlist(accountId);
+      T.lap('watchlist');
+
+      onProgress(stepLabel(3, 4, 'Récupération de tes listes…'));
+      const cl = await getCustomLists(accountId);
+      T.lap('listes');
+
+      STATE.raw = wl.concat(cl);
+      LOG('total à analyser :', STATE.raw.length, `(watchlist ${wl.length} + listes ${cl.length})`);
+
+      const refs = new Map();
+      for (const it of STATE.raw) {
+        const ref = extractSeriesRef(it);
+        if (ref && ref.id && !refs.has(ref.id)) refs.set(ref.id, ref);
+      }
+      const seriesRefs = [...refs.values()];
+      LOG('séries retenues après dédoublonnage :', seriesRefs.length);
+
+      if (!seriesRefs.length && STATE.raw.length) {
+        throw new Error(`${STATE.raw.length} entrées reçues mais aucune reconnue comme série. ` +
+          `Ouvre la console et envoie-moi resteAVoir.state.raw[0].`);
+      }
+
+      // Traitement par paquets : chaque paquet est affiché dès qu'il est prêt, au lieu
+      // de laisser l'écran vide jusqu'à la toute dernière série. Les playheads sont
+      // demandés par paquet (quelques requêtes de plus, mais la grille se remplit).
+      const CHUNK = 8;
+      const fresh = [];
+      let epCount = 0, guidCount = 0;
+
+      for (let i = 0; i < seriesRefs.length; i += CHUNK) {
+        const slice = seriesRefs.slice(i, i + CHUNK);
+        const results = await pool(slice, async (ref, k) => {
+          const panel = ref.panel || (await getSeriesPanel(ref.id));
+          if (!panel) return null;
+          const eps = await getEpisodes(ref.id);
+          const rating = getRatingCached(ref.id);      // sans requête : complété plus tard
+          return { panel, episodes: eps.episodes, maxAir: eps.maxAir, rating, order: i + k };
+        }, CFG.concurrency);
+
+        const ok = results.filter(Boolean);
+        const ids = [...new Set(ok.flatMap((r) => r.episodes.flatMap((e) => e.ids)))];
+        epCount += ok.reduce((a, r) => a + r.episodes.length, 0);
+        guidCount += ids.length;
+        STATS.guids += ids.length;
+
+        const ph = ids.length ? await getPlayheads(accountId, ids) : new Map();
+        fresh.push(...ok.map(({ panel, episodes, maxAir, rating, order }) =>
+          buildSeriesEntry(panel, episodes, maxAir, rating, order, ph)));
+
+        // Affichage progressif : la grille se remplit sous les yeux — sauf si un
+        // instantané est déjà à l'écran, auquel cas on remplace tout à la fin.
+        if (!hadSnapshot && !sessionLost) STATE.series = markNew([...fresh]);
+        onProgress(stepLabel(4, 4, `Analyse des épisodes… ${Math.min(i + CHUNK, seriesRefs.length)}/${seriesRefs.length}`));
+        render();
+      }
+
+      // Notes manquantes : après l'affichage, hors du chemin critique.
+      idle(() => fillMissingRatings(fresh));
+      // Total prévu + fin de saison + genres (AniList) : en fond, séries en diffusion
+      // ET séries aux genres Crunchyroll trop pauvres (voir needsAniGenres).
+      idle(() => enrichAnilistSchedule(fresh));
+      prefetchIdle();
+
+      LOG('séries analysées :', fresh.length, '· épisodes :', epCount, '· GUID interrogés :', guidCount);
+      T.lap('épisodes+notes+playheads');
+      if (sessionLost) {
+        // Session perdue pendant le scan : NE PAS écraser les données valides par un
+        // résultat tronqué. La reconnexion automatique relancera un scan propre.
+        LOG('session perdue pendant le scan — données précédentes conservées');
+      } else {
+        STATE.series = markNew(fresh);
+        STATE.lastSync = new Date();
+        STATE.fromSnapshot = false;
+        snapshotSave();
+      }
+      T.report(`chargement de ${fresh.length} séries`);
+    } catch (e) {
+      console.error('[reste-à-voir] échec du chargement', e);
+      STATE.error = e.message || String(e);
+    } finally {
+      STATE.loading = false;
+      render();
+    }
+  }
+
+  // Renvoie les slugs de catégories d'un panel, en minuscule, ou null si le champ
+  // est introuvable (on journalise une fois pour repérer un changement d'API).
+  let loggedMissingCategories = false;
+  function panelCategories(p) {
+    const meta = (p && p.series_metadata) || p || {};
+    const raw = meta.tenant_categories || meta.genres || meta.categories || null;
+    if (!raw) {
+      if (!loggedMissingCategories) {
+        loggedMissingCategories = true;
+        LOG('champ catégories introuvable sur le panel — filtre de genre inactif pour', p.title, p);
+      }
+      return null;
+    }
+    // extractGenres gère les DEUX formes (chaînes ET objets tenant_categories),
+    // contrairement à String(c) qui produisait "[object Object]" et cassait le filtre.
+    return extractGenres(p).map((c) => c.toLowerCase());
+  }
+
+  // Décide si un panel doit être ÉCARTÉ dès la recherche selon TOUS les filtres de
+  // genre : le réglage permanent (discoverExcludeCategories) ET les puces live
+  // (discoverCatsIn / discoverCatsEx). Faire ce tri ici, avant de dépenser la moindre
+  // requête, évite de gaspiller le quota de pépites pour des séries aussitôt jetées.
+  // Décide, À PARTIR D'UNE LISTE DE GENRES déjà extraite, si la série doit être écartée
+  // selon TOUS les filtres de genre (réglage permanent + puces live). Prend la liste en
+  // argument plutôt qu'un panel : le panel « browse » de Découverte ne porte pas toujours
+  // les genres, alors que le panel complet /cms/series, lui, oui — c'est LUI qui doit
+  // faire foi. cats == null / vide ⇒ genres inconnus.
+  // `liveInArr`/`liveExArr` : puces live à appliquer en plus du réglage permanent
+  // (CFG.discoverExcludeCategories). Par défaut celles de Découverte, mais Nouveautés
+  // passe ses propres puces (newPremCatsIn/newPremCatsEx) — mêmes règles, listes séparées.
+  // `strict` : quand true, applique un AND — il faut TOUS les genres de `keep` (utilisé par
+  // la baguette magique « séries similaires », qui veut une vraie recherche croisée sur les
+  // genres de la série source, pas juste un genre en commun au hasard). Par défaut OR (un
+  // seul genre gardé suffit) — comportement du filtre manuel par puces et de Nouveautés.
+  function categoriesRejectedByGenre(catsRaw, liveInArr, liveExArr, strict) {
+    const cats = catsRaw ? catsRaw.map((c) => c.toLowerCase()) : null;
+    const f = STATE.filters;
+    const keep = (liveInArr || f.discoverCatsIn || []).map((c) => c.toLowerCase());
+    const excludeLive = (liveExArr || f.discoverCatsEx || []).map((c) => c.toLowerCase());
+    const excludeCfg = CFG.discoverExcludeCategories.map((c) => c.toLowerCase());
+
+    // Sans catégories : on ne peut ni exclure ni confirmer. On n'écarte que si un
+    // filtre « garder uniquement » est actif — auquel cas l'absence de genre = pas un match.
+    if (!cats || !cats.length) return keep.length > 0;
+
+    // 1. exclusions (réglage + puces) : un seul genre exclu suffit à écarter
+    if (cats.some((c) => excludeCfg.includes(c) || excludeLive.includes(c))) return true;
+    // 2. « garder uniquement » : AND strict (baguette magique) ou OR (filtre normal)
+    if (keep.length) {
+      const matches = strict ? keep.every((c) => cats.includes(c)) : cats.some((c) => keep.includes(c));
+      if (!matches) return true;
+    }
+    return false;
+  }
+
+  function panelRejectedByGenre(p) {
+    return categoriesRejectedByGenre(panelCategories(p));
+  }
+
+  // Pré-filtre AU STADE « browse » : le panel de la liste popularité ne porte pas
+  // toujours les genres. On ne tranche donc ICI que si les genres sont réellement
+  // présents ; sinon on laisse passer et on tranche plus loin, panel complet en main.
+  // (Sans ça, un filtre « garder uniquement » écartait TOUS les candidats dès le browse,
+  //  d'où une relance qui ne renvoyait jamais rien.)
+  // Volontairement TOUJOURS en OR ici, même en mode baguette magique (AND) : le panel
+  // browse peut lister les genres de façon incomplète, un vrai candidat AND pourrait donc
+  // sembler n'en avoir qu'un seul à ce stade et être écarté à tort. Le filtre qui fait
+  // AUTORITÉ (categoriesRejectedByGenre en mode strict, plus bas avec le panel complet)
+  // rattrape les faux positifs qui passeraient ici.
+  function browseRejectedByGenre(p) {
+    const cats = panelCategories(p);
+    if (!cats || !cats.length) return false;   // genres inconnus au stade browse
+    return categoriesRejectedByGenre(cats);
+  }
+
+  // (D) Onglet Découverte : parcourt le classement popularité de Crunchyroll et
+  // ne garde que les séries jamais vues (ni dans une liste, ni dans l'historique),
+  // avec au plus CFG.discoverMaxSeasons saisons et une note >= CFG.discoverMinRating.
+  // Empreinte stable des filtres de genre live, pour comparer « recherché » vs « actuel ».
+  function genreFilterKey() {
+    const f = STATE.filters;
+    const norm = (a) => [...(a || [])].map((c) => c.toLowerCase()).sort().join(',');
+    return `in:${norm(f.discoverCatsIn)}|mode:${f.discoverCatsInMode || 'any'}|ex:${norm(f.discoverCatsEx)}`;
+  }
+
+  async function loadDiscover(onProgress, opts) {
+    const more = !!(opts && opts.more);
+    // `force` : relance explicite (bouton « Actualiser » / « Relancer » / « 30 autres »).
+    // On rafraîchit alors l'historique de visionnage, pour ne PLUS reproposer ce que tu
+    // viens de regarder. Les membres de tes listes, eux, sont TOUJOURS relus (ci-dessous).
+    const force = !!(opts && opts.force);
+    // 🎲 Dé légendaire : au lieu de viser CFG.discoverTarget candidats bruts en scannant au
+    // plus CFG.discoverMaxPages pages, on vise CFG.legendaryTarget pépites LÉGENDAIRES (3
+    // signaux ou plus) en scannant beaucoup plus profond (CFG.legendaryMaxPages). Un candidat
+    // qui n'est pas légendaire est rejeté comme les autres filtres (note, saisons, genre) —
+    // il continue de coûter la requête mais ne compte pas dans le quota, d'où le scan plus
+    // long : il faut brasser plus de popularité pour tomber sur d'authentiques pépites.
+    const legendary = !!(opts && opts.legendary);
+    const D = STATE.discover;
+    D.loading = true;
+    D.error = null;
+    D.warning = null;
+    D.legendaryHunt = legendary;
+    // (relance) recherche « standard » : on repart d'un historique d'exclusion vierge.
+    // recherche « 30 autres » / « encore des légendaires » : on garde le souvenir des
+    // pépites déjà montrées pour ne jamais les remontrer d'une relance à l'autre.
+    if (!more) D.excludedIds = new Set();
+    // Empreinte des filtres de genre utilisés pour CETTE recherche : sert à détecter
+    // si tu les as changés depuis, et à te proposer alors de relancer.
+    D.searchedFilters = genreFilterKey();
+    render();
+    try {
+      onProgress(stepLabel(1, 3, 'Lecture de ton profil…'));
+      const accountId = await getAccountId();
+      // Profil de goût nécessaire pour juger « légendaire » PENDANT le scan (pas seulement
+      // à l'affichage) : c'est lui qui détermine ce qui compte comme trouvé en mode 🎲.
+      const tasteProfile = legendary ? buildTasteProfile() : null;
+
+
+      // Séries déjà connues via la watchlist / les listes personnalisées.
+      const knownIds = new Set(STATE.series.map((s) => s.id));
+      for (const it of STATE.raw) {
+        const ref = extractSeriesRef(it);
+        if (ref && ref.id) knownIds.add(ref.id);
+      }
+      // Séries écartées à la main : retirées AVANT la recherche, sinon elles
+      // consommeraient le quota de pépites pour être jetées ensuite à l'affichage.
+      for (const id of IGNORED.keys()) knownIds.add(id);
+
+      // Membres ACTUELS de tes listes (watchlist + Crunchylists), relus à chaud : une
+      // série que tu viens d'ajouter à une liste ne doit plus apparaître ici. STATE.series
+      // n'est PAS rechargé par une simple relance de Découverte, d'où cette lecture ciblée.
+      let listMemberIds = new Set();
+      try {
+        listMemberIds = await getListMemberIds(accountId);
+        listMemberIds.forEach((id) => knownIds.add(id));
+      } catch (_) { /* best-effort */ }
+
+      // Si une de ces séries n'est pas encore dans « Reste à voir » (STATE.series), c'est
+      // un ajout tout frais : on relance « Reste à voir » en tâche de fond pour qu'elle y
+      // apparaisse aussi (ne bloque pas l'affichage des pépites). Se déclenche une seule
+      // fois par ajout : une fois loadAll passé, la série est dans STATE.series.
+      const currentIds = new Set(STATE.series.map((s) => s.id));
+      const hasNewMember = [...listMemberIds].some((id) => !currentIds.has(id));
+      if (hasNewMember && !STATE.loading) idle(() => { if (!STATE.loading) refresh(); });
+
+      onProgress(stepLabel(2, 3, 'Historique de visionnage…'));
+      let watchedIds = new Set();
+      try {
+        watchedIds = await getWatchedSeriesIds(accountId, (p) => onProgress(stepLabel(2, 3, historyScanLabel(p))), force);
+        if (!watchedIds.size) {
+          D.warning = "Historique de visionnage vide ou indisponible : seules les séries de tes " +
+            "listes sont exclues de Découverte, pas celles juste commencées ailleurs. " +
+            "Regarde la console pour le détail.";
+        }
+      } catch (e) {
+        console.warn('[reste-à-voir] historique indisponible, on continue sans', e);
+        D.warning = "Impossible de lire ton historique de visionnage (" + (e.message || e) + "). " +
+          "Découverte n'exclut que les séries de tes listes.";
+      }
+
+      const excluded = new Set([...knownIds, ...watchedIds, ...D.excludedIds]);
+      const seenCandidate = new Set();
+      const matches = [];
+      let start = 0;
+      const maxPages = legendary ? CFG.legendaryMaxPages : CFG.discoverMaxPages;
+      const target = legendary ? CFG.legendaryTarget : CFG.discoverTarget;
+      const progressWord = legendary ? 'légendaires' : 'trouvées';
+
+      for (let page = 0; page < maxPages && matches.length < target; page++) {
+        onProgress(stepLabel(3, 3, `Séries populaires… page ${page + 1}/${maxPages} · ${matches.length}/${target} ${progressWord}`));
+        const r = await api('/content/v2/discover/browse', {
+          sort_by: 'popularity', n: CFG.discoverPageSize, start,
+          locale: CFG.locale, type: 'series',
+        });
+        const data = r.data || [];
+        if (!data.length) break;
+        start += data.length;
+
+        const candidates = data
+          .map((p) => p.panel || p)
+          .filter((p) => {
+            if (!p || !p.id) return false;
+            if (excluded.has(p.id) || seenCandidate.has(p.id)) return false;
+            // Pré-filtre de genre AVANT toute requête, MAIS seulement si le panel browse
+            // porte les genres (souvent non). Le vrai filtre se fait plus bas, une fois le
+            // panel complet récupéré — sinon « garder uniquement » écartait tout le monde ici.
+            if (browseRejectedByGenre(p)) return false;
+            // Filtre GRATUIT : le nombre de saisons est déjà dans la réponse browse.
+            // Avant, on dépensait une requête /seasons par candidat pour le découvrir,
+            // puis on le jetait. C'était la cause des « plusieurs minutes ».
+            const ns = panelSeasons(p);       // calculé une seule fois
+            if (ns != null && ns > CFG.discoverMaxSeasons) return false;
+            return true;
+          });
+        candidates.forEach((p) => seenCandidate.add(p.id));
+        if (!candidates.length) continue;
+
+        // Par petits paquets, pour s'arrêter dès que le quota est atteint au lieu
+        // d'analyser les 50 candidats de la page.
+        const results = [];
+        for (let c = 0; c < candidates.length && matches.length + results.length < target; c += 8) {
+          const slice = candidates.slice(c, c + 8);
+          const got = await pool(slice, async (p) => {
+            // 1. saisons : gratuit si le panel le donne, sinon 1 requête
+            let seasons = panelSeasons(p);
+            if (seasons == null) seasons = await getSeasonCount(p.id);
+            if (seasons == null || seasons > CFG.discoverMaxSeasons) return null;
+
+            // 2. genres FIABLES : le panel browse ne porte pas toujours tenant_categories,
+            // d'où des cartes sans genre (aucune puce de filtre) et un filtre par genre
+            // inopérant. On lit le panel complet /cms/series (en cache 7 j, souvent déjà là
+            // pour une série populaire) pour disposer des vrais genres, puis on applique le
+            // filtre de genre qui fait AUTORITÉ. Placé avant note/épisodes : on économise
+            // ces requêtes pour les séries que le genre écarte de toute façon.
+            let categories = extractGenres(p);
+            if (!categories.length) {
+              const full = await getSeriesPanel(p.id);
+              if (full) categories = extractGenres(full);
+            }
+            if (categoriesRejectedByGenre(categories, null, null, STATE.filters.discoverCatsInMode === 'all')) return null;
+
+            // 3. note : 1 requête, seulement pour les survivants (candidats jamais vus ⇒
+            // jamais en cache : contrairement à Suivi/Hors listes, on ne peut pas se
+            // contenter du cache ici, sous peine de rejeter systématiquement tout le monde).
+            const rating = await getRating(p.id);
+            if (rating == null || rating < CFG.discoverMinRating) return null;
+
+            // 4. épisodes + progression : le plus cher, réservé au dernier carré
+            let episodes = 0;
+            let secTotal = 0;
+            let maxAir = null;          // date du dernier épisode sorti → tri « publication récente »
+            try {
+              const eps = await getEpisodes(p.id);
+              episodes = eps.episodes.length;
+              secTotal = eps.episodes.reduce((a, e) => a + (e.dur || 0), 0);
+              maxAir = eps.maxAir || null;
+
+              // Filet de sécurité (6) : l'historique peut être incomplet, donc on vérifie
+              // la progression réelle. Inutile quand le scan a couvert TOUT l'historique :
+              // watchedIds fait alors autorité, et on économise une requête par candidat.
+              if (eps.episodes.length && !historyComplete) {
+                const epIds = [...new Set(eps.episodes.flatMap((e) => e.ids))];
+                const ph = await getPlayheads(accountId, epIds);
+                const started = eps.episodes.some((e) => {
+                  for (const id of e.ids) {
+                    const x = ph.get(id);
+                    if (!x) continue;
+                    if (x.full) return true;
+                    if (e.dur && x.p >= e.dur * CFG.watchedRatio) return true;
+                    if (x.p > 0) return true;
+                  }
+                  return false;
+                });
+                if (started) return null;
+              }
+            } catch (e) {
+              // Une erreur ici laissait passer la série par défaut : on exclut par
+              // prudence, cohérent avec « jamais proposer ce qui est déjà vu ».
+              console.warn('[reste-à-voir] vérif. impossible pour', p.id, '— exclue par prudence', e);
+              return null;
+            }
+
+            const candidate = {
+              id: p.id,
+              title: p.title,
+              slug: p.slug_title,
+              poster: posterOf(p),
+              synopsis: p.description || '',
+              rating, seasons,
+              categories,
+              episodes, secTotal, maxAir,
+              order: seenCandidate.size,
+            };
+            // 🎲 5. dernier filtre, coûteux nulle part (calcul local) : en mode légendaire,
+            // seules les pépites à 3 signaux ou plus comptent dans le quota. Une candidate
+            // qui a passé tous les filtres précédents mais n'est « que » notable/pref est
+            // rejetée ici — c'est ELLE qui fait que le scan va chercher plus loin.
+            if (legendary && !discoverSignals(candidate, tasteProfile).legendary) return null;
+            return candidate;
+          }, CFG.concurrency);
+          results.push(...got.filter(Boolean));
+          onProgress(stepLabel(3, 3, `Séries populaires… page ${page + 1}/${maxPages} · ${matches.length + results.length}/${target} ${progressWord}`));
+        }
+
+        matches.push(...results.filter(Boolean));
+      }
+
+      const found = matches.slice(0, target);
+      found.forEach((s) => D.excludedIds.add(s.id));
+      if (more && !found.length) {
+        D.warning = legendary
+          ? "Aucune autre pépite légendaire trouvée pour l'instant — essaie d'élargir tes genres, ou réessaie plus tard."
+          : "Aucune autre pépite trouvée pour l'instant — le classement popularité n'a " +
+            "pas assez changé. Réessaie plus tard.";
+      } else if (legendary && !found.length) {
+        D.warning = "Aucune pépite légendaire trouvée dans les " + maxPages + " pages scannées. " +
+          "Essaie d'élargir tes genres, ou relance le dé : le classement popularité bouge.";
+        D.series = found;
+        D.lastSync = new Date();
+      } else {
+        D.series = found;
+        D.lastSync = new Date();
+        idle(() => fillMissingRatings(found));
+      }
+    } catch (e) {
+      console.error('[reste-à-voir] échec découverte', e);
+      D.error = e.message || String(e);
+    } finally {
+      D.loading = false;
+      render();
+    }
+  }
+
+  // (N) Calendrier — bloc « Nouveautés » : entièrement basé sur AniList plutôt que sur le
+  // catalogue Crunchyroll. Raison : Crunchyroll n'expose aucun tri « ajouts récents »
+  // documenté (contrairement à `sort_by=popularity`, déjà utilisé et vérifié ailleurs
+  // dans ce fichier) — on aurait dû PARIER sur une valeur non confirmée. AniList, lui,
+  // documente `airingSchedules` : on y demande directement les épisodes 1 (`episode: 1`)
+  // dans une fenêtre de temps qui couvre DEUX cas, tous deux affichés mais visuellement
+  // distingués (voir newPremiereCard) :
+  //   1. déjà sorti : airingAt dans le passé, épisode 2 pas encore publié — la définition
+  //      d'origine, celle qu'on peut regarder dès maintenant ;
+  //   2. à venir : airingAt dans le futur (fenêtre newPremieresUpcomingDays) — l'épisode 1
+  //      n'est pas encore sorti du tout, c'est une première mondiale imminente à surveiller.
+  // Fiable et déjà éprouvé dans ce script (voir section 3bis, total prévu / fin de saison).
+  //
+  // Identifiant Crunchyroll : AniList expose `externalLinks` (site/url/type), qui inclut
+  // parfois un lien Crunchyroll direct — c'est la source DE LOIN la plus fiable (déclarée
+  // par AniList lui-même, pas déduite) et gratuite en requêtes (déjà dans cette même
+  // query). Priorité 1 : on essaie d'en extraire l'id + slug par URL (voir
+  // parseCrunchyrollUrl). Mais ce champ n'est pas systématiquement renseigné (série tout
+  // juste annoncée, fiche AniList pas encore mise à jour) : priorité 2, en repli, on
+  // interroge la VRAIE recherche Crunchyroll elle-même (`/content/v2/discover/search`,
+  // même endpoint `api()` que tout le reste du script) avec les variantes de titre AniList
+  // (anglais, romaji, natif), puis on note chaque résultat avec aniNorm/aniDice — la même
+  // logique de similarité déjà éprouvée pour l'appariement AniList↔CR ailleurs dans ce
+  // fichier (voir aniPickMatch). Un score assez haut ⇒ lien direct vers la fiche CR. Sinon,
+  // aucune des deux sources n'est assez sûre : la nouveauté est écartée plus loin (voir
+  // loadNewPremieres) plutôt que proposée avec un lien approximatif.
+  // Résultat mis en cache (positif 30 j, négatif 3 j — la fiche CR peut apparaître après
+  // coup, le temps que Crunchyroll publie la série).
+  const ANILIST_NEWPREM_QUERY = `query ($from: Int!, $to: Int!, $page: Int!, $perPage: Int!) {
+    Page(page: $page, perPage: $perPage) {
+      pageInfo { hasNextPage }
+      airingSchedules(episode: 1, airingAt_greater: $from, airingAt_lesser: $to, sort: TIME_DESC) {
+        airingAt
+        media {
+          id
+          title { romaji english native }
+          format
+          status
+          genres
+          description(asHtml: false)
+          coverImage { large }
+          nextAiringEpisode { episode airingAt }
+          externalLinks { site url type }
+        }
+      }
+    }
+  }`;
+  // Description AniList : HTML simple (<br>, <i>…) + parfois une mention finale
+  // « (Source: … ) » à couper — même esprit que le nettoyage déjà fait ailleurs sur les
+  // synopsis Crunchyroll (eux n'en ont pas besoin, texte déjà propre).
+  function aniStripDescription(html) {
+    return String(html || '')
+      .replace(/<br\s*\/?>/gi, ' ')
+      .replace(/<[^>]+>/g, '')
+      .replace(/\s*\(Source:[^)]*\)\s*$/i, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  // Extrait { id, slug } d'une URL de fiche série Crunchyroll, quel que soit le préfixe
+  // de locale (ou son absence) : .../series/G6497W726, .../fr/series/G6497W726/le-titre…
+  // `null` si l'URL ne correspond pas au motif attendu (lien cassé, page hors « /series/ »
+  // — ex. une chaîne YouTube ou un site officiel, aussi listés dans externalLinks).
+  function parseCrunchyrollUrl(url) {
+    const m = /crunchyroll\.com\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?series\/([A-Za-z0-9]+)(?:\/([^/?#]+))?/i.exec(String(url || ''));
+    return m ? { id: m[1], slug: m[2] || '' } : null;
+  }
+
+  // Sur Android (PWA/onglet Edge, Chrome…), la lecture vidéo Crunchyroll ne fonctionne QUE
+  // dans l'appli native (DRM Widevine bloqué dans une webview/PWA tierce) : un lien https:
+  // classique ouvre la fiche/le lecteur dans le navigateur, qui échoue silencieusement à
+  // charger la vidéo. On force donc l'ouverture via un intent Android explicite, avec repli
+  // automatique sur le navigateur (browser_fallback_url) si l'appli n'est pas installée.
+  // Inutile ailleurs (iOS, desktop) : intent: n'y a aucun sens et serait juste ignoré/cassé.
+  const IS_ANDROID = /Android/i.test(navigator.userAgent || '');
+  function crUrl(httpsUrl) {
+    if (!CFG.openInApp || !IS_ANDROID) return httpsUrl;
+    const bare = httpsUrl.replace(/^https:\/\//, '');
+    return `intent://${bare}#Intent;scheme=https;package=com.crunchyroll.crunchyroid;`
+      + `S.browser_fallback_url=${encodeURIComponent(httpsUrl)};end`;
+  }
+  function crSeriesUrl(id, slug) {
+    return crUrl(`https://www.crunchyroll.com/fr/series/${id}/${slug || ''}`);
+  }
+  function crWatchUrl(episodeId) {
+    return crUrl(`https://www.crunchyroll.com/watch/${episodeId}`);
+  }
+
+  // Firefox (Gecko) et Chromium (Edge/Chrome) déclenchent un intent:// de manière OPPOSÉE
+  // en mode PWA installée (display:standalone) :
+  //   • Gecko  : le clic natif sur <a href="intent://…"> est avalé par le conteneur standalone ;
+  //              seule une navigation top-level explicite (window.location.href) déclenche l'intent.
+  //   • Chromium : c'est l'inverse — location.href vers un scheme externe est avalé/bloqué en
+  //              standalone, alors que l'ACTIVATION D'UN LIEN est le chemin canonique par lequel
+  //              le navigateur délègue l'intent à Android. MAIS en PWA installée (standalone), un
+  //              lien SANS target="_blank" reste capturé par le scope de l'app : la navigation
+  //              part dans un pseudo-navigateur in-app où l'intent se perd. Il faut target="_blank"
+  //              (+ rel="noopener") pour SORTIR du conteneur standalone vers le navigateur, qui
+  //              seul relaie l'intent à l'OS. window.open() est inutilisable ici : en PWA il rouvre
+  //              toujours la PWA elle-même au lieu d'un contexte navigateur externe.
+  // On applique donc la bonne stratégie selon le moteur. Sur Chromium, on crée un <a target="_blank">
+  // réel et on le .click() de façon synchrone dans le gestionnaire du geste utilisateur (l'activation
+  // transiente reste valide), ce qui reproduit fidèlement un vrai clic sur lien intent://.
+  const IS_GECKO = /\bGecko\/|Firefox\//i.test(navigator.userAgent || '');
+  function openCrunchyrollApp(href) {
+    if (IS_GECKO) { window.location.href = href; return; }
+    const a = document.createElement('a');
+    a.href = href;
+    a.target = '_blank';   // indispensable en PWA standalone : sort du scope pour atteindre l'OS
+    a.rel = 'noopener';
+    a.style.display = 'none';
+    (document.body || document.documentElement).appendChild(a);
+    a.click();
+    setTimeout(() => { try { a.remove(); } catch (_) {} }, 0);
+  }
+
+  // Cherche un lien Crunchyroll DÉCLARÉ PAR ANILIST parmi externalLinks (site "Crunchyroll",
+  // insensible à la casse — AniList l'orthographie de façon constante mais on reste souple).
+  // `null` si absent ou si l'URL ne matche pas parseCrunchyrollUrl.
+  function crLinkFromAnilist(m) {
+    const links = (m && m.externalLinks) || [];
+    // Tous les liens Crunchyroll déclarés, le STREAMING d'abord (c'est LE signal « ça sortira
+    // sur Crunchyroll » recherché ; INFO/SOCIAL ne viennent qu'ensuite, par sécurité).
+    const crLinks = links
+      .filter((l) => l && l.site && /^crunchyroll$/i.test(l.site.trim()) && l.url)
+      .sort((a, b) => (b.type === 'STREAMING' ? 1 : 0) - (a.type === 'STREAMING' ? 1 : 0));
+    let declaredUrl = null;
+    for (const l of crLinks) {
+      if (!declaredUrl) declaredUrl = l.url;
+      const parsed = parseCrunchyrollUrl(l.url);
+      if (parsed) return { id: parsed.id, slug: parsed.slug, url: l.url };
+    }
+    // Crunchyroll DÉCLARÉ par AniList mais URL non convertible en fiche /series/ID : on renvoie
+    // quand même l'URL. AniList affirme la sortie sur Crunchyroll, ce qui suffit à proposer la
+    // nouveauté (id/slug vides = pas de lien fiche direct, mais un lien Crunchyroll valide).
+    return declaredUrl ? { id: '', slug: '', url: declaredUrl } : null;
+  }
+
+  // Score minimal pour accepter un résultat de recherche CR comme LA bonne série, avec un
+  // lien direct affiché sans réserve. Volontairement strict (même ordre de grandeur que le
+  // seuil « nom fort » d'aniPickMatch, 0.9) : un faux positif ici enverrait l'utilisateur
+  // vers une série totalement différente, ce qui est pire que de retomber sur la recherche.
+  const CR_MATCH_MIN_SCORE = 0.82;
+  // Score minimal, plus bas, pour considérer que la série sortira PROBABLEMENT sur
+  // Crunchyroll sans exiger une fiche confirmée à 100 % (« je ne veux pas nécessairement
+  // une fiche Crunchyroll mais savoir qu'il va sortir sur Crunchyroll pour le proposer »).
+  // En dessous de MIN_SCORE mais au-dessus de ce seuil : affiché quand même, avec un badge
+  // « probable » et un lien vers le meilleur candidat trouvé (pas une simple recherche à
+  // l'aveugle). Sous ce seuil : aucune preuve sérieuse que le titre existe même sur
+  // Crunchyroll → écarté (voir loadNewPremieres).
+  const CR_MATCH_PROBABLE_SCORE = 0.45;
+  const CR_MATCH_CACHE_VER = 3;   // v3 : ajout du niveau de confiance (confirmed/probable)
+
+  function readCrMatchCached(aniId) {
+    const o = cacheReadRaw('crmatch:' + aniId);
+    if (!o || !o.v || o.v.cv !== CR_MATCH_CACHE_VER) return undefined;   // rien en cache
+    // Positif : 30 j (une fiche CR déjà trouvée ne bouge pas). Négatif : 3 j seulement — la
+    // fiche peut être publiée par Crunchyroll après coup (simulcast qui arrive avec un léger
+    // retard), on veut retenter plus vite qu'un match confirmé.
+    const ttl = (o.v.id ? 30 : 3) * 24 * 3600e3;
+    if (Date.now() - o.ts > ttl) return undefined;
+    return o.v;
+  }
+  function writeCrMatchCache(aniId, v) {
+    cacheSet('crmatch:' + aniId, { ...v, cv: CR_MATCH_CACHE_VER });
+  }
+
+  // Variantes de titre à tester sur la recherche Crunchyroll, dans l'ordre le plus
+  // susceptible de matcher un catalogue CR (souvent en anglais) en premier.
+  function aniSearchTitleCandidates(m) {
+    const t = m.title || {};
+    return [t.english, t.romaji, t.native].filter(Boolean);
+  }
+
+  // Retrouve la fiche Crunchyroll d'une nouveauté repérée sur AniList. Priorité 1 : le
+  // lien Crunchyroll déclaré par AniList lui-même (externalLinks — voir crLinkFromAnilist),
+  // fiable et gratuit en requêtes. Priorité 2, seulement si absent : la VRAIE recherche
+  // Crunchyroll (pas une supposition d'URL), en ne retenant que les candidats dont le titre
+  // matche assez fort (voir CR_MATCH_MIN_SCORE). `{ id: null }` si rien d'assez sûr n'a été
+  // trouvé par aucune des deux voies — la nouveauté est alors écartée (voir loadNewPremieres).
+  async function resolveCrunchyrollForPremiere(m) {
+    const cached = readCrMatchCached(m.id);
+    if (cached !== undefined) return cached;
+
+    const fromLink = crLinkFromAnilist(m);
+    if (fromLink && fromLink.id) {
+      const result = { id: fromLink.id, slug: fromLink.slug, url: fromLink.url, source: 'anilist', confidence: 'confirmed' };
+      writeCrMatchCache(m.id, result);
+      return result;
+    }
+
+    const candidates = aniSearchTitleCandidates(m);
+    let best = null, bestScore = 0;
+    for (const q of candidates) {
+      let r;
+      try {
+        r = await api('/content/v2/discover/search', { q, n: 6, type: 'series', locale: CFG.locale });
+      } catch (e) { safeCall.log(e, 'resolveCrunchyrollForPremiere'); continue; }
+      const bucket = (r && Array.isArray(r.data)) ? r.data.find((b) => b && b.type === 'series') : null;
+      const items = (bucket && Array.isArray(bucket.items)) ? bucket.items : [];
+      const qNorm = aniNorm(q);
+      for (const p of items) {
+        if (!p || !p.id || !p.title) continue;
+        const pNorm = aniNorm(p.title);
+        let sc = aniDice(q, p.title);
+        if (pNorm && pNorm === qNorm) sc = 1;
+        else if (pNorm && qNorm && (pNorm.includes(qNorm) || qNorm.includes(pNorm))) sc = Math.max(sc, 0.92);
+        if (sc > bestScore) { bestScore = sc; best = p; }
+      }
+      if (bestScore >= 0.97) break;   // déjà quasi certain, pas la peine de tester les autres titres
+    }
+
+    // Trois issues : match assez fort pour un lien direct sans réserve (confirmed) ; match
+    // plus faible mais encore plausible, affiché quand même avec un badge « probable » (voir
+    // demande : savoir que ça sort sur Crunchyroll ne nécessite pas une fiche garantie) ;
+    // rien de sérieux trouvé (id: null), auquel cas la nouveauté est écartée plus haut.
+    let result;
+    if (best && bestScore >= CR_MATCH_MIN_SCORE) {
+      result = { id: best.id, slug: best.slug_title || '', source: 'search', confidence: 'confirmed' };
+    } else if (best && bestScore >= CR_MATCH_PROBABLE_SCORE) {
+      result = { id: best.id, slug: best.slug_title || '', source: 'search', confidence: 'probable' };
+    } else if (fromLink && fromLink.url) {
+      // Aucune fiche exacte, mais AniList AFFIRME une sortie Crunchyroll (lien déclaré, non
+      // convertible en /series/ID) : on garde la nouveauté, avec CE lien Crunchyroll (pas une
+      // recherche à l'aveugle) et un badge « annoncé ». C'est précisément la demande : savoir
+      // qu'AniList annonce Crunchyroll suffit, même sans fiche repérée.
+      result = { id: null, url: fromLink.url, source: 'anilist-declared', confidence: 'declared' };
+    } else {
+      result = { id: null };
+    }
+    writeCrMatchCache(m.id, result);
+    return result;
+  }
+
+
+  async function loadNewPremieres(onProgress) {
+    const N = STATE.newPremieres;
+    if (!CFG.discoverNewPremieres) { N.series = []; N.error = null; N.loading = false; render(); return; }
+    N.loading = true; N.error = null; N._debugRetried = false;
+    render();
+    try {
+      onProgress(stepLabel(1, 2, 'Nouveautés : interrogation d’AniList…'));
+      // Coupe-circuit : si AniList a déjà refusé (403/429), inutile de relancer des pages
+      // entières — on l'affiche clairement et on s'arrête (le finally rend la vue).
+      const aniCd = anilistCooldownRemainingMs();
+      if (aniCd > 0) {
+        N.error = 'AniList en pause (' + Math.ceil(aniCd / 60000) + ' min) après un refus 403/429 — '
+          + 'les nouvelles premières reviendront automatiquement. Blocage côté AniList, pas le script.';
+        return;
+      }
+
+      // Titres déjà suivis : à exclure (ça n'a plus rien d'une découverte). Comparaison
+      // approximative (mêmes fonctions que l'appariement AniList du Calendrier, voir
+      // aniNorm/aniDice) — les deux catalogues n'utilisent jamais exactement les mêmes
+      // libellés (langue, sous-titre, ponctuation).
+      const knownNorm = STATE.series.map((s) => aniNorm(s.title)).filter(Boolean);
+      const isKnown = (title) => {
+        const nt = aniNorm(title);
+        if (!nt) return false;
+        return knownNorm.some((k) => k === nt || k.includes(nt) || nt.includes(k) || aniDice(k, nt) >= 0.82);
+      };
+
+      const nowSec = Math.floor(Date.now() / 1000);
+      const from = nowSec - CFG.newPremieresWindowDays * 86400;      // « déjà sorti » : passé
+      const to = nowSec + CFG.newPremieresUpcomingDays * 86400;      // « à venir » : futur
+      const byId = new Map();
+      let page = 1, hasNext = true;
+      while (hasNext && page <= CFG.newPremieresMaxPages && byId.size < CFG.newPremieresTarget * 3) {
+        onProgress(stepLabel(1, 2, `Nouveautés… page ${page}/${CFG.newPremieresMaxPages}`));
+        const data = await anilistQuery(ANILIST_NEWPREM_QUERY, {
+          from, to, page, perPage: Math.min(50, CFG.newPremieresPageSize),
+        });
+        const pageData = data && data.Page;
+        const scheds = (pageData && pageData.airingSchedules) || [];
+        for (const sc of scheds) {
+          if (sc && sc.media && !byId.has(sc.media.id)) byId.set(sc.media.id, sc);
+        }
+        hasNext = !!(pageData && pageData.pageInfo && pageData.pageInfo.hasNextPage);
+        page++;
+      }
+
+      const results = [];
+      const nowMs = Date.now();
+      // Deux funnels séparés : les conditions de sûreté ne sont pas les mêmes pour
+      // « déjà sorti » (il faut confirmer que l'épisode 2 n'est pas encore dehors, sinon
+      // c'est déjà une série en cours normale) et « à venir » (l'épisode 1 lui-même n'est
+      // pas encore sorti : c'est justement la définition, rien de plus à vérifier).
+      let cRaw = 0, cFormat = 0;
+      let cReleasedCand = 0, cStatusOk = 0, cEp2Ok = 0;
+      let cUpcomingCand = 0;
+      let cTitle = 0, cNotIgnored = 0, cKnown = 0, cGenreOk = 0, cCrConfirmed = 0;
+      for (const sc of byId.values()) {
+        const m = sc.media;
+        cRaw++;
+        // Formats hors « série qui sort semaine après semaine » : pas ce qu'on cherche.
+        if (m.format === 'MOVIE' || m.format === 'MUSIC') continue;
+        cFormat++;
+
+        const airTs = sc.airingAt * 1000;
+        const released = airTs <= nowMs;
+        if (released) {
+          cReleasedCand++;
+          // Le signal recherché : l'épisode 1 est sorti, le 2 ne l'est pas encore. Sans
+          // confirmation du prochain épisode (série finie, données manquantes…), impossible
+          // de garantir qu'elle n'a pas déjà plus d'un épisode dehors → on exclut plutôt
+          // que d'afficher une fausse « nouveauté ».
+          if (m.status !== 'RELEASING') continue;
+          cStatusOk++;
+          if (!m.nextAiringEpisode || m.nextAiringEpisode.episode !== 2) continue;
+          cEp2Ok++;
+        } else {
+          cUpcomingCand++;
+          // Épisode 1 encore à venir : rien d'autre à vérifier côté planning, c'est
+          // justement la définition d'une première mondiale imminente.
+        }
+
+        const title = (m.title && (m.title.english || m.title.romaji || m.title.native)) || '';
+        if (!title) continue;
+        cTitle++;
+        const id = 'ani:' + m.id;
+        if (IGNORED.has(id)) continue;
+        cNotIgnored++;
+        if (isKnown(title)) continue;
+        cKnown++;
+        // Genres AniList (m.genres) contre le réglage permanent (CFG.discoverExcludeCategories,
+        // « hentai » exclu par défaut — voir CFG) ET les puces live newPremCatsIn/Ex.
+        if (categoriesRejectedByGenre(m.genres || [], STATE.filters.newPremCatsIn, STATE.filters.newPremCatsEx)) continue;
+        cGenreOk++;
+
+        results.push({
+          id, title,
+          poster: (m.coverImage && m.coverImage.large) || '',
+          synopsis: aniStripDescription(m.description),
+          categories: m.genres || [],
+          ep1Ts: airTs,
+          released,
+          _m: m,   // gardé le temps de résoudre la fiche CR ci-dessous, retiré ensuite
+        });
+      }
+      // Diagnostic : chaque filtre est une cause plausible d'un onglet vide. On le garde en
+      // LOG (console) ET dans N.debug (affiché directement dans l'app si la liste finit
+      // vide — utile sur mobile, où la console n'est pas accessible).
+      LOG(`nouveautés : ${cRaw} épisodes 1 dans la fenêtre (-${CFG.newPremieresWindowDays} j / `
+        + `+${CFG.newPremieresUpcomingDays} j) → ${cFormat} après filtre format · `
+        + `déjà sortis : ${cReleasedCand} → ${cStatusOk} en diffusion → ${cEp2Ok} avec ép.2 pas encore sorti · `
+        + `à venir : ${cUpcomingCand} · `
+        + `puis (tous confondus) ${cTitle} avec titre → ${cNotIgnored} non ignorées → ${cKnown} hors watchlist `
+        + `→ ${cGenreOk} après filtre de genre`);
+
+      // Déjà sorti d'abord (regardable tout de suite, plus récent en tête), puis à venir
+      // (le plus proche en tête) — l'un ne doit pas noyer l'autre dans un simple tri
+      // chronologique global qui mélangerait les deux sens.
+      results.sort((a, b) => {
+        if (a.released !== b.released) return a.released ? -1 : 1;
+        return a.released ? b.ep1Ts - a.ep1Ts : a.ep1Ts - b.ep1Ts;
+      });
+
+      // On résout la fiche Crunchyroll sur un lot PLUS LARGE que la cible affichée : une
+      // partie n'aura pas de correspondance assez sûre (AniList couvre tout l'anime mondial,
+      // pas seulement ce qui est licencié par Crunchyroll) et sera écartée juste après. Sans
+      // cette marge, filtrer les non-confirmées ferait fondre la liste bien en dessous de la
+      // cible demandée. On résout au plus newPremieresTarget × 2 candidats (déjà présents en
+      // mémoire, zéro requête AniList supplémentaire) : priorité au lien Crunchyroll déclaré
+      // par AniList (externalLinks — gratuit, zéro requête CR), repli sur la recherche
+      // Crunchyroll sinon (voir resolveCrunchyrollForPremiere) — puis on garde uniquement
+      // ceux dont la fiche a été confirmée par L'UNE OU L'AUTRE voie avec une confiance
+      // suffisante — le seul moyen de garantir que ce qui est proposé ici sera bien
+      // disponible sur Crunchyroll, et pas juste sur AniList.
+      const candidates = results.slice(0, CFG.newPremieresTarget * 2);
+      let cCrFromLink = 0, cCrFromSearch = 0;
+      if (candidates.length) {
+        onProgress(stepLabel(2, 2, 'Nouveautés : recherche des fiches Crunchyroll…'));
+        await pool(candidates, async (item) => {
+          try {
+            const cr = await resolveCrunchyrollForPremiere(item._m);
+            item.crId = cr.id;
+            item.crSlug = cr.slug || '';
+            item.crUrl = cr.url || '';
+            item.crSource = cr.source || null;
+            item.crConfidence = cr.confidence || null;
+          } catch (e) {
+            safeCall.log(e, 'loadNewPremieres (résolution CR)');
+            item.crId = null;
+          }
+        });
+      }
+      for (const item of candidates) delete item._m;
+
+      // On garde tout candidat pour lequel on a un id CR (fiche confirmée OU simplement
+      // probable) — exiger une fiche garantie pour proposer une nouveauté était trop strict
+      // (voir demande : « pas nécessairement une fiche Crunchyroll, savoir qu'il va sortir
+      // sur Crunchyroll suffit »). Les confirmées passent d'abord (voir tri ci-dessous).
+      // On garde : fiche CR (confirmée OU probable) OU nouveauté qu'AniList ANNONCE sur
+      // Crunchyroll sans fiche exacte (« declared »). Voir demande : savoir que ça sortira sur
+      // Crunchyroll suffit à la proposer, la fiche précise n'est qu'un bonus.
+      const confirmed = candidates.filter((item) => item.crId || item.crConfidence === 'declared');
+      cCrConfirmed = confirmed.filter((item) => item.crConfidence === 'confirmed').length;
+      const cCrProbable = confirmed.filter((item) => item.crConfidence === 'probable').length;
+      const cCrDeclared = confirmed.filter((item) => item.crConfidence === 'declared').length;
+      cCrFromLink = confirmed.filter((item) => item.crSource === 'anilist').length;
+      cCrFromSearch = confirmed.filter((item) => item.crSource === 'search').length;
+      // Affichage : fiche sûre d'abord, puis probable, puis simplement « annoncé ».
+      confirmed.sort((a, b) => {
+        const rank = (x) => (x.crConfidence === 'confirmed' ? 0 : x.crConfidence === 'probable' ? 1 : 2);
+        if (rank(a) !== rank(b)) return rank(a) - rank(b);
+        return 0; // conserve l'ordre déjà trié (sorti d'abord, puis proximité)
+      });
+      const trimmed = confirmed.slice(0, CFG.newPremieresTarget);
+
+      N.debug = {
+        cRaw, cFormat, cReleasedCand, cStatusOk, cEp2Ok, cUpcomingCand, cTitle, cNotIgnored, cKnown,
+        cGenreOk, crCandidates: candidates.length, cCrConfirmed, cCrProbable, cCrDeclared, cCrFromLink, cCrFromSearch,
+        windowDays: CFG.newPremieresWindowDays, upcomingDays: CFG.newPremieresUpcomingDays,
+        target: CFG.newPremieresTarget, shown: trimmed.length,
+      };
+
+      N.series = trimmed;
+      N.lastSync = new Date();
+    } catch (e) {
+      console.error('[reste-à-voir] échec nouveautés (AniList)', e);
+      N.error = e.message || String(e);
+    } finally {
+      N.loading = false;
+      render();
+    }
+  }
+
+  // (O) Onglet Hors listes : séries entamées (au moins un épisode vu) mais absentes
+  // de toutes tes listes (watchlist + Crunchylists), avec des épisodes restant à voir.
+  // S'appuie sur le même historique de visionnage que Découverte (best-effort, en cache) :
+  // on part de la liste des séries jamais vues dans watch-history, on retire celles déjà
+  // connues via la watchlist/les listes, puis on analyse le reste comme dans Reste à voir.
+  async function loadOrphelines(onProgress) {
+    const O = STATE.orphan;
+    O.loading = true;
+    O.error = null;
+    O.warning = null;
+    render();
+    try {
+      onProgress(stepLabel(1, 4, 'Lecture de ton profil…'));
+      const accountId = await getAccountId();
+
+      // Séries déjà connues via la watchlist / les listes personnalisées.
+      const knownIds = new Set(STATE.series.map((s) => s.id));
+      for (const it of STATE.raw) {
+        const ref = extractSeriesRef(it);
+        if (ref && ref.id) knownIds.add(ref.id);
+      }
+
+      onProgress(stepLabel(2, 4, 'Historique de visionnage…'));
+      let watchedIds;
+      try {
+        watchedIds = await getWatchedSeriesIds(accountId, (p) => onProgress(stepLabel(2, 4, historyScanLabel(p))));
+      } catch (e) {
+        console.warn('[reste-à-voir] historique indisponible pour Hors listes', e);
+        O.error = "Impossible de lire ton historique de visionnage (" + (e.message || e) + ").";
+        return;
+      }
+
+      const candidateIds = [...watchedIds].filter((id) => !knownIds.has(id));
+      LOG('hors listes — candidats :', candidateIds.length);
+
+      if (!candidateIds.length) {
+        O.series = [];
+        O.lastSync = new Date();
+        return;
+      }
+
+      const results = await pool(candidateIds, async (id, idx) => {
+        const panel = await getSeriesPanel(id);
+        if (!panel) return null;
+        const eps = await getEpisodes(id);
+        const rating = getRatingCached(id);            // sans requête : complété plus tard
+        return { panel, episodes: eps.episodes, maxAir: eps.maxAir, rating, order: idx };
+      }, CFG.concurrency, (done, total) => onProgress(stepLabel(3, 4, `Analyse des épisodes… ${done}/${total}`)));
+
+      const ok = results.filter(Boolean);
+      const allIds = [...new Set(ok.flatMap((r) => r.episodes.flatMap((e) => e.ids)))];
+
+      onProgress(stepLabel(4, 4, 'Vérification de ce que tu as vu…'));
+      const ph = allIds.length ? await getPlayheads(accountId, allIds) : new Map();
+
+      O.series = markNew(ok
+        .map(({ panel, episodes, maxAir, rating, order }) => buildSeriesEntry(panel, episodes, maxAir, rating, order, ph)))
+        // Double vérification : une série peut apparaître dans l'historique sans qu'aucun
+        // épisode ne soit réellement marqué vu (lecture interrompue très tôt, etc.) — on ne
+        // garde que celles avec au moins un épisode vu ET au moins un épisode restant.
+        .filter((s) => s.total > 0 && s.seen > 0 && s.remaining > 0);
+      O.lastSync = new Date();
+      idle(() => fillMissingRatings(O.series));
+      idle(() => enrichAnilistSchedule(O.series));
+    } catch (e) {
+      console.error('[reste-à-voir] échec Hors listes', e);
+      O.error = e.message || String(e);
+    } finally {
+      O.loading = false;
+      render();
+    }
+  }
+
+  function visibleSeries() {
+    const { q, status, sort, hideAiringSeason, showIgnored } = STATE.filters;
+    let list = STATE.series.filter((s) => s.total > 0);
+
+    // Vue « Ignorées » : uniquement celles-là, pour pouvoir les restaurer.
+    list = showIgnored ? list.filter((s) => IGNORED.has(s.id)) : list.filter((s) => !IGNORED.has(s.id));
+
+    if (CFG.hideMovies) list = list.filter((s) => s.total > 1);
+
+    // Masque les séries dont TA saison sort encore chaque semaine.
+    if (hideAiringSeason) list = list.filter((s) => !s.nextSeasonAiring);
+
+    if (status === 'todo') list = list.filter((s) => s.remaining > 0);
+    else if (status === 'started') list = list.filter((s) => s.seen > 0 && s.remaining > 0);
+    else if (status === 'notstarted') list = list.filter((s) => s.seen === 0);
+    else if (status === 'uptodate') list = list.filter((s) => s.remaining === 0 && s.airing);   // (10)
+    else if (status === 'done') list = list.filter((s) => s.remaining === 0 && !s.airing);
+
+    list = applyCommonFilters(list, STATE.filters, STATE.filters.catsIn, STATE.filters.catsEx);
+
+    if (q.trim()) {
+      const needle = q.trim().toLowerCase();
+      list = list.filter((s) => s.title.toLowerCase().includes(needle));
+    }
+
+    return [...list].sort(SERIES_SORTERS[sort] || SERIES_SORTERS.remaining);
+  }
+
+  // Partagés entre l'onglet Reste à voir et l'onglet Hors listes.
+  const SERIES_SORTERS = {
+    remaining: (a, b) => b.remaining - a.remaining,
+    time: (a, b) => b.secLeft - a.secLeft,          // (5)
+    closest: (a, b) => a.remaining - b.remaining || b.pct - a.pct,
+    quickest: (a, b) => a.secLeft - b.secLeft,      // (5)
+    progress: (a, b) => b.pct - a.pct,
+    title: (a, b) => a.title.localeCompare(b.title, 'fr'),
+    added: (a, b) => a.order - b.order,
+    // Dernier vu : la série que tu as regardée le plus récemment d'abord. Les séries
+    // jamais ouvertes (aucune date de lecture) restent en fin de liste.
+    lastWatched: (a, b) => (b.lastWatchedTs || 0) - (a.lastWatchedTs || 0)
+      || a.title.localeCompare(b.title, 'fr'),
+    // Publication récente : date du dernier épisode SORTI (maxAir), déjà en mémoire.
+    // Les séries sans date connue passent en dernier plutôt que de polluer le haut.
+    recent: (a, b) => (b.maxAir || 0) - (a.maxAir || 0) || a.title.localeCompare(b.title, 'fr'),
+    // Publication ancienne : les séries sans date connue restent en fin de liste.
+    oldest: (a, b) => (a.maxAir || Infinity) - (b.maxAir || Infinity) || a.title.localeCompare(b.title, 'fr'),
+    longest: (a, b) => b.total - a.total,                 // série la plus longue (total d'épisodes)
+    shortest: (a, b) => a.total - b.total,                // la plus courte : idéale à caser
+    leastProgress: (a, b) => a.pct - b.pct,               // les plus délaissées d'abord
+    titleDesc: (a, b) => b.title.localeCompare(a.title, 'fr'),
+  };
+
+  // Filtres rapides communs à Reste à voir et Hors listes (données déjà en mémoire).
+  function applyCommonFilters(list, f, catsIn, catsEx) {
+    if (f.onlyAiring) list = list.filter((s) => s.airing);
+    if (f.onlyRated) list = list.filter((s) => (s.rating ?? 0) >= 4);
+    if (f.onlyShort) list = list.filter((s) => s.total > 0 && s.total <= 12);
+    if (f.quickFinish) list = list.filter((s) => s.remaining > 0 && s.remaining <= 3);
+    if (catsIn.length) list = list.filter((s) => (s.categories || []).some((c) => catsIn.includes(c)));
+    if (catsEx.length) list = list.filter((s) => !(s.categories || []).some((c) => catsEx.includes(c)));
+    return list;
+  }
+
+  // Genres réellement présents dans une liste donnée (pour n'afficher que des puces utiles).
+  function categoriesOf(series) {
+    const set = new Set();
+    for (const s of series) for (const c of s.categories || []) set.add(c);
+    return [...set].sort((a, b) => a.localeCompare(b, 'fr'));
+  }
+
+  // Puces de genre à 3 états, réutilisables par onglet (scope = '' | 'orphan' | 'discover').
+  function catChips(cats, inArr, exArr, scope) {
+    if (!cats.length) return '';
+    const sc = scope ? ` data-catscope="${scope}"` : '';
+    return `<div class="crrav-chips">
+      <span class="crrav-catlegend">Genres — 1 clic&nbsp;: garder · 2 clics&nbsp;: exclure</span>
+      ${cats.map((c) => {
+        const inc = inArr.includes(c), exc = exArr.includes(c);
+        const st = inc ? 'in' : exc ? 'ex' : '';
+        return `<button class="crrav-chip crrav-cat ${st}" data-cat="${escapeHtml(c)}"${sc}
+          aria-pressed="${inc || exc}">${inc ? '✓ ' : exc ? '✕ ' : ''}${escapeHtml(c)}</button>`;
+      }).join('')}
+      ${inArr.length || exArr.length
+        ? `<button class="crrav-chip" data-act="cats-clear"${sc}>Réinitialiser</button>` : ''}
+    </div>`;
+  }
+
+  // Puces de filtres rapides, communes aux deux onglets à listes.
+  function quickChips(f) {
+    return [
+      ['onlyAiring', 'En diffusion', 'Uniquement les séries dont un épisode sort encore'],
+      ['onlyRated', 'Notées 4★+', 'Uniquement celles que tu as notées 4 étoiles ou plus'],
+      ['onlyShort', 'Courtes (≤12 ép.)', 'Séries de 12 épisodes ou moins au total'],
+      ['quickFinish', 'Finissable (≤3 ép.)', 'Il te reste 3 épisodes ou moins'],
+    ].map(([k, label, title]) =>
+      `<button class="crrav-chip" data-toggle="${k}" aria-pressed="${!!f[k]}"
+        title="${title}">${label}</button>`).join('');
+  }
+
+  function visibleOrphelines() {
+    const { orphanQ, orphanSort, showIgnored } = STATE.filters;
+    let list = showIgnored
+      ? STATE.orphan.series.filter((s) => IGNORED.has(s.id))
+      : STATE.orphan.series.filter((s) => !IGNORED.has(s.id));
+
+    list = applyCommonFilters(list, STATE.filters, STATE.filters.orphanCatsIn, STATE.filters.orphanCatsEx);
+
+    if (orphanQ.trim()) {
+      const needle = orphanQ.trim().toLowerCase();
+      list = list.filter((s) => s.title.toLowerCase().includes(needle));
+    }
+
+    return [...list].sort(SERIES_SORTERS[orphanSort] || SERIES_SORTERS.remaining);
+  }
+
+  // Genres présents dans les résultats actuels, pour construire les puces de filtre.
+  function discoverCategories() {
+    const set = new Set();
+    for (const s of STATE.discover.series) for (const c of s.categories || []) set.add(c);
+    return [...set].sort((a, b) => a.localeCompare(b, 'fr'));
+  }
+
+  function visibleDiscover() {
+    const { discoverQ, discoverSort, discoverCatsIn, discoverCatsInMode, discoverCatsEx, showIgnoredDiscover } = STATE.filters;
+
+    // Vue « Ignorées » de Découverte : ces séries sont exclues des résultats de
+    // recherche eux-mêmes (l'API ne les renvoie plus), donc impossible de les
+    // retrouver dans STATE.discover.series. On reconstruit la liste depuis ce
+    // qui a été mémorisé au moment de l'ignore (id + titre).
+    if (showIgnoredDiscover) {
+      return [...IGNORED.entries()]
+        .filter(([, v]) => v.source === 'discover')
+        .map(([id, v]) => ({ id, title: v.title || id, poster: v.poster || '', synopsis: v.synopsis || '' }))
+        .sort((a, b) => a.title.localeCompare(b.title, 'fr'));
+    }
+
+    let list = STATE.discover.series;
+
+    // Filet : ignorer une pépite la fait disparaître tout de suite, sans relance.
+    list = list.filter((s) => !IGNORED.has(s.id));
+    // Idem pour un ajout à une liste : la série vient d'entrer dans une Crunchylist,
+    // elle n'a donc plus rien à faire dans Découverte (qui montre le hors-listes).
+    list = list.filter((s) => !STATE.addedToList.has(s.id));
+
+    // On garde d'abord, on exclut ensuite : « uniquement sport, mais pas ecchi » a un sens.
+    // Deux modes pour le « garder » : 'any' (OR, filtre manuel — cocher plusieurs genres
+    // élargit) et 'all' (AND strict, baguette magique — une vraie « série similaire » doit
+    // recouper TOUS les genres de la série source, pas juste un seul au hasard).
+    if (discoverCatsIn.length) {
+      list = discoverCatsInMode === 'all'
+        ? list.filter((s) => discoverCatsIn.every((c) => (s.categories || []).includes(c)))
+        : list.filter((s) => (s.categories || []).some((c) => discoverCatsIn.includes(c)));
+    }
+    if (discoverCatsEx.length) {
+      list = list.filter((s) => !(s.categories || []).some((c) => discoverCatsEx.includes(c)));
+    }
+
+    if (discoverQ.trim()) {
+      const needle = discoverQ.trim().toLowerCase();
+      list = list.filter((s) => s.title.toLowerCase().includes(needle));
+    }
+
+    const profile = buildTasteProfile();
+    const badgeCount = (s) => discoverSignals(s, profile).badges.length;
+    const sorters = {
+      // Le plus de pastilles pertinentes d'abord, note en départage, puis popularité.
+      relevance: (a, b) => badgeCount(b) - badgeCount(a)
+        || (b.rating || 0) - (a.rating || 0)
+        || a.order - b.order,
+      popularity: (a, b) => a.order - b.order,
+      seasons: (a, b) => a.seasons - b.seasons,
+      duration: (a, b) => a.secTotal - b.secTotal,
+      title: (a, b) => a.title.localeCompare(b.title, 'fr'),
+      recent: (a, b) => (b.maxAir || 0) - (a.maxAir || 0) || a.title.localeCompare(b.title, 'fr'),
+      oldest: (a, b) => (a.maxAir || Infinity) - (b.maxAir || Infinity) || a.title.localeCompare(b.title, 'fr'),
+      seasonsDesc: (a, b) => b.seasons - a.seasons,
+      durationDesc: (a, b) => b.secTotal - a.secTotal,
+      episodes: (a, b) => b.episodes - a.episodes,
+      titleDesc: (a, b) => b.title.localeCompare(a.title, 'fr'),
+    };
+    return [...list].sort(sorters[discoverSort] || sorters.popularity);
+  }
+
+  // Filet : ignorer une nouveauté la fait disparaître tout de suite, sans relance
+  // (même principe que visibleDiscover — voir plus haut).
+  function visibleNewPremieres() {
+    const { newPremCatsIn, newPremCatsEx } = STATE.filters;
+    let list = STATE.newPremieres.series.filter((s) => !IGNORED.has(s.id));
+    // Puces live : narrowing immédiat, sans requête (le filtre permanent + les puces
+    // déjà actives au moment du chargement ont, eux, déjà réduit ce qui a été téléchargé
+    // — voir loadNewPremieres). Changer les puces ici affine encore, un prochain
+    // rafraîchissement du Calendrier relancera la recherche avec les nouvelles puces.
+    if (newPremCatsIn.length) list = list.filter((s) => (s.categories || []).some((c) => newPremCatsIn.includes(c)));
+    if (newPremCatsEx.length) list = list.filter((s) => !(s.categories || []).some((c) => newPremCatsEx.includes(c)));
+    return list;
+  }
+
+  // Genres présents dans les nouveautés actuellement chargées, pour les puces de filtre.
+  function newPremiereCategories() {
+    return categoriesOf(STATE.newPremieres.series);
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  5. Rendu
+  // ─────────────────────────────────────────────────────────────
+  function escapeHtml(str) {
+    return String(str).replace(/[&<>"']/g, (c) =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  // Copie `text` dans le presse-papiers et donne un retour visuel sur le bouton cliqué
+  // (`btn`). Utilisé par tous les boutons « 📋 Copier » du panneau (raw JSON, rapport de
+  // diagnostic…) pour ne pas dupliquer la logique Clipboard API / repli execCommand.
+  function copyTextToClipboard(btn, text) {
+    const original = btn.textContent;
+    const done = () => {
+      btn.textContent = '✅ Copié';
+      btn.classList.add('copied');
+      setTimeout(() => { btn.textContent = original; btn.classList.remove('copied'); }, 1500);
+    };
+    const fail = () => {
+      btn.textContent = '❌ Échec';
+      setTimeout(() => { btn.textContent = original; }, 1500);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done).catch(fail);
+      return;
+    }
+    // Repli sans Clipboard API (contexte non sécurisé, très ancien navigateur).
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); done(); } catch (_) { fail(); }
+    document.body.removeChild(ta);
+  }
+
+  // (13) Vrai logo — inline en SVG plutôt qu'une image externe : zéro requête, zéro
+  // souci de CSP/CORS sur le domaine Crunchyroll. `id` évite un id de <linearGradient>
+  // dupliqué si le logo apparaît deux fois dans le document (fab + panneau).
+  function logoSvg(id, size) {
+    return `<svg class="crrav-logo" viewBox="0 0 32 32" width="${size || 26}" height="${size || 26}"
+      aria-hidden="true" focusable="false">
+      <defs><linearGradient id="crravLogoGrad${id}" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#ffb347"/><stop offset="1" stop-color="#f47521"/>
+      </linearGradient></defs>
+      <rect x="1" y="1" width="30" height="30" rx="9" fill="url(#crravLogoGrad${id})"/>
+      <path d="M12.5 9.5v13l11-6.5z" fill="#12120f"/>
+    </svg>`;
+  }
+
+  // (5) 11400 → « 3 h 10 », 2700 → « 45 min »
+  function fmtDuration(sec) {
+    if (!sec) return '—';
+    const h = Math.floor(sec / 3600);
+    const m = Math.round((sec % 3600) / 60);
+    if (!h) return `${m} min`;
+    return m ? `${h} h ${String(m).padStart(2, '0')}` : `${h} h`;
+  }
+
+  // (14) la couleur encode la proximité de la fin
+  function progColor(s) {
+    if (s.remaining === 0) return '#5ce6a0';
+    if (s.pct >= 80) return '#7ee08a';
+    if (s.pct >= 40) return '#ffb347';
+    return '#f47521';
+  }
+
+  // (12) une barre par saison, un segment par épisode, infobulle au survol.
+  // Les gouttières s'adaptent : à 73 épisodes, 2 px entre chaque dépasse la carte.
+  // (AniList) Pour la saison en cours, on complète avec des cases « pas encore sorti »
+  // jusqu'au total annoncé par AniList (s.plannedTotal) — couleur distincte, plutôt que
+  // le texte « X restant (sur Y prévus) » qui alourdissait la carte (voir plannedInfo).
+  function ticks(s) {
+    if (s.total > 120) {
+      return `<div class="crrav-bar"><i style="width:${s.pct}%"></i></div>`;
+    }
+    const tg = s.total <= 30 ? 2 : s.total <= 60 ? 1 : 0;   // gouttière entre épisodes
+    const sg = s.total <= 30 ? 6 : s.total <= 60 ? 4 : 3;   // gouttière entre saisons
+    const groups = new Map();
+    for (const e of s.episodes) {
+      if (!groups.has(e.season)) groups.set(e.season, []);
+      groups.get(e.season).push(e);
+    }
+    const upcoming = (s.airing && s.plannedTotal != null && s.targetSeason != null
+      && groups.has(s.targetSeason))
+      ? Math.max(0, s.plannedTotal - groups.get(s.targetSeason).length)
+      : 0;
+    const html = [...groups.entries()].map(([num, eps]) => {
+      const extra = num === s.targetSeason ? upcoming : 0;
+      // (33) Saison déjà entièrement vue (hors saison en cours, qui garde toujours son
+      // détail épisode par épisode) : un seul gros bloc plutôt qu'un carré par épisode.
+      // Sans gouttière interne (un seul <span>), ce bloc se lit comme UN morceau plein,
+      // visuellement distinct des cases fines — l'essentiel de la place gagnée sert au
+      // détail de ce qu'il reste réellement à voir. Poids modeste et plafonné (2 à 4) :
+      // le but est de signaler « déjà fait », pas de continuer à peser sur la largeur
+      // en proportion du nombre d'épisodes. Sous 4 épisodes, la fusion ne fait pas
+      // gagner grand-chose : on garde alors le détail, plus lisible qu'un bloc minuscule.
+      const doneWeight = Math.max(2, Math.min(4, Math.round(eps.length / 6)));
+      const allSeen = num !== s.targetSeason && extra === 0
+        && eps.length >= 4 && eps.every((e) => e.seen);
+      if (allSeen) {
+        return `<div class="crrav-season crrav-season-done" style="flex:${doneWeight}">
+          <span class="crrav-tick season-block" title="Saison ${num} — entièrement vue (${eps.length} épisodes)"></span>
+        </div>`;
+      }
+      const notYetOut = Array.from({ length: extra }, (_, i) =>
+        `<span class="crrav-tick upcoming" title="S${num} E${eps.length + i + 1} — pas encore sorti (prévu, AniList)"></span>`
+      ).join('');
+      return `<div class="crrav-season" style="flex:${eps.length + extra}">${eps.map((e) =>
+        `<span class="crrav-tick${e.seen ? ' on' : e.started ? ' half' : ''}" title="S${num} E${e.n}${
+          e.title ? ' — ' + escapeHtml(e.title) : ''}${e.seen ? ' · vu' : e.started ? ' · commencé' : ''}"></span>`
+        ).join('') + notYetOut}</div>`;
+    }).join('');
+    return `<div class="crrav-ticks" style="--tg:${tg}px;--sg:${sg}px">${html}</div>`;
+  }
+
+  // (6) anneau de progression : le pourcentage se lit d'un coup d'œil, là où « +12 »
+  // obligeait à faire le rapport avec le total soi-même.
+  function ring(s) {
+    const R = 15.5, C = 2 * Math.PI * R;
+    const off = C * (1 - Math.min(Math.max(s.pct, 0), 100) / 100);
+    const done = s.remaining === 0;
+    const label = done ? '✓' : `${s.pct}%`;
+    return `<span class="crrav-ringwrap" title="${s.seen}/${s.total} vus${
+      done ? '' : ` · ${s.remaining} restants`}">
+      <svg viewBox="0 0 40 40" class="crrav-ring" aria-hidden="true">
+        <circle cx="20" cy="20" r="${R}" class="crrav-ring-bg"/>
+        <circle cx="20" cy="20" r="${R}" class="crrav-ring-fg"
+          stroke-dasharray="${C.toFixed(2)}" stroke-dashoffset="${off.toFixed(2)}"/>
+      </svg>
+      <b class="crrav-ring-t${done ? ' done' : ''}">${label}</b>
+    </span>`;
+  }
+
+  function synopsisBlock(s) {
+    // Le bouton ne peut pas vivre dans le lien de la vignette : ils sont frères.
+    return s.synopsis
+      ? `<button class="crrav-info" aria-expanded="false" aria-label="Lire le synopsis">i</button>
+         <div class="crrav-syn"><p>${escapeHtml(s.synopsis)}</p></div>`
+      : '';
+  }
+
+  function ignoreBtn(s, source) {
+    const ign = IGNORED.has(s.id);
+    // poster/synopsis transitent par des data-attributes pour que le clic (delegated,
+    // voir plus bas) puisse les mémoriser dans IGNORED : sans ça, les vues « Ignorées »
+    // (Découverte, panneau Réglages) ne pourraient pas afficher jaquette + résumé,
+    // faute de pouvoir refaire l'appel réseau pour une série exclue des résultats.
+    return `<button class="crrav-ignore${ign ? ' on' : ''}" data-ignore="${s.id}"
+      data-title="${escapeHtml(s.title)}" data-source="${source || 'watchlist'}"
+      data-poster="${escapeHtml(s.poster || '')}" data-synopsis="${escapeHtml(s.synopsis || '')}"
+      title="${ign ? 'Réafficher cette série' : 'Ignorer : la masquer sans la marquer vue'}"
+      aria-label="${ign ? 'Réafficher' : 'Ignorer'}">${ign ? '↺' : '⊘'}</button>`;
+  }
+
+  // Bouton « + » (Découverte uniquement) : ajoute la série à une Crunchylist. Trois
+  // états visuels : normal (+), en cours (busy, ⋯), ajoutée cette session (done, ✓).
+  // data-title porte le titre pour le sélecteur de liste (CFG.askListEachTime).
+  function addListBtn(s) {
+    const added = STATE.addedToList.has(s.id);
+    const busy = STATE.addingId === s.id;
+    const cls = added ? 'done' : busy ? 'busy' : '';
+    const label = added ? 'Ajoutée à ta liste' : busy ? 'Ajout en cours…' : 'Ajouter à ma liste';
+    const icon = added ? '✓' : busy ? '⋯' : '+';
+    return `<button class="crrav-addlist${cls ? ` ${cls}` : ''}" data-addlist="${s.id}"
+      data-title="${escapeHtml(s.title)}"
+      title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}"
+      ${added || busy ? 'disabled' : ''}>${icon}</button>`;
+  }
+
+  // Feuille de choix de liste (CFG.askListEachTime uniquement) : ouverte via
+  // STATE.listPicker = { seriesId, title }. null → rien à afficher.
+  function listPickerHtml() {
+    const p = STATE.listPicker;
+    if (!p) return '';
+    const L = STATE.myLists;
+    let options;
+    if (L.loading && !L.items.length) {
+      options = `<p>Chargement de tes listes…</p>`;
+    } else if (L.error) {
+      options = `<p>${escapeHtml(L.error)}</p>`;
+    } else if (!L.items.length) {
+      options = `<p>Aucune Crunchylist trouvée sur ton compte (la watchlist n'est pas une Crunchylist).</p>`;
+    } else {
+      options = L.items.map((l) => `<button type="button" class="crrav-listpicker-opt"
+        data-picklist="${escapeHtml(l.id)}">${escapeHtml(l.title)}${
+          l.id === CFG.defaultListId ? ' <span style="color:#8f8f99;font-weight:400">(défaut)</span>' : ''
+        }</button>`).join('');
+    }
+    return `<div class="crrav-listpicker">
+      <div class="crrav-listpicker-sheet">
+        <h3>Ajouter « ${escapeHtml(p.title)} »</h3>
+        <p>Choisis la liste de destination.</p>
+        ${options}
+        <button type="button" class="crrav-listpicker-cancel" data-picklist-cancel>Annuler</button>
+      </div>
+    </div>`;
+  }
+
+  // (#4) La série la plus proche de la fin, mise en avant en tête de liste — le premier
+  // élément visible invite à agir. Affichée seulement sur « À finir » sans recherche, en
+  // vue grille, hors chargement : ailleurs elle ferait doublon ou n'aurait pas de sens.
+  function heroCard(list) {
+    if (!CFG.showHero) return '';
+    if (STATE.loading || STATE.filters.view === 'list') return '';
+    if (STATE.filters.status !== 'todo' || STATE.filters.q.trim()) return '';
+    // Candidat : commencé, pas fini, et le plus proche de la fin en temps restant.
+    const started = list.filter((s) => s.seen > 0 && s.remaining > 0 && s.secLeft > 0);
+    if (!started.length) return '';
+    const s = started.sort((a, b) => a.secLeft - b.secLeft)[0];
+    const seriesUrl = crSeriesUrl(s.id, s.slug);
+    return `<div class="crrav-hero" style="--prog:${progColor(s)}">
+      <a class="crrav-hero-art" href="${seriesUrl}">
+        ${s.poster ? `<img loading="lazy" crossorigin="anonymous" src="${s.poster}" alt="" onerror="this.removeAttribute(&quot;crossorigin&quot;);this.src=this.src">` : ''}
+      </a>
+      <div class="crrav-hero-info">
+        <span class="crrav-hero-tag">Bientôt fini</span>
+        <a class="crrav-hero-title" href="${seriesUrl}">${escapeHtml(s.title)}</a>
+        <div class="crrav-hero-meta">
+          ${s.rating != null ? `<span class="crrav-hero-star">★ ${s.rating.toFixed(1)}</span>` : ''}
+          <span>${s.seen}/${s.total} vus${plannedTotalHint(s)}</span>
+          <span class="crrav-hero-left">${s.remaining} épisode${s.remaining > 1 ? 's' : ''} · ${fmtDuration(s.secLeft)}</span>
+        </div>
+        ${ticks(s)}
+        ${resumeLink(s, 'crrav-hero-btn')}
+      </div>
+    </div>`;
+  }
+
+  // (#6) Teinte dominante de chaque jaquette, pour colorer discrètement le fond des
+  // cartes. CONTRAINTE DE VITESSE : rien de tout ça n'est dans le chemin de rendu.
+  // On calcule APRÈS l'affichage (requestIdleCallback), sur des images DÉJÀ chargées,
+  // une seule fois par série (résultat en cache), et une image téléchargée pour rien
+  // n'arrête pas la file. Zéro requête réseau : les jaquettes sont déjà à l'écran.
+  const HUE_CACHE = new Map();
+  // (24) Accordéons Stats ouverts manuellement par l'utilisateur en mode compact —
+  // survit aux re-renders (qui reconstruisent tout le DOM, cf. scheduleHueExtraction
+  // un peu plus bas) tant que l'onglet reste ouvert. Réinitialisé au rechargement.
+  const statsAccordionOpen = new Set();
+  let settingsSearchQ = '';        // (30) requête de recherche interne aux Réglages
+  let suppressAccToggle = false;   // évite de polluer statsAccordionOpen lors d'ouvertures programmatiques
+  safeCall(() => {
+    const raw = JSON.parse(localStorage.getItem(LS + 'hues') || '{}');
+    for (const [k, v] of Object.entries(raw)) HUE_CACHE.set(k, v);
+  }, undefined, 'hues:load');
+  let hueSaveTimer = null;
+  function flushHues() {
+    clearTimeout(hueSaveTimer);
+    hueSaveTimer = null;
+    if (!HUE_CACHE.size) return;
+    safeCall(() => localStorage.setItem(LS + 'hues', JSON.stringify(Object.fromEntries(HUE_CACHE))), undefined, 'hues:save');
+  }
+  function persistHues() {
+    clearTimeout(hueSaveTimer);
+    hueSaveTimer = setTimeout(flushHues, 2000);
+  }
+  // Ne pas perdre une teinte calculée juste avant la fermeture/le masquage de l'onglet :
+  // le debounce de 2 s pouvait passer à la trappe. Même filet que pour le cache eps3.
+  window.addEventListener('pagehide', flushHues);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushHues(); });
+
+  const idle = window.requestIdleCallback || ((fn) => setTimeout(() => fn({ timeRemaining: () => 8 }), 200));
+
+  function averageHue(img) {
+    try {
+      const c = document.createElement('canvas');
+      const S = 12;                       // minuscule : le calcul est instantané
+      c.width = S; c.height = S;
+      const ctx = c.getContext('2d');
+      ctx.drawImage(img, 0, 0, S, S);
+      const d = ctx.getImageData(0, 0, S, S).data;
+      let r = 0, g = 0, b = 0, n = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        const cr = d[i], cg = d[i + 1], cb = d[i + 2];
+        const max = Math.max(cr, cg, cb), min = Math.min(cr, cg, cb);
+        if (max - min < 25) continue;     // ignore le gris, on cherche une vraie couleur
+        r += cr; g += cg; b += cb; n++;
+      }
+      if (!n) return null;
+      r = Math.round(r / n); g = Math.round(g / n); b = Math.round(b / n);
+      return `${r},${g},${b}`;
+    } catch (_) { return null; }          // canvas « souillé » par CORS : on abandonne en silence
+  }
+
+  let hueQueue = [];
+  let hueRunning = false;
+  function scheduleHueExtraction() {
+    if (!root || root.style.display === 'none') return;
+    // Cartes visibles sans teinte encore appliquée. `data-hue-done` disparaît à chaque
+    // render (content.innerHTML reconstruit tout le DOM), donc cette liste inclut aussi
+    // des cartes déjà connues de HUE_CACHE — pas seulement les vraiment nouvelles.
+    const cards = [...root.querySelectorAll('.crrav-card[data-hue-id]:not([data-hue-done])')];
+    if (!cards.length) return;
+
+    // (21) Rien de visuellement nouveau : applique depuis le cache tout de suite,
+    // en synchrone — pas besoin de la file idle pour un simple style.setProperty.
+    // Seules les cartes réellement inconnues de HUE_CACHE ont besoin d'extraction.
+    const remaining = [];
+    for (const el of cards) {
+      const id = el.dataset.hueId;
+      el.setAttribute('data-hue-done', '1');
+      if (HUE_CACHE.has(id)) { el.style.setProperty('--hue', HUE_CACHE.get(id)); continue; }
+      remaining.push(el);
+    }
+    if (!remaining.length) return;   // tout était déjà en cache : aucune extraction à lancer
+
+    // Un render peut survenir avant la fin d'un lot précédent (ex. progression d'un
+    // scan) : les éléments de l'ancien lot sont alors détachés du DOM (remplacés par
+    // innerHTML). Avant, on les laissait finir dans le vide pendant que les nouvelles
+    // cartes visibles n'étaient jamais mises en file (hueRunning bloquait tout).
+    // Ici on remplace simplement la file — la boucle en cours (s'il y en a une) la
+    // relit à chaque itération et reprend donc sur les cartes actuelles.
+    hueQueue = remaining;
+    if (hueRunning) return;
+    hueRunning = true;
+    const step = (deadline) => {
+      while (hueQueue.length && (!deadline || deadline.timeRemaining() > 3)) {
+        const el = hueQueue.shift();
+        const id = el.dataset.hueId;
+        const img = el.querySelector('img');
+        if (!img || !img.src) continue;
+        const run = () => {
+          const rgb = averageHue(img);
+          if (rgb) { HUE_CACHE.set(id, rgb); persistHues(); el.style.setProperty('--hue', rgb); }
+        };
+        if (img.complete && img.naturalWidth) run();
+        else img.addEventListener('load', run, { once: true });
+      }
+      if (hueQueue.length) idle(step);
+      else hueRunning = false;
+    };
+    idle(step);
+  }
+
+  function resumeLink(s, cls) {
+    if (!s.next) return '';
+    const label = s.seen === 0 ? 'Commencer' : s.resuming ? '▶ Reprendre' : 'Épisode suivant';
+    return `<a class="${cls}" href="${crWatchUrl(s.next.id)}">${
+      label} · S${s.next.season} E${s.next.n}</a>`;
+  }
+
+  // Bouton « séries similaires » : présent sur les cartes Reste à voir / Hors listes.
+  // Déclenche discoverSimilarTo (bascule vers Découverte filtrée sur les genres de la série).
+  function similarBtn(s) {
+    // On transporte les genres déjà connus de la carte (s.categories, posés par
+    // buildSeriesEntry) pour éviter un second appel API redondant et fragile côté
+    // discoverSimilarTo : si CE second appel échoue ou ne renvoie rien pour ce titre
+    // précis, le bandeau affichait « genres introuvables » alors que l'app les connaît déjà.
+    const catsAttr = (s.categories || []).length
+      ? ` data-similar-cats="${escapeHtml((s.categories || []).join('|'))}"` : '';
+    return `<button type="button" class="crrav-similar" data-similar="${s.id}" data-similar-title="${escapeHtml(s.title)}"${catsAttr}`
+      + ` title="Découvrir des séries du même genre, populaires et bien notées, que tu n'as pas vues"`
+      + ` aria-label="Découvrir des séries similaires à ${escapeHtml(s.title)}">🪄</button>`;
+  }
+
+  function card(s) {
+    if (STATE.filters.view === 'list') return listRow(s);
+    const seriesUrl = crSeriesUrl(s.id, s.slug);
+    const done = s.remaining === 0;
+    const rating = s.rating != null
+      ? `<span class="crrav-rating">★ ${s.rating.toFixed(1)}</span>` : '';
+    // (10) l'anneau dit « fini », mais pas si d'autres épisodes sont encore à venir.
+    const state = done && s.airing ? '<span class="crrav-airing">À jour</span>'
+      : !done && s.airing ? '<span class="crrav-airing">En diffusion</span>' : '';
+    const hue = HUE_CACHE.get(s.id);
+    const styleVars = `--prog:${progColor(s)}${hue ? `;--hue:${hue}` : ''}`;
+    const pinfo = plannedInfo(s);
+    return `<article class="crrav-card${s.isNew ? ' isnew' : ''}${hue ? ' has-hue' : ''}" style="${styleVars}" data-hue-id="${s.id}"${hue ? ' data-hue-done="1"' : ''}>
+      <div class="crrav-thumb">
+        <a class="crrav-cover" href="${seriesUrl}">
+          ${s.poster ? `<img loading="lazy" crossorigin="anonymous" src="${s.poster}" alt="" onerror="this.removeAttribute(&quot;crossorigin&quot;);this.src=this.src">` : ''}
+        </a>
+        ${ring(s)}
+        ${rating}
+        ${state}
+        ${s.isNew ? '<span class="crrav-newdot">Nouvel épisode</span>' : ''}
+        ${ignoreBtn(s)}
+        ${synopsisBlock(s)}
+      </div>
+      <div class="crrav-body">
+        <a class="crrav-title" href="${seriesUrl}">${escapeHtml(s.title)}</a>
+        ${ticks(s)}
+        <div class="crrav-meta">
+          <span>${s.seen}/${s.total} vus${plannedTotalHint(s)}</span>
+          <span class="crrav-left">${done ? '' : fmtDuration(s.secLeft)}</span>
+        </div>
+        <div class="crrav-actrow">
+          ${resumeLink(s, 'crrav-resume')}
+          ${similarBtn(s)}
+        </div>
+        ${pinfo}
+      </div>
+    </article>`;
+  }
+
+  // (5) vue liste compacte : une ligne par série, pensée pour les grosses listes
+  // et les petits écrans. Même données, densité très supérieure.
+  function listRow(s) {
+    const seriesUrl = crSeriesUrl(s.id, s.slug);
+    const done = s.remaining === 0;
+    const pinfo = plannedInfo(s, true);
+    return `<article class="crrav-lrow${s.isNew ? ' isnew' : ''}" style="--prog:${progColor(s)}">
+      <a class="crrav-lthumb" href="${seriesUrl}">
+        ${s.poster ? `<img loading="lazy" crossorigin="anonymous" src="${s.poster}" alt="" onerror="this.removeAttribute(&quot;crossorigin&quot;);this.src=this.src">` : ''}
+      </a>
+      <div class="crrav-lmain">
+        <div class="crrav-lhead">
+          <a class="crrav-ltitle" href="${seriesUrl}">${escapeHtml(s.title)}</a>
+          ${s.isNew ? '<span class="crrav-lnew">nouveau</span>' : ''}
+          ${s.airing ? `<span class="crrav-ltag">${done ? 'à jour' : 'en diffusion'}</span>` : ''}
+          ${s.rating != null ? `<span class="crrav-lrating">★ ${s.rating.toFixed(1)}</span>` : ''}
+        </div>
+        ${ticks(s)}
+        <div class="crrav-meta">
+          <span>${s.seen}/${s.total} vus${done ? '' : ` · ${s.remaining} restants`}${plannedTotalHint(s)}</span>
+          <span class="crrav-left">${done ? '' : fmtDuration(s.secLeft)}</span>
+        </div>
+        ${pinfo}
+      </div>
+      <div class="crrav-lactions">
+        ${ring(s)}
+        ${resumeLink(s, 'crrav-lresume')}
+        ${similarBtn(s)}
+        ${ignoreBtn(s)}
+      </div>
+    </article>`;
+  }
+
+  function discoverIgnoredCard(s) {
+    const seriesUrl = crSeriesUrl(s.id);
+    // Jaquette + résumé mémorisés au moment de l'ignore (voir ignoreBtn) : la série est
+    // exclue des résultats de l'API, impossible de les redemander pour cette vue.
+    return `<article class="crrav-card crrav-card-ignored">
+      <div class="crrav-thumb">
+        <a class="crrav-cover" href="${seriesUrl}">
+          ${s.poster ? `<img loading="lazy" crossorigin="anonymous" src="${s.poster}" alt="" onerror="this.removeAttribute(&quot;crossorigin&quot;);this.src=this.src">` : ''}
+        </a>
+        ${ignoreBtn(s, 'discover')}
+        ${synopsisBlock(s)}
+      </div>
+      <div class="crrav-body">
+        <a class="crrav-title" href="${seriesUrl}">${escapeHtml(s.title)}</a>
+        <div class="crrav-meta"><span>Ignorée depuis Découverte</span></div>
+      </div>
+    </article>`;
+  }
+
+  // ---- Profil de goût & coloration Découverte ------------------------------------
+  // Profil dérivé de tes séries commencées (Reste à voir), pondéré par le nombre d'épisodes
+  // réellement vus dans chaque genre : plus tu regardes un genre, plus il pèse. 100 % en
+  // mémoire, aucune requête. Si l'historique n'est pas encore chargé, le profil est vide et
+  // seuls les signaux « note » et « popularité » (indépendants du goût) s'affichent.
+  function buildTasteProfile() {
+    const w = {};
+    for (const s of STATE.series || []) {
+      if (!s || (s.seen || 0) <= 0) continue;
+      const weight = Math.max(1, s.seen || 1);
+      for (const c of s.categories || []) w[c] = (w[c] || 0) + weight;
+    }
+    const entries = Object.entries(w).sort((a, b) => b[1] - a[1]);
+    return {
+      weights: w,
+      max: entries.length ? entries[0][1] : 0,
+      top: entries.slice(0, 3).map(([g]) => g),   // tes 3 genres les plus regardés
+      size: entries.length,
+    };
+  }
+
+  // Affinité d'une candidate : moyenne des poids (normalisés 0..1) de SES genres déjà
+  // présents dans ton profil. On ignore les genres que tu n'as jamais regardés plutôt que
+  // de les compter comme 0 : sinon une série à 5 genres dont 2 seulement recoupent ton
+  // historique voit sa moyenne divisée par 5 au lieu de 2, et le badge « dans tes goûts »
+  // ne sort quasiment jamais (bug remonté : jamais vu en pratique).
+  function affinityScore(cats, profile) {
+    if (!profile || !profile.max || !cats.length) return 0;
+    let sum = 0, n = 0;
+    for (const c of cats) {
+      const w = profile.weights[c];
+      if (!w) continue;
+      sum += w / profile.max;
+      n++;
+    }
+    return n ? sum / n : 0;
+  }
+
+  // Signaux d'une carte Découverte : icônes parlantes + couleur du liseré dominant.
+  // 🎯 genre préféré (top 3) · 💚 dans tes goûts · 🏆 très bien notée · 🔥 très populaire
+  // 3 icônes ou plus → carte « légendaire » (halo doré + ruban), c'est du certain.
+  function discoverSignals(s, profile) {
+    const cats = s.categories || [];
+    const isPref = !!(profile && profile.top.some((g) => cats.includes(g)));
+    const aff = affinityScore(cats, profile);
+    const topRating = Math.max(4.6, (CFG.discoverMinRating || 0) + 0.1);
+    const wellRated = s.rating != null && s.rating >= topRating;
+    const veryPopular = s.order != null && s.order < 20;
+    const badges = [];
+    if (isPref) badges.push(['🎯', 'Un de tes genres préférés']);
+    else if (aff >= 0.5) badges.push(['💚', 'Dans tes goûts']);
+    if (wellRated) badges.push(['🏆', 'Très bien notée']);
+    if (veryPopular) badges.push(['🔥', 'Tout en haut du classement']);
+    const lead = isPref ? 'pref' : aff >= 0.5 ? 'aff' : wellRated ? 'rated' : veryPopular ? 'pop' : '';
+    const legendary = badges.length >= 3;
+    const notable = badges.length === 2;
+    return { badges, lead, legendary, notable };
+  }
+
+  function sigMarkup(sig) {
+    return sig && sig.badges.length
+      ? `<div class="crrav-sigs">${sig.badges.map(([ic, lbl]) =>
+          `<span class="crrav-sig-dot" title="${lbl}">${ic}</span>`).join('')}</div>`
+      : '';
+  }
+
+  function discoverCard(s, profile) {
+    const sig = discoverSignals(s, profile);
+    const seriesUrl = crSeriesUrl(s.id, s.slug);
+    const synopsis = s.synopsis
+      ? `<button class="crrav-info" aria-expanded="false" aria-label="Lire le synopsis">i</button>
+         <div class="crrav-syn"><p>${escapeHtml(s.synopsis)}</p></div>`
+      : '';
+    const info = `${s.seasons} saison${s.seasons > 1 ? 's' : ''}${
+      s.episodes ? ` · ${s.episodes} ép. · ${fmtDuration(s.secTotal)}` : ''}`;
+    return `<article class="crrav-card${sig.lead ? ' crrav-sig crrav-sig-' + sig.lead : ''}${sig.legendary ? ' crrav-legendary' : sig.notable ? ' crrav-notable' : ''}">
+      <div class="crrav-thumb">
+        <a class="crrav-cover" href="${seriesUrl}">
+          ${s.poster ? `<img loading="lazy" crossorigin="anonymous" src="${s.poster}" alt="" onerror="this.removeAttribute(&quot;crossorigin&quot;);this.src=this.src">` : ''}
+        </a>
+        ${sig.legendary ? `<span class="crrav-legribbon" title="3 signaux ou plus : une pépite en or">✨ Légendaire</span>` : ''}
+        <span class="crrav-rating">★ ${s.rating.toFixed(1)}</span>
+        ${ignoreBtn(s, 'discover')}
+        ${addListBtn(s)}
+        ${synopsis}
+      </div>
+      <div class="crrav-body">
+        <a class="crrav-title" href="${seriesUrl}">${escapeHtml(s.title)}</a>
+        <div class="crrav-sigs">${sig.badges.map(([ic, lbl]) =>
+          `<span class="crrav-sig-dot" title="${lbl}">${ic}</span>`).join('')}</div>
+        <div class="crrav-meta"><span>${info}</span></div>
+        ${(s.categories || []).length
+          ? `<div class="crrav-cats" title="${escapeHtml((s.categories || []).join(', '))}"
+              >${escapeHtml((s.categories || []).join(' · '))}</div>` : ''}
+        <a class="crrav-resume" href="${seriesUrl}">Découvrir</a>
+      </div>
+    </article>`;
+  }
+
+  // (5bis) vue liste compacte pour Découverte : mêmes infos que la carte (genre, résumé,
+  // note, boutons ignorer/ajouter), condensées sur une ligne — le bouton grille/liste est
+  // partagé avec Reste à voir (STATE.filters.view), donc basculer l'un bascule l'autre.
+  function discoverListRow(s, profile) {
+    const sig = discoverSignals(s, profile);
+    const seriesUrl = crSeriesUrl(s.id, s.slug);
+    const info = `${s.seasons} saison${s.seasons > 1 ? 's' : ''}${
+      s.episodes ? ` · ${s.episodes} ép. · ${fmtDuration(s.secTotal)}` : ''}`;
+    const cats = s.categories || [];
+    // Genres fondus dans la ligne d'infos (saisons/épisodes) plutôt qu'en ligne à part :
+    // ça libère une ligne pour le début du résumé, qui compte plus ici pour juger d'une
+    // pépite jamais vue. Le bouton « i » reste là pour le lire en entier.
+    const metaLine = cats.length ? `${info} · ${cats.join(', ')}` : info;
+    return `<article class="crrav-lrow crrav-lrow-discover${sig.lead ? ' crrav-sig crrav-sig-' + sig.lead : ''}${sig.legendary ? ' crrav-legendary' : sig.notable ? ' crrav-notable' : ''}">
+      <a class="crrav-lthumb" href="${seriesUrl}">
+        ${s.poster ? `<img loading="lazy" crossorigin="anonymous" src="${s.poster}" alt="" onerror="this.removeAttribute(&quot;crossorigin&quot;);this.src=this.src">` : ''}
+        ${sig.legendary ? `<span class="crrav-legribbon crrav-legribbon-sm" title="3 signaux ou plus : une pépite en or">✨</span>` : ''}
+      </a>
+      <div class="crrav-lmain">
+        <div class="crrav-lhead">
+          <a class="crrav-ltitle" href="${seriesUrl}">${escapeHtml(s.title)}</a>
+          <span class="crrav-lrating">★ ${s.rating.toFixed(1)}</span>
+          ${sigMarkup(sig)}
+          ${s.synopsis ? `<button class="crrav-info" aria-expanded="false" aria-label="Lire le synopsis en entier">i</button>
+             <div class="crrav-syn"><p>${escapeHtml(s.synopsis)}</p></div>` : ''}
+        </div>
+        <div class="crrav-meta"><span title="${escapeHtml(metaLine)}">${escapeHtml(metaLine)}</span></div>
+        ${s.synopsis ? `<p class="crrav-lsyn-preview">${escapeHtml(s.synopsis)}</p>` : ''}
+      </div>
+      <div class="crrav-lactions">
+        ${ignoreBtn(s, 'discover')}
+        ${addListBtn(s)}
+      </div>
+    </article>`;
+  }
+
+  function discoverIgnoredListRow(s) {
+    const seriesUrl = crSeriesUrl(s.id);
+    return `<article class="crrav-lrow crrav-lrow-discover crrav-lrow-ignored">
+      <a class="crrav-lthumb" href="${seriesUrl}">
+        ${s.poster ? `<img loading="lazy" crossorigin="anonymous" src="${s.poster}" alt="" onerror="this.removeAttribute(&quot;crossorigin&quot;);this.src=this.src">` : ''}
+      </a>
+      <div class="crrav-lmain">
+        <div class="crrav-lhead">
+          <a class="crrav-ltitle" href="${seriesUrl}">${escapeHtml(s.title)}</a>
+          ${s.synopsis ? `<button class="crrav-info" aria-expanded="false" aria-label="Lire le synopsis en entier">i</button>
+             <div class="crrav-syn"><p>${escapeHtml(s.synopsis)}</p></div>` : ''}
+        </div>
+        <div class="crrav-meta"><span>Ignorée depuis Découverte</span></div>
+        ${s.synopsis ? `<p class="crrav-lsyn-preview">${escapeHtml(s.synopsis)}</p>` : ''}
+      </div>
+      <div class="crrav-lactions">${ignoreBtn(s, 'discover')}</div>
+    </article>`;
+  }
+
+  function newPremiereCard(s) {
+    // Fiche CR trouvée automatiquement (voir resolveCrunchyrollForPremiere), à deux niveaux
+    // de confiance : « confirmed » (lien fiable, pas de réserve) ou « probable » (titre
+    // repéré sur Crunchyroll mais pas assez sûr pour garantir que c'est LA bonne fiche —
+    // affiché quand même, avec un badge, car l'objectif ici est juste de savoir que la série
+    // sort sur Crunchyroll, pas d'avoir une fiche garantie). `found` est normalement
+    // toujours vrai (voir le filtre dans loadNewPremieres) ; le repli « recherche » reste
+    // par sécurité si crId venait à être vidé après coup (ex. vieil export de réglages).
+    const found = !!s.crId;
+    const probable = found && s.crConfidence === 'probable';
+    // « Annoncé » : pas de fiche exacte, mais AniList déclare une sortie Crunchyroll (lien
+    // fourni). On l'affiche quand même (voir demande) et on pointe vers CE lien, pas une
+    // recherche à l'aveugle.
+    const declared = !found && s.crConfidence === 'declared' && !!s.crUrl;
+    const url = found
+      ? crSeriesUrl(s.crId, s.crSlug)
+      : declared
+        ? crUrl(s.crUrl)
+        : crUrl(`https://www.crunchyroll.com/fr/search?q=${encodeURIComponent(s.title)}`);
+    const synopsis = s.synopsis
+      ? `<button class="crrav-info" aria-expanded="false" aria-label="Lire le synopsis">i</button>
+         <div class="crrav-syn"><p>${escapeHtml(s.synopsis)}</p></div>`
+      : '';
+    // Deux cas bien distincts (voir loadNewPremieres) : déjà regardable maintenant, ou
+    // encore à venir — même traitement « wahou » de carte, mais couleur/texte différents
+    // pour ne jamais laisser croire qu'une première pas encore sortie est déjà disponible.
+    const ribbon = s.released ? 'Inédit' : 'Bientôt';
+    const statusBadge = s.released
+      ? `<span class="crrav-rating" style="background:rgba(92,230,160,.85);color:#0b0b0d">🆕 Ép. 1</span>`
+      : `<span class="crrav-rating" style="background:rgba(159,214,255,.9);color:#0b0b0d">📅 Ép. 1</span>`;
+    const metaLabel = s.released ? 'Sorti le' : 'Épisode 1 prévu le';
+    // Petite indication (au survol) de la façon dont la fiche CR a été confirmée —
+    // utile pour comprendre d'où vient l'info sans encombrer la carte elle-même.
+    const crSourceTitle = s.crSource === 'anilist'
+      ? 'Fiche Crunchyroll confirmée via le lien officiel déclaré par AniList'
+      : s.crSource === 'anilist-declared'
+        ? 'AniList indique une sortie sur Crunchyroll (lien déclaré) ; la fiche exacte n\u2019a pas encore été repérée — le lien ouvre la page Crunchyroll annoncée'
+      : s.crSource === 'search'
+        ? (probable
+          ? 'Titre repéré sur Crunchyroll par recherche, mais correspondance pas assez sûre pour garantir que c’est la bonne fiche'
+          : 'Fiche Crunchyroll confirmée par recherche de titre (lien non déclaré sur AniList)')
+        : '';
+    return `<article class="crrav-card crrav-premcard${s.released ? '' : ' crrav-premcard-upcoming'}">
+      <span class="crrav-premribbon">${ribbon}</span>
+      <div class="crrav-thumb">
+        <a class="crrav-cover" href="${url}">
+          ${s.poster ? `<img loading="lazy" crossorigin="anonymous" src="${s.poster}" alt="" onerror="this.removeAttribute(&quot;crossorigin&quot;);this.src=this.src">` : ''}
+        </a>
+        ${statusBadge}
+        ${found
+          ? (probable ? `<span class="crrav-crmiss" title="${escapeHtml(crSourceTitle)}">🔎 probablement sur Crunchyroll</span>` : '')
+          : declared ? `<span class="crrav-crmiss" title="${escapeHtml(crSourceTitle)}">📣 annoncé sur Crunchyroll</span>`
+          : `<span class="crrav-crmiss" title="Fiche Crunchyroll pas encore repérée avec certitude — ce lien ouvre une recherche">🔍 fiche à chercher</span>`}
+        ${ignoreBtn(s, 'newpremieres')}
+        ${synopsis}
+      </div>
+      <div class="crrav-body">
+        <a class="crrav-title" href="${url}">${escapeHtml(s.title)}</a>
+        <div class="crrav-meta"><span${crSourceTitle ? ` title="${escapeHtml(crSourceTitle)}"` : ''}>${metaLabel} ${fmtShortDate(s.ep1Ts)}</span></div>
+        ${(s.categories || []).length
+          ? `<div class="crrav-cats" title="${escapeHtml((s.categories || []).join(', '))}"
+              >${escapeHtml((s.categories || []).join(' · '))}</div>` : ''}
+        <a class="crrav-resume" href="${url}">${found ? (probable ? 'Voir le candidat sur Crunchyroll' : 'Voir sur Crunchyroll') : declared ? 'Voir l\u2019annonce sur Crunchyroll' : 'Chercher sur Crunchyroll'}</a>
+      </div>
+    </article>`;
+  }
+
+  // (7) Recherche globale unifiée — remplace les 3 barres par onglet. Cherche par
+  // titre dans les 3 sources déjà en mémoire (Reste à voir, Hors listes, Découverte)
+  // et affiche tout d'un coup, groupé par source. Si Hors listes / Découverte n'ont
+  // encore jamais été chargées, on lance leur scan en tâche de fond (comme à
+  // l'ouverture normale de ces onglets) plutôt que de prétendre qu'elles sont vides.
+  function renderGlobalSearch() {
+    const needle = STATE.filters.globalQ.trim().toLowerCase();
+    const matches = (s) => s.title.toLowerCase().includes(needle);
+
+    const mSuivi = STATE.series.filter((s) => s.total > 0 && !IGNORED.has(s.id) && matches(s));
+    const mOrphan = STATE.orphan.series.filter((s) => !IGNORED.has(s.id) && matches(s));
+    const mDiscover = STATE.discover.series.filter((s) => !IGNORED.has(s.id) && !STATE.addedToList.has(s.id) && matches(s));
+
+    const section = (icon, title, arr, cardFn, loading) => {
+      if (!arr.length && !loading) return '';
+      return `<section class="crrav-globalsec">
+        <h2 class="crrav-stath2">${icon} ${title} (${arr.length})</h2>
+        ${loading && !arr.length ? '<p class="crrav-globalloading">Recherche en cours…</p>' : ''}
+        <div class="crrav-grid">${arr.map(cardFn).join('')}</div>
+      </section>`;
+    };
+
+    const html = [
+      section('📋', 'Dans tes listes', mSuivi, card, false),
+      section('🧭', 'Hors listes (épisodes non vus)', mOrphan, card, STATE.orphan.loading),
+      section('✨', 'Découverte', mDiscover, discoverCard, STATE.discover.loading),
+    ].join('');
+
+    const nothing = !mSuivi.length && !mOrphan.length && !mDiscover.length
+      && !STATE.orphan.loading && !STATE.discover.loading;
+
+    return `<div class="crrav-globalresults">
+      ${html}
+      ${nothing ? `<div class="crrav-msg"><h3>Rien à afficher</h3>
+        <p>Aucun résultat pour « ${escapeHtml(STATE.filters.globalQ.trim())} ».</p></div>` : ''}
+    </div>`;
+  }
+
+  const CSS = `
+  .crrav-fab{position:fixed;right:18px;bottom:18px;z-index:99998;display:flex;align-items:center;gap:8px;
+    padding:12px 18px;border:0;border-radius:999px;cursor:pointer;font:700 14px/1 system-ui,sans-serif;
+    color:#0b0b0d;background:linear-gradient(135deg,#ffb347,#f47521);box-shadow:0 8px 28px rgba(244,117,33,.4);
+    transition:transform .18s ease,box-shadow .18s ease}
+  .crrav-fab:hover{transform:translateY(-2px);box-shadow:0 12px 34px rgba(244,117,33,.55)}
+  .crrav-fab:focus-visible{outline:3px solid #fff;outline-offset:3px}
+
+  .crrav-overlay{position:fixed;inset:0;width:100%;height:100vh;height:100dvh;overflow-x:hidden;
+    z-index:99999;color:#f2f2f4;overflow-y:auto;
+    background:radial-gradient(1200px 600px at 50% -10%,rgba(244,117,33,.10),transparent 60%),#0a0a0c;
+    color-scheme:dark;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;
+    -webkit-font-smoothing:antialiased;animation:crrav-in .22s ease}
+  @keyframes crrav-in{from{opacity:0;transform:scale(.99)}to{opacity:1;transform:none}}
+  @media (prefers-reduced-motion:reduce){
+    .crrav-overlay,.crrav-fab,.crrav-card,.crrav-card::after,.crrav-skel,.crrav-skel div,
+    .crrav-hlcard,.crrav-tab,.crrav-chip,.crrav-btn,.crrav-sync,.crrav-filtersbtn,
+    .crrav-close,.crrav-info,.crrav-calrow,.crrav-lrow,.crrav-thumb img,.crrav-thumb::after{
+      animation:none!important;transition:none!important;transform:none!important}}
+  .crrav-overlay *{box-sizing:border-box}
+
+  .crrav-top{position:sticky;top:0;z-index:5;backdrop-filter:blur(18px);
+    background:linear-gradient(180deg,rgba(10,10,12,.96),rgba(10,10,12,.82));
+    border-bottom:1px solid rgba(255,255,255,.08);padding:16px 20px 12px}
+  .crrav-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  /* Ligne principale du header : TOUJOURS sur une seule ligne (nowrap). Le scroll
+     horizontal est un filet de sécurité pour un très petit écran + réglages non
+     par défaut (ex. barre de recherche forcée) plutôt qu'un retour à la ligne qui
+     repousserait le reste du contenu vers le bas — exactement ce qu'on cherche à éviter. */
+  .crrav-row-main{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;padding-bottom:1px}
+  /* Sépare visuellement la grappe « navigation du contenu » (gauche) de la grappe
+     « actions & app » (droite : actualiser, TV, réglages, fermer). */
+  .crrav-hpush{margin-left:auto}
+  .crrav-row-main::-webkit-scrollbar{display:none}
+  .crrav-brand{font:800 15px/1 system-ui;letter-spacing:-.02em;margin:0;flex:0 0 auto;
+    display:flex;align-items:center;gap:6px;white-space:nowrap}
+  .crrav-logo{flex:0 0 auto;display:block}
+  .crrav-brand span{background:linear-gradient(120deg,#ffb347,#f47521);
+    -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:#f47521}
+  /* « Mon Crunchy » n'apparaît qu'à partir de 720px (Z Fold ouvert et plus large) — sous
+     ce seuil, seul le logo reste, pour ne pas rogner sur les boutons juste à côté. */
+  .crrav-brand-text{display:none}
+
+  .crrav-tabs{display:flex;gap:6px;margin:14px 0 0}
+  .crrav-tab{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.12);color:#c9c9d2;
+    border-radius:11px;padding:8px 14px;font:700 12.5px/1 system-ui;cursor:pointer;position:relative;
+    transition:background .15s ease,color .15s ease,transform .12s ease,box-shadow .18s ease}
+  .crrav-tab:hover{background:rgba(255,255,255,.1);transform:translateY(-1px)}
+  .crrav-tab:active{transform:translateY(0) scale(.97)}
+  .crrav-tab[aria-selected="true"]{background:linear-gradient(135deg,#ffa347,#f47521);
+    border-color:transparent;color:#12120f;box-shadow:0 6px 18px -6px rgba(244,117,33,.8)}
+  .crrav-tab:focus-visible{outline:2px solid #fff;outline-offset:2px}
+  .crrav-close{margin-left:auto;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12);
+    color:#f2f2f4;border-radius:10px;width:36px;height:36px;font-size:18px;cursor:pointer}
+  .crrav-close:hover{background:rgba(255,255,255,.14)}
+  .crrav-sync,.crrav-filtersbtn{background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12);
+    color:#f2f2f4;border-radius:10px;height:36px;padding:0 14px;font:600 13px/1 system-ui;cursor:pointer}
+  .crrav-sync:hover,.crrav-filtersbtn:hover{background:rgba(255,255,255,.14)}
+  .crrav-sync,.crrav-filtersbtn,.crrav-close,.crrav-chip,.crrav-btn{
+    transition:background .15s ease,border-color .15s ease,transform .12s ease}
+  .crrav-sync:active,.crrav-filtersbtn:active,.crrav-close:active,
+  .crrav-chip:active,.crrav-btn:active{transform:scale(.95)}
+  .crrav-sync:focus-visible,.crrav-filtersbtn:focus-visible,.crrav-close:focus-visible,
+  .crrav-chip:focus-visible,.crrav-btn:focus-visible{outline:2px solid #fff;outline-offset:2px}
+  .crrav-filtersbtn[aria-pressed="true"],.crrav-sync[aria-pressed="true"]{
+    background:rgba(244,117,33,.18);border-color:rgba(244,117,33,.5)}
+  /* Boutons icône seule du header (filtres, recherche, TV, réglages, actualiser) :
+     carrés compacts sous 720px — c'est ce qui permet de tout tenir sur une seule
+     ligne, y compris sur petit écran. Le libellé texte de chacun (.crrav-btn-label)
+     reste dans le DOM mais masqué, pour réapparaître au palier suivant. */
+  .crrav-icobtn{width:36px;padding:0!important;display:inline-flex;align-items:center;
+    justify-content:center;flex:0 0 auto;font-size:15px}
+  .crrav-btn-label{display:none}
+  /* Le mode TV/salon ne concerne que les grands écrans pilotés à distance : le bouton
+     n'a pas sa place sur un mobile, où il ne ferait que voler de la largeur précieuse. */
+  @media(max-width:720px){.crrav-tvbtn{display:none}}
+  /* À partir de 720px (Z Fold ouvert et plus large), la largeur ne manque plus : les
+     boutons redeviennent lisibles avec leur libellé plutôt que de rester en icône
+     seule par principe — l'icône-seule n'était qu'une contrainte du petit écran. */
+  @media(min-width:720px){
+    .crrav-brand-text{display:inline}
+    .crrav-icobtn{width:auto;padding:0 14px!important;gap:7px}
+    .crrav-btn-label{display:inline;font:600 13px/1 system-ui}
+  }
+  /* Cas particulier du bouton Actualiser (.crrav-hpush) : sur un écran tactile, le
+     rafraîchissement se fait déjà par pull-to-refresh, donc son libellé « Actualiser »
+     est superflu. Il réapparaissait pourtant dès 720px (Z Fold déplié et plus large) via
+     la règle ci-dessus. On le remasque donc quand le pointeur primaire est tactile
+     (pointer:coarse), indépendamment de la largeur — sélecteur plus spécifique, il gagne
+     sur .crrav-btn-label{display:inline}. Le mode TV (pointeur fin, grand écran) n'est pas
+     tactile : le libellé y reste visible, comme voulu. */
+  @media(pointer:coarse){.crrav-hpush .crrav-btn-label{display:none}}
+
+  .crrav-warn{margin:10px 0 0;padding:9px 12px;border-radius:10px;font-size:12.5px;
+    background:rgba(255,179,71,.12);border:1px solid rgba(255,179,71,.35);color:#ffcf8a}
+  /* Variante repliable : une seule ligne (résumé) dépliable au tap — gain de place mobile.
+     Repose sur <details> natif : aucun JS, robuste à la reconstruction du DOM. */
+  details.crrav-warn{padding:0}
+  details.crrav-warn>summary{list-style:none;cursor:pointer;padding:9px 12px;
+    display:flex;align-items:center;gap:8px;font-size:12.5px;font-weight:600}
+  details.crrav-warn>summary::-webkit-details-marker{display:none}
+  details.crrav-warn>summary::before{content:'▸';flex:0 0 auto;font-size:10px;opacity:.75}
+  details.crrav-warn[open]>summary::before{content:'▾'}
+  details.crrav-warn>summary>span{flex:1 1 auto;min-width:0;overflow:hidden;
+    text-overflow:ellipsis;white-space:nowrap}
+  details.crrav-warn>.crrav-warn-detail{padding:0 12px 10px 30px;font-size:12px;
+    font-weight:400;line-height:1.5;opacity:.95}
+
+  .crrav-stats{display:flex;gap:22px;margin:12px 0 4px;flex-wrap:wrap}
+  .crrav-stat b{display:block;font:800 24px/1.1 system-ui;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+  .crrav-stat small{color:#9a9aa4;font-size:11px;text-transform:uppercase;letter-spacing:.09em}
+  .crrav-stat.hot b{color:#f47521}
+
+  .crrav-controls{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
+
+  /* (16) repli manuel des en-têtes (bannière, stats, contrôles) — un seul bouton,
+     valable sur les 3 onglets et sur tous les écrans, état mémorisé. */
+  .crrav-overlay.crrav-headercollapsed .crrav-warn:not(.crrav-warn-keep),
+  .crrav-overlay.crrav-headercollapsed .crrav-stats,
+  .crrav-overlay.crrav-headercollapsed .crrav-controls{display:none}
+  .crrav-search{flex:1 1 220px;min-width:160px;background:rgba(255,255,255,.06);
+    border:1px solid rgba(255,255,255,.12);border-radius:10px;padding:9px 12px;color:#fff;font-size:14px}
+  .crrav-search::placeholder{color:#8a8a94}
+  .crrav-search:focus,.crrav-select:focus{outline:2px solid #f47521;outline-offset:1px}
+
+  /* (7) recherche globale unifiée — une seule barre, toujours visible, remplace
+     les 3 barres par onglet (Reste à voir / Hors listes / Découverte) */
+  .crrav-globalrow{position:relative;margin-top:12px}
+  .crrav-search-global{width:100%;padding:10px 40px 10px 14px;font-size:14.5px;
+    background:rgba(255,255,255,.07)}
+  .crrav-globalclear{position:absolute;right:6px;top:50%;transform:translateY(-50%);
+    width:26px;height:26px;border-radius:50%;border:0;background:transparent;
+    color:#9a9aa4;font:700 13px/1 system-ui;cursor:pointer}
+  .crrav-globalclear:hover{background:rgba(255,255,255,.1);color:#f2f2f4}
+  .crrav-globalresults{display:flex;flex-direction:column;gap:20px;margin-top:14px}
+  .crrav-globalsec .crrav-stath2{margin-bottom:10px}
+  .crrav-globalloading{color:#9a9aa4;font:600 12.5px/1 system-ui;margin:0 0 10px}
+  .crrav-select{background:#1c1c22;border:1px solid rgba(255,255,255,.12);border-radius:10px;
+    padding:9px 12px;color:#f2f2f4;font-size:14px;cursor:pointer;
+    appearance:none;-webkit-appearance:none;padding-right:30px;
+    background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath fill='%23f47521' d='M0 0h10L5 6z'/%3E%3C/svg%3E");
+    background-repeat:no-repeat;background-position:right 11px center}
+  .crrav-select option{background:#1c1c22;color:#f2f2f4}
+  .crrav-select option:checked{background:#f47521;color:#12120f}
+  .crrav-chips{display:flex;gap:6px;flex-wrap:wrap;width:100%}
+  .crrav-chip{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.12);color:#c9c9d2;
+    border-radius:999px;padding:6px 13px;font:600 12.5px/1 system-ui;cursor:pointer;text-decoration:none;
+    display:inline-flex;align-items:center;gap:5px}
+  .crrav-chip[aria-pressed="true"]{background:#f47521;border-color:#f47521;color:#12120f}
+  .crrav-chip:focus-visible{outline:2px solid #fff;outline-offset:2px}
+  .crrav-catlegend{font:600 11px/1 system-ui;color:#8a8a94;align-self:center;
+    text-transform:uppercase;letter-spacing:.06em}
+  .crrav-chip[aria-pressed="true"]{box-shadow:inset 0 0 0 1px rgba(244,117,33,.35)}
+  .crrav-cat.in{background:#f47521;border-color:#f47521;color:#12120f}
+  .crrav-cat.ex{background:rgba(224,87,74,.16);border-color:rgba(224,87,74,.55);color:#ff9a8f;
+    text-decoration:line-through}
+  .crrav-cats{font:500 10.5px/1.3 system-ui;color:#8a8a94;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+  .crrav-grid{display:grid;gap:16px;padding:20px;grid-template-columns:repeat(auto-fill,minmax(178px,1fr))}
+
+  .crrav-card{background:#141419;border:1px solid rgba(255,255,255,.07);border-radius:16px;overflow:hidden;
+    display:flex;flex-direction:column;position:relative;
+    /* PERF : les cartes hors écran ne sont ni peintes ni calculées. Sur une longue liste
+       c'est le gain le plus net — et il rend les effets ci-dessous « gratuits ». */
+    content-visibility:auto;contain-intrinsic-size:auto 320px;
+    transition:transform .18s cubic-bezier(.2,.7,.3,1),border-color .18s ease,
+      box-shadow .18s ease,background .4s ease}
+  /* (#6) teinte tirée de la jaquette, très discrète pour rester lisible */
+  .crrav-card.has-hue{background:
+    linear-gradient(160deg,rgba(var(--hue),.16),rgba(20,20,25,.6) 62%),#141419}
+  /* Halo coloré au survol : opacité seule = composité, aucun recalcul de mise en page. */
+  .crrav-card::after{content:'';position:absolute;inset:-1px;border-radius:inherit;pointer-events:none;
+    opacity:0;transition:opacity .18s ease;
+    box-shadow:0 0 0 1px rgba(var(--hue,244,117,33),.5),
+      0 16px 42px -14px rgba(var(--hue,244,117,33),.75)}
+  .crrav-card:hover{transform:translateY(-5px);border-color:transparent}
+  .crrav-card:hover::after{opacity:1}
+  .crrav-thumb{position:relative;aspect-ratio:2/3;background:#1d1d24;display:block}
+  .crrav-similar{flex:0 0 auto;width:36px;border-radius:9px;border:1px solid rgba(255,255,255,.14);
+    background:rgba(255,255,255,.05);color:#e6e7ea;font-size:16px;line-height:1;display:inline-flex;
+    align-items:center;justify-content:center;cursor:pointer;padding:0;-webkit-tap-highlight-color:transparent}
+  .crrav-similar:hover{background:rgba(244,117,33,.18);border-color:rgba(244,117,33,.5)}
+  .crrav-lactions .crrav-similar{width:32px;height:32px}
+  /* Coloration Découverte : pastilles de signaux + liseré coloré (couleur = signal dominant) */
+  .crrav-sigs{display:flex;gap:5px;margin:3px 0 2px;font-size:13px;line-height:1;min-height:15px}
+  .crrav-sig-dot{cursor:default}
+  .crrav-sig-pref{--sig:#b98bff}
+  .crrav-sig-aff{--sig:#4ade80}
+  .crrav-sig-rated{--sig:#ffd166}
+  .crrav-sig-pop{--sig:#5db4ff}
+  .crrav-card.crrav-sig::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;z-index:3;background:var(--sig)}
+  .crrav-lrow-discover.crrav-sig::before{background:var(--sig);transform:scaleY(1)}
+  .crrav-siglegend{display:flex;flex-wrap:wrap;align-items:center;gap:7px;margin:0 0 13px}
+  .crrav-siglegend-title{font:700 9.5px/1 system-ui;letter-spacing:.09em;text-transform:uppercase;
+    color:#71717c;margin-right:1px;white-space:nowrap}
+  .crrav-siglegend-chip{display:inline-flex;align-items:center;gap:6px;white-space:nowrap;
+    font:600 11.5px/1 system-ui;color:#d3d4da;padding:6px 11px 6px 9px;border-radius:9px;
+    background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.07);
+    border-left:3px solid var(--sig);transition:background .15s,transform .15s}
+  .crrav-siglegend-chip:hover{background:rgba(255,255,255,.09);transform:translateY(-1px)}
+  .crrav-siglegend-chip::after{content:'';width:6px;height:6px;border-radius:50%;
+    background:var(--sig);box-shadow:0 0 7px var(--sig);flex:none;margin-left:1px}
+  /* Carte « légendaire » (3 signaux ou plus) : halo doré qui respire autour de la carte,
+     plus un ruban en coin. Le liseré coloré (--sig) reste en place dessous, le halo
+     doré prend le dessus visuellement pour que « légendaire » soit non-ambigu. */
+  @keyframes crrav-legpulse{
+    0%,100%{box-shadow:0 0 0 1px rgba(255,196,92,.55),0 0 16px 2px rgba(255,196,92,.35)}
+    50%{box-shadow:0 0 0 1.5px rgba(255,213,143,.85),0 0 26px 6px rgba(255,196,92,.55)}
+  }
+  .crrav-card.crrav-legendary{animation:crrav-legpulse 2.6s ease-in-out infinite}
+  .crrav-card.crrav-legendary::before{background:linear-gradient(180deg,#ffe08a,#f4a521)!important;width:4px}
+  .crrav-lrow-discover.crrav-legendary{animation:crrav-legpulse 2.6s ease-in-out infinite}
+  .crrav-legribbon{position:absolute;top:8px;right:8px;z-index:2;
+    background:linear-gradient(135deg,#ffe08a,#f4a521);color:#241a04;
+    font:800 10px/1 system-ui;letter-spacing:.02em;border-radius:6px;padding:4px 7px;
+    box-shadow:0 2px 8px rgba(244,165,33,.5);white-space:nowrap}
+  .crrav-legribbon-sm{position:absolute;top:2px;right:2px;font-size:11px;line-height:1;
+    background:rgba(10,10,12,.75);border-radius:4px;padding:1px 2px;
+    box-shadow:0 0 6px rgba(255,196,92,.7)}
+  /* 🎲 Dé légendaire : même dégradé doré que le ruban « Légendaire », pour que le bouton
+     se distingue d'un coup d'œil du 🎲 « autres pépites » (celui-là reste neutre) et du
+     🔄 « Actualiser » — trois icônes, trois sens, aucune confusion possible. */
+  .crrav-dice-gold{display:inline-flex;align-items:center;justify-content:center;
+    background:linear-gradient(135deg,#ffe08a,#f4a521);border-radius:7px;
+    padding:1px 5px;margin-right:2px;box-shadow:0 0 8px rgba(244,165,33,.55);
+    filter:saturate(1.15)}
+  .crrav-icobtn .crrav-dice-gold{margin-right:0}
+  @media (prefers-reduced-motion:reduce){
+    .crrav-card.crrav-legendary,.crrav-lrow-discover.crrav-legendary{animation:none;
+      box-shadow:0 0 0 1.5px rgba(255,196,92,.7),0 0 18px 3px rgba(255,196,92,.4)}
+  }
+  /* Carte « notable » (exactement 2 signaux) : un cran en dessous du légendaire, pas
+     d'animation, pas de ruban — juste un liseré un peu plus marqué et un glow léger,
+     fixe, pour ne pas concurrencer visuellement le halo doré des vraies légendaires. */
+  .crrav-card.crrav-notable{box-shadow:0 0 0 1px rgba(255,213,143,.35),0 0 10px 0 rgba(255,196,92,.18)}
+  .crrav-card.crrav-notable::before{width:3.5px}
+  .crrav-lrow-discover.crrav-notable{box-shadow:0 0 0 1px rgba(255,213,143,.3),0 0 8px 0 rgba(255,196,92,.15)}
+  .crrav-simbar{display:flex;align-items:center;gap:10px;margin:0 0 10px;padding:9px 12px;border-radius:10px;
+    background:rgba(244,117,33,.1);border:1px solid rgba(244,117,33,.3)}
+  .crrav-simbar-txt{flex:1;min-width:0;font-size:13px;color:#ffcfa6;line-height:1.35}
+  .crrav-simbar-txt b{color:#fff}
+  .crrav-simbar-x{flex:0 0 auto;width:30px;height:30px;border-radius:8px;border:1px solid rgba(255,255,255,.16);
+    background:rgba(0,0,0,.2);color:#e6e7ea;font-size:14px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center}
+  .crrav-simbar-x:hover{background:rgba(255,255,255,.12)}
+  .crrav-cover{display:block;width:100%;height:100%}
+  .crrav-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+  /* Pas de backdrop-filter sur les badges : multiplié par le nombre de cartes, le flou
+     coûtait cher sur mobile pour un rendu quasi identique à un fond opaque. */
+  .crrav-rating{position:absolute;top:8px;left:8px;background:rgba(10,10,12,.92);
+    border:1px solid rgba(255,255,255,.16);border-radius:8px;padding:4px 7px;
+    font:800 11.5px/1 system-ui;font-variant-numeric:tabular-nums;color:#ffcf55}
+  .crrav-info{position:absolute;right:8px;bottom:8px;z-index:2;width:32px;height:32px;border-radius:50%;
+    background:rgba(10,10,12,.92);border:1px solid rgba(255,255,255,.22);
+    color:#f2f2f4;font:700 15px/1 Georgia,serif;cursor:pointer;padding:0;
+    transition:transform .15s ease,background .15s ease}
+  /* Cible tactile étendue (~44px) sans agrandir le visuel : zone invisible autour du bouton.
+     Scopée aux boutons de la jaquette (les variantes en liste/ignorées sont position:static). */
+  .crrav-thumb .crrav-info::before,.crrav-thumb .crrav-ignore::before{content:'';position:absolute;inset:-6px;border-radius:50%}
+  .crrav-info:active{transform:scale(.9)}
+  .crrav-info:hover{background:#f47521;color:#12120f;border-color:#f47521}
+  .crrav-info:focus-visible{outline:2px solid #fff;outline-offset:2px}
+  .crrav-syn{position:absolute;inset:0;z-index:1;padding:11px;overflow:auto;
+    background:rgba(8,8,10,.97);
+    opacity:0;visibility:hidden;transition:opacity .15s ease}
+  .crrav-syn p{margin:0;font:400 11.5px/1.5 system-ui;color:#d6d6de}
+  .crrav-syn.show{opacity:1;visibility:visible}
+  @media (hover:hover){.crrav-thumb:hover .crrav-syn{opacity:1;visibility:visible}}
+  .crrav-airing{position:absolute;left:8px;top:38px;background:rgba(10,10,12,.92);
+    border:1px solid rgba(159,214,255,.3);border-radius:6px;padding:3px 7px;font:700 10px/1 system-ui;
+    letter-spacing:.04em;color:#9fd6ff;
+    box-shadow:0 0 12px -4px rgba(159,214,255,.5)}
+  .crrav-body{padding:11px 12px 12px;display:flex;flex-direction:column;gap:8px}
+  .crrav-title{font:700 13.5px/1.3 system-ui;color:inherit;text-decoration:none;display:-webkit-box;
+    -webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:2.6em}
+  .crrav-title:hover{color:var(--prog)}
+  .crrav-lrow{position:relative;transition:transform .16s ease,border-color .16s ease;
+    content-visibility:auto;contain-intrinsic-size:auto 92px}
+  .crrav-lrow::before{content:'';position:absolute;left:0;top:8px;bottom:8px;width:3px;border-radius:3px;
+    background:var(--prog);transform:scaleY(0);transform-origin:center;transition:transform .18s ease}
+  .crrav-lrow:hover::before{transform:scaleY(1)}
+  .crrav-meta{display:flex;justify-content:space-between;gap:6px;font:600 11.5px/1 system-ui;
+    font-variant-numeric:tabular-nums;color:#8f8f99}
+  .crrav-left{color:var(--prog)}
+  .crrav-planned-hint{color:#8fb3ff;font-weight:600}
+  .crrav-planned-row{margin-top:5px}
+  .crrav-anibadge{color:#8fb3ff!important;border-color:rgba(143,179,255,.45)!important}
+  .crrav-planned{display:inline-flex;align-items:center;gap:4px;max-width:100%;
+    font:600 11px/1.25 system-ui;color:#c9a24b;background:rgba(201,162,75,.12);
+    border:1px solid rgba(201,162,75,.28);border-radius:7px;padding:3px 7px;
+    box-sizing:border-box}
+  .crrav-planned-compact{background:none;border:none;padding:0;display:inline-block;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600;
+    max-width:100%}
+  .crrav-resume{display:block;text-align:center;text-decoration:none;border-radius:8px;padding:7px 6px;
+    font:700 11.5px/1.2 system-ui;color:#12120f;background:var(--prog);opacity:.92}
+  .crrav-resume:hover{opacity:1}
+  .crrav-card a:focus-visible{outline:2px solid #fff;outline-offset:2px}
+
+  .crrav-actrow{display:flex;gap:6px;align-items:stretch}
+  .crrav-actrow .crrav-resume{flex:1;min-width:0}
+
+  .crrav-ticks{display:flex;gap:var(--sg,6px);height:6px;overflow:hidden}
+  .crrav-season{display:flex;gap:var(--tg,2px);min-width:0}
+  .crrav-tick{flex:1 1 0;min-width:1px;border-radius:1px;background:rgba(255,255,255,.14)}
+  .crrav-tick.on{background:var(--prog)}
+  .crrav-tick.half{background:rgba(255,255,255,.42)}
+  .crrav-tick.upcoming{background:rgba(159,214,255,.4)}
+  /* (33) bloc « saison entièrement vue » : même teinte que les cases vues, mais plus
+     arrondi et légèrement bordé — se lit comme UN morceau plein, pas comme une case
+     de plus parmi d'autres. */
+  .crrav-tick.season-block{border-radius:3px;background:var(--prog);
+    box-shadow:inset 0 0 0 1px rgba(255,255,255,.22)}
+  .crrav-bar{height:6px;border-radius:3px;background:rgba(255,255,255,.12);overflow:hidden;
+    box-shadow:inset 0 1px 2px rgba(0,0,0,.35)}
+  .crrav-bar i{display:block;height:100%;background:var(--prog)}
+
+  /* (6) anneau de progression */
+  .crrav-ringwrap{position:absolute;top:6px;right:6px;width:40px;height:40px;display:grid;place-items:center}
+  .crrav-ring{position:absolute;inset:0;width:40px;height:40px;transform:rotate(-90deg)}
+  .crrav-ring-bg{fill:rgba(10,10,12,.8);stroke:rgba(255,255,255,.16);stroke-width:3}
+  .crrav-ring-fg{fill:none;stroke:var(--prog);stroke-width:3;stroke-linecap:round;
+    transition:stroke-dashoffset .4s ease}
+  .crrav-ring-t{position:relative;font:800 10.5px/1 system-ui;font-variant-numeric:tabular-nums;
+    color:var(--prog);letter-spacing:-.03em}
+  .crrav-ring-t.done{font-size:14px;color:#5ce6a0}
+
+  /* (7bis) Nouveautés du Calendrier (premières mondiales, personne ne les a encore vues) :
+     doit sauter aux yeux et ne pas se confondre avec Découverte (déjà au catalogue CR,
+     juste jamais regardée par toi) ni avec les lignes du Calendrier (tes propres séries en
+     cours). Contour dégradé animé + ruban « Inédit », clairement à part. */
+  .crrav-premcard{border:1px solid transparent;background:
+    linear-gradient(#141419,#141419) padding-box,
+    linear-gradient(120deg,#ff6b6b,#ffb347,#5ce6a0,#9fd6ff,#ff6b6b) border-box;
+    background-size:100% 100%,300% 300%;animation:crrav-premglow 7s linear infinite}
+  @keyframes crrav-premglow{to{background-position:0 0,300% 50%}}
+  .crrav-premribbon{position:absolute;top:12px;right:-30px;transform:rotate(40deg);z-index:3;
+    background:linear-gradient(90deg,#ff6b6b,#ffb347);color:#1a1004;
+    font:800 10px/1 system-ui;letter-spacing:.06em;text-transform:uppercase;
+    padding:4px 34px;box-shadow:0 3px 10px rgba(0,0,0,.4);pointer-events:none}
+  /* « à venir » (épisode 1 pas encore sorti) : même traitement mais teinte froide, pour ne
+     jamais laisser croire que c'est déjà regardable. */
+  .crrav-premcard-upcoming{background:
+    linear-gradient(#141419,#141419) padding-box,
+    linear-gradient(120deg,#9fd6ff,#8fb3ff,#c9a24b,#9fd6ff) border-box}
+  .crrav-premcard-upcoming .crrav-premribbon{background:linear-gradient(90deg,#9fd6ff,#8fb3ff);color:#08131c}
+  .crrav-crmiss{position:absolute;top:34px;left:8px;background:rgba(10,10,12,.92);
+    border:1px solid rgba(255,207,85,.4);border-radius:6px;padding:3px 7px;
+    font:700 9.5px/1 system-ui;color:#ffcf55}
+  @media (prefers-reduced-motion:reduce){.crrav-premcard{animation:none}}
+
+  /* Détail du filtrage « Nouveautés » quand le bloc est vide (voir renderNewPremieresDebug) */
+  .crrav-premdebug{margin-top:8px;padding:10px 12px;border:1px solid rgba(255,255,255,.1);
+    border-radius:10px;background:rgba(255,255,255,.03)}
+  .crrav-premdebug summary{cursor:pointer;font:700 12px/1.3 system-ui;color:#d6d6de;
+    list-style:none}
+  .crrav-premdebug summary::-webkit-details-marker{display:none}
+  .crrav-premdebug summary::before{content:'▸ ';color:#f47521}
+  .crrav-premdebug[open] summary::before{content:'▾ '}
+  .crrav-premdebug-intro{margin:8px 0 2px;font:500 11px/1.4 system-ui;color:#8a8a94}
+  .crrav-premdebug-grouptitle{margin:10px 0 2px;font:700 11px/1.3 system-ui;color:#a0a0aa}
+  .crrav-premdebug-row{display:flex;align-items:baseline;gap:8px;padding:5px 0 5px 6px;
+    border-left:2px solid rgba(255,255,255,.12);margin-top:4px;
+    font:600 12px/1.3 system-ui;color:#c7c7d1}
+  .crrav-premdebug-row b{font-variant-numeric:tabular-nums;color:#f2f2f4;min-width:1.4em}
+  .crrav-premdebug-row small{color:#8a8a94;font-weight:500}
+  .crrav-premdebug-row.crrav-premdebug-zero{border-left-color:#e0574a}
+  .crrav-premdebug-row.crrav-premdebug-zero b{color:#ff9a8f}
+  .crrav-premdebug-row.crrav-premdebug-sub{margin-left:14px;padding:3px 0 3px 6px;
+    border-left-color:rgba(255,255,255,.08);font:500 11px/1.3 system-ui;color:#9a9aa4}
+  .crrav-premdebug-row.crrav-premdebug-sub b{color:#c7c7d1;min-width:1.2em}
+  .crrav-premdebug-row.crrav-premdebug-merge{font-weight:700;color:#e8e8ec}
+  .crrav-premdebug-rowhint{margin:2px 0 2px 8px;padding:4px 8px;border-radius:6px;
+    background:rgba(224,87,74,.12);font:500 11px/1.4 system-ui;color:#ffb3aa}
+  .crrav-premdebug-hint{margin:10px 0 0;font:500 11px/1.4 system-ui;color:#8a8a94}
+
+  /* (7) nouvel épisode depuis la dernière visite */
+  .crrav-card.isnew,.crrav-lrow.isnew{border-color:#9fd6ff;box-shadow:0 0 0 1px rgba(159,214,255,.35)}
+  .crrav-newdot{position:absolute;top:6px;left:6px;background:#9fd6ff;color:#08131c;
+    border-radius:6px;padding:3px 6px;font:800 9.5px/1 system-ui;letter-spacing:.03em}
+  .crrav-card.isnew .crrav-rating{top:26px}
+
+  /* (8) ignorer une série */
+  .crrav-ignore{position:absolute;left:8px;bottom:8px;z-index:2;width:32px;height:32px;border-radius:50%;
+    background:rgba(10,10,12,.92);border:1px solid rgba(255,255,255,.22);
+    color:#c9c9d2;font:700 14px/1 system-ui;cursor:pointer;padding:0;opacity:0;transition:opacity .15s}
+  .crrav-thumb:hover .crrav-ignore,.crrav-ignore:focus-visible,.crrav-ignore.on{opacity:1}
+  .crrav-ignore:hover{background:#e0574a;color:#fff;border-color:#e0574a}
+  .crrav-ignore.on{background:#5ce6a0;color:#12120f;border-color:#5ce6a0}
+  @media (hover:none){.crrav-ignore{opacity:1}}
+  .crrav-airing{left:8px}
+
+  /* ajout direct à une Crunchylist depuis Découverte */
+  .crrav-addlist{position:absolute;right:8px;bottom:48px;z-index:2;width:32px;height:32px;border-radius:50%;
+    background:rgba(10,10,12,.92);border:1px solid rgba(255,255,255,.22);
+    color:#c9c9d2;font:700 16px/1 system-ui;cursor:pointer;padding:0;opacity:0;transition:opacity .15s,background .15s}
+  .crrav-addlist::before{content:'';position:absolute;inset:-6px;border-radius:50%}
+  .crrav-thumb:hover .crrav-addlist,.crrav-addlist:focus-visible{opacity:1}
+  .crrav-addlist:hover{background:#f47521;color:#12120f;border-color:#f47521}
+  .crrav-addlist.done{opacity:1;background:#5ce6a0;color:#12120f;border-color:#5ce6a0;pointer-events:none}
+  .crrav-addlist.busy{opacity:1;pointer-events:none}
+  .crrav-addlist[disabled]{opacity:.5;pointer-events:none}
+  @media (hover:none){.crrav-addlist{opacity:1}}
+  .crrav-listpicker{position:fixed;inset:0;z-index:60;display:flex;align-items:flex-end;justify-content:center;
+    background:rgba(6,6,8,.7)}
+  .crrav-listpicker-sheet{width:100%;max-width:420px;background:#141419;border:1px solid rgba(255,255,255,.1);
+    border-radius:16px 16px 0 0;padding:16px;display:flex;flex-direction:column;gap:10px;
+    max-height:70vh;overflow:auto}
+  @media(min-width:640px){.crrav-listpicker{align-items:center}
+    .crrav-listpicker-sheet{border-radius:16px}}
+  .crrav-listpicker h3{margin:0 0 2px;font:700 14px/1.3 system-ui;color:#f2f2f4}
+  .crrav-listpicker p{margin:0 0 6px;font:400 11.5px/1.4 system-ui;color:#8f8f99}
+  .crrav-listpicker-opt{display:flex;align-items:center;justify-content:space-between;gap:10px;
+    padding:11px 12px;border-radius:10px;background:#1a1a20;border:1px solid rgba(255,255,255,.08);
+    color:#f2f2f4;font:600 13px/1.2 system-ui;cursor:pointer;text-align:left}
+  .crrav-listpicker-opt:hover{border-color:#f47521}
+  .crrav-listpicker-cancel{margin-top:4px;background:transparent;border:1px solid rgba(255,255,255,.15);
+    border-radius:10px;padding:10px;color:#c9c9d2;font:600 12.5px/1 system-ui;cursor:pointer}
+
+  /* (5) vue liste compacte */
+  .crrav-grid.crrav-list{grid-template-columns:1fr;gap:8px}
+  .crrav-lrow{display:flex;align-items:center;gap:12px;min-width:0;padding:8px 10px;background:#141419;
+    border:1px solid rgba(255,255,255,.07);border-radius:12px}
+  .crrav-lrow:hover{border-color:var(--prog)}
+  .crrav-lthumb{flex:0 0 40px;width:40px;aspect-ratio:2/3;border-radius:5px;overflow:hidden;background:#1d1d24}
+  .crrav-lthumb img{width:100%;height:100%;object-fit:cover;display:block}
+  .crrav-lmain{flex:1;min-width:0;display:flex;flex-direction:column;gap:6px}
+  .crrav-lhead{display:flex;align-items:center;gap:7px;flex-wrap:wrap;min-width:0}
+  .crrav-ltitle{font:700 13px/1.2 system-ui;color:#f2f2f4;text-decoration:none;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+  .crrav-ltitle:hover{color:var(--prog)}
+  .crrav-lrating{font:700 10.5px/1 system-ui;color:#ffcf55}
+  .crrav-ltag{font:700 9.5px/1 system-ui;color:#9fd6ff;border:1px solid rgba(159,214,255,.4);
+    border-radius:5px;padding:2px 5px}
+  .crrav-lnew{font:800 9.5px/1 system-ui;background:#9fd6ff;color:#08131c;border-radius:5px;padding:2px 5px}
+  .crrav-lactions{display:flex;align-items:center;gap:8px;flex:0 0 auto}
+  .crrav-lactions .crrav-ringwrap{position:static}
+  .crrav-lactions .crrav-ignore{position:static;opacity:1}
+  .crrav-lresume{text-decoration:none;border-radius:8px;padding:7px 10px;white-space:nowrap;
+    font:700 11px/1.2 system-ui;color:#12120f;background:var(--prog)}
+  @media(max-width:720px){
+    .crrav-lresume{padding:7px;font-size:0}
+    .crrav-lresume::after{content:'▸';font-size:13px}
+  }
+  /* La ligne « X/Y vus · Z restants » + durée restante ne doit jamais passer à la
+     ligne (ça décale visuellement chaque .crrav-lrow d'une hauteur différente) : même
+     traitement nowrap+ellipsis que la vue liste de Découverte (5bis) plus bas. */
+  .crrav-lrow:not(.crrav-lrow-discover) .crrav-meta{flex-wrap:nowrap}
+  .crrav-lrow:not(.crrav-lrow-discover) .crrav-meta span{
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+  .crrav-lrow:not(.crrav-lrow-discover) .crrav-meta span:first-child{flex:1 1 auto}
+  .crrav-lrow:not(.crrav-lrow-discover) .crrav-left{flex:0 0 auto}
+  /* Petit téléphone : Reste à voir / Hors listes n'avaient jamais reçu le resserrement
+     que la vue liste de Découverte (5bis, plus bas) a déjà — vignette, paddings et anneau
+     restaient à taille desktop et grignotaient toute la largeur dispo pour le titre,
+     forçant des ellipses prématurées et un alignement bancal entre les lignes. */
+  @media(max-width:600px){
+    .crrav-lrow:not(.crrav-lrow-discover){gap:9px;padding:7px 8px}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lthumb{flex-basis:34px;width:34px}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lhead{gap:6px}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-ltitle{font-size:12.5px}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions{gap:6px}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-ringwrap,
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-ring{width:32px;height:32px}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-ring-t{font-size:9px}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-ring-t.done{font-size:12px}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions .crrav-similar{width:28px;height:28px}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions .crrav-ignore{width:28px;height:28px}
+  }
+  /* Très petit téléphone : la baguette « séries similaires » est la moins essentielle
+     des 3 actions (anneau = progression, resume = action principale, ignore = tri) —
+     on la retire pour laisser le titre respirer plutôt que tout comprimer davantage. */
+  @media(max-width:380px){
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions .crrav-similar{display:none}
+  }
+
+  /* (5bis) vue liste compacte de Découverte : même carcasse .crrav-lrow, avec note,
+     genre et résumé dépliable en plus — pensée pour scanner beaucoup de pépites vite. */
+  .crrav-lrow-discover:hover{box-shadow:0 0 0 1px rgba(244,117,33,.35),0 8px 22px rgba(244,117,33,.12)}
+  .crrav-lrow-discover .crrav-lthumb{position:relative}
+  /* Ligne d'infos (saisons/épisodes + genres) tronquée avec « … » plutôt que de
+     pousser le reste : le titre au complet est déjà dans le title="" natif. */
+  .crrav-lrow-discover .crrav-meta{flex-wrap:nowrap}
+  .crrav-lrow-discover .crrav-meta span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
+  /* Début du résumé, sur 2 lignes max (1 sur très petit écran) — c'est justement ce qui
+     manque le plus pour juger d'une pépite jamais vue, donc ça mérite la place. Le bouton
+     « i » permet de lire la suite en entier sans perdre la ligne dans la liste. */
+  .crrav-lsyn-preview{margin:2px 0 0;color:#8a8a94;font:400 11px/1.4 system-ui;
+    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  /* Bouton « i » + résumé dépliable : en ligne dans l'en-tête plutôt qu'en survol plein
+     cadre (pas la place ici) — même mécanique de bascule au clic que partout ailleurs. */
+  .crrav-lrow-discover .crrav-info{position:static;width:19px;height:19px;flex:0 0 auto;
+    font-size:10.5px;line-height:17px;opacity:1}
+  .crrav-lrow-discover .crrav-syn{position:static;inset:auto;opacity:1;visibility:visible;
+    display:none;flex:1 1 100%;order:9;padding:0;margin-top:2px;background:none;backdrop-filter:none;
+    max-height:none}
+  .crrav-lrow-discover .crrav-syn.show{display:block;animation:crrav-syn-in .15s ease}
+  @keyframes crrav-syn-in{from{opacity:0;transform:translateY(-2px)}to{opacity:1;transform:none}}
+  .crrav-lrow-discover .crrav-syn p{margin:0;color:#a8a8b2;font:400 11.5px/1.55 system-ui}
+  /* Une fois le résumé déplié, la version tronquée juste au-dessus fait doublon.
+     (:has() plutôt qu'un sibling classique : .crrav-syn et .crrav-lsyn-preview ne
+     partagent pas le même parent direct — l'un est dans .crrav-lhead, l'autre non.) */
+  .crrav-lmain:has(.crrav-syn.show) .crrav-lsyn-preview{display:none}
+  /* Actions (ignorer / ajouter à ma liste) : statiques dans la colonne de droite,
+     toujours visibles — comme .crrav-ignore l'est déjà en vue ligne. */
+  .crrav-lactions .crrav-addlist{position:static;opacity:1;flex:0 0 auto}
+  /* En vue ligne le bouton est en position:static (voir règle ci-dessus) : sans ancre,
+     le ::before ci-dessus (inset:-6px, pensé pour agrandir la zone cliquable en vue carte,
+     où le bouton lui-même est positionné) remonterait se caler sur .crrav-lrow (position:relative),
+     couvrant toute la ligne et interceptant les clics n'importe où dessus. On le neutralise ici. */
+  .crrav-lactions .crrav-addlist::before{content:none}
+  .crrav-lrow-discover.crrav-lrow-ignored{opacity:.72}
+  /* Petit téléphone : vignette et gaps resserrés, résumé réduit à 1 ligne pour ne pas
+     faire déborder la ligne en hauteur ni pousser les boutons d'action hors champ. */
+  @media(max-width:600px){
+    .crrav-lrow-discover{gap:9px;padding:7px 8px}
+    .crrav-lrow-discover .crrav-lthumb{flex-basis:34px;width:34px}
+    .crrav-lrow-discover .crrav-lhead{gap:6px}
+    .crrav-lrow-discover .crrav-ltitle{font-size:12.5px}
+    .crrav-lsyn-preview{-webkit-line-clamp:1;font-size:10.5px}
+    .crrav-lactions{gap:6px}
+  }
+  @media(max-width:360px){
+    .crrav-lsyn-preview{display:none}
+  }
+
+  /* (1)(2) panneau de réglages */
+  .crrav-settings{margin:12px 0 0;padding:18px;border-radius:16px;
+    background:linear-gradient(180deg,rgba(244,117,33,.06),transparent 140px),#131318;
+    border:1px solid rgba(255,255,255,.1);box-shadow:0 10px 30px rgba(0,0,0,.25);
+    max-height:min(60vh,520px);overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
+
+  /* Base : rendu en ligne, valable sur TOUTE largeur (y compris les écrans pliables
+     autour de 720 px, que « mobile vs desktop » laissait dans un angle mort). */
+  .crrav-settingssheet{padding:0 20px;animation:crrav-sheet-in .22s ease}
+  @keyframes crrav-sheet-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+  @media (prefers-reduced-motion:reduce){.crrav-settingssheet{animation:none}}
+  .crrav-sheethead{display:none}
+  .crrav-sheetbody{display:block}
+
+  /* Petits écrans tactiles : panneau plein écran avec son PROPRE défilement.
+     Empiler deux zones scrollables (overlay + panneau) rendait le scroll imprévisible.
+     Condition en OR : largeur ≤720px (petit mobile) OU pointeur tactile (pointer:coarse).
+     Un écran pliable ouvert (Z Fold…) peut dépasser 720px de large selon le zoom
+     d'affichage du fabricant — s'appuyer uniquement sur la largeur ratait ces appareils.
+     Le tactile, lui, ne ment pas : un doigt reste un doigt, quelle que soit la largeur. */
+  @media(max-width:720px),(pointer:coarse){
+    .crrav-settingssheet{position:fixed;inset:0;height:100vh;height:100dvh;
+      z-index:20;background:#0a0a0c;padding:0;
+      display:flex;flex-direction:column}
+    .crrav-sheethead{position:sticky;top:0;display:flex;align-items:center;gap:10px;z-index:2;
+      padding:14px 16px;border-bottom:1px solid rgba(255,255,255,.1);
+      background:linear-gradient(180deg,rgba(10,10,12,.96),rgba(10,10,12,.82));backdrop-filter:blur(18px)}
+    .crrav-sheethead h2{margin:0;font:800 18px/1 system-ui;letter-spacing:-.02em;flex:1;
+      display:flex;align-items:center;gap:10px}
+    .crrav-sheethead h2::before{content:'';flex:0 0 auto;width:4px;height:20px;border-radius:3px;
+      background:linear-gradient(#ffb347,#f47521);box-shadow:0 0 10px rgba(244,117,33,.55)}
+    .crrav-sheetbody{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;
+      overscroll-behavior:contain;padding:2px 14px 72px}
+    .crrav-sheetbody .crrav-settings{max-height:none;overflow:visible;border:0;background:none;
+      box-shadow:none;padding:8px 0 0;margin:0}
+    /* Le titre du panneau ferait doublon avec l'en-tête collant « Réglages ». */
+    .crrav-sheetbody .crrav-settings>h3{display:none}
+    .crrav-sheetbody .crrav-sgrid{grid-template-columns:1fr}
+    .crrav-sheetbody .crrav-field input[type=number],
+    .crrav-sheetbody .crrav-field input[type=text]{font-size:16px}
+    /* (30) Recherche collée sous l'en-tête, actions collées en bas — toujours à portée de pouce. */
+    .crrav-sheetbody .crrav-setsearch,
+    .crrav-sheetbody .crrav-setsearch:focus-within{position:sticky;top:0;z-index:6;
+      background:rgba(16,16,20,.97);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)}
+    .crrav-sheetbody .crrav-sactions-primary{display:none}
+    .crrav-sheetfoot{display:flex;flex:0 0 auto;gap:10px;
+      padding:12px 14px calc(12px + env(safe-area-inset-bottom,0px));
+      border-top:1px solid rgba(255,255,255,.1);
+      background:linear-gradient(0deg,rgba(10,10,12,.98),rgba(10,10,12,.84));
+      backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px)}
+    .crrav-sheetfoot>.crrav-btn{flex:1 1 0;min-width:0;padding:12px 12px;font-size:13px}
+    .crrav-sheetfoot>[data-act="settings-save"]{flex:1.7 1 0}
+  }
+  .crrav-settings h3{margin:0 0 16px;font:800 18px/1.1 system-ui;letter-spacing:-.02em;
+    display:flex;align-items:center;gap:10px}
+  .crrav-settings h3::before{content:'';flex:0 0 auto;width:4px;height:19px;border-radius:3px;
+    background:linear-gradient(#ffb347,#f47521);box-shadow:0 0 10px rgba(244,117,33,.55)}
+  .crrav-sgrid{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(205px,1fr))}
+  .crrav-field{display:flex;flex-direction:column;gap:5px}
+  .crrav-field label{font:600 11.5px/1.3 system-ui;color:#c9c9d2}
+  .crrav-field small{font:400 10.5px/1.4 system-ui;color:#8a8a94}
+  .crrav-field input[type=number],.crrav-field input[type=text]{background:rgba(255,255,255,.05);
+    border:1px solid rgba(255,255,255,.12);border-radius:9px;padding:8px 10px;color:#fff;font-size:13px;
+    transition:border-color .15s ease,box-shadow .15s ease,background .15s ease}
+  .crrav-field input[type=number]:hover,.crrav-field input[type=text]:hover{border-color:rgba(255,255,255,.22)}
+  .crrav-field input[type=number]:focus,.crrav-field input[type=text]:focus{outline:0;
+    border-color:#f47521;background:rgba(244,117,33,.06);box-shadow:0 0 0 3px rgba(244,117,33,.18)}
+  /* Case à cocher : toute la ligne est cliquable (le champ est un <label>), plus facile au doigt. */
+  .crrav-field.bool{flex-direction:row;align-items:center;gap:10px;padding:9px 11px;border-radius:10px;
+    background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.07);cursor:pointer;
+    transition:background .15s ease,border-color .15s ease}
+  .crrav-field.bool:hover{background:rgba(255,255,255,.06);border-color:rgba(255,255,255,.16)}
+  .crrav-field.bool span{flex:1;min-width:0;font:600 12px/1.35 system-ui;color:#e8e8ec}
+  .crrav-field.bool input[type=checkbox]{flex:0 0 auto}
+  .crrav-field input[type=checkbox]{width:17px;height:17px;accent-color:#f47521;cursor:pointer}
+  /* (31) Champs pleine largeur pour la note et les genres */
+  .crrav-sgrid .crrav-ratingfield,.crrav-sgrid .crrav-genrefield{grid-column:1/-1}
+  /* (31) Champ numérique avec boutons − / + et suffixe d'unité */
+  .crrav-numwrap{display:flex;align-items:stretch;border:1px solid rgba(255,255,255,.12);
+    border-radius:9px;background:rgba(255,255,255,.05);overflow:hidden;
+    transition:border-color .15s ease,box-shadow .15s ease,background .15s ease}
+  .crrav-numwrap:focus-within{border-color:#f47521;background:rgba(244,117,33,.06);
+    box-shadow:0 0 0 3px rgba(244,117,33,.18)}
+  .crrav-numwrap input[type=number]{flex:1 1 auto;min-width:0;background:transparent;border:0;outline:0;
+    color:#fff;font-size:13.5px;padding:8px 6px;text-align:center;font-variant-numeric:tabular-nums;
+    -moz-appearance:textfield}
+  .crrav-numwrap input[type=number]:focus{box-shadow:none;border:0;background:transparent}
+  .crrav-numwrap input[type=number]::-webkit-outer-spin-button,
+  .crrav-numwrap input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+  .crrav-unit{flex:0 0 auto;display:flex;align-items:center;padding:0 9px 0 2px;color:#8a8a94;
+    font:600 11px/1 system-ui;white-space:nowrap;pointer-events:none}
+  .crrav-step{flex:0 0 auto;width:40px;border:0;cursor:pointer;color:#e8e8ec;font:700 18px/1 system-ui;
+    background:rgba(255,255,255,.05);transition:background .12s ease,color .12s ease}
+  .crrav-step:hover{background:rgba(244,117,33,.22);color:#fff}
+  .crrav-step:active{background:rgba(244,117,33,.38)}
+  .crrav-step[data-step-dir="down"]{border-right:1px solid rgba(255,255,255,.09)}
+  .crrav-step[data-step-dir="up"]{border-left:1px solid rgba(255,255,255,.09)}
+  /* (31) Note minimale : curseur étoilé */
+  .crrav-rangewrap{display:flex;align-items:center;gap:12px}
+  .crrav-rangeinput{flex:1 1 auto;min-width:0;-webkit-appearance:none;appearance:none;height:6px;
+    border-radius:999px;cursor:pointer;outline:none;
+    background:linear-gradient(90deg,#ffb347 var(--fill,0%),rgba(255,255,255,.13) var(--fill,0%))}
+  .crrav-rangeinput::-webkit-slider-thumb{-webkit-appearance:none;width:18px;height:18px;border-radius:50%;
+    background:#fff;border:3px solid #f47521;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.35)}
+  .crrav-rangeinput::-moz-range-thumb{width:18px;height:18px;border-radius:50%;background:#fff;
+    border:3px solid #f47521;cursor:pointer}
+  .crrav-rangeinput:focus-visible{box-shadow:0 0 0 3px rgba(244,117,33,.25)}
+  .crrav-rangeval{flex:0 0 auto;min-width:96px;text-align:right;font:800 12.5px/1 system-ui;color:#ffb347;
+    font-variant-numeric:tabular-nums}
+  /* (31) Genres exclus : cases à cocher en puces */
+  .crrav-genrelist{display:flex;flex-wrap:wrap;gap:7px;margin-top:4px}
+  .crrav-genre{position:relative;display:inline-flex;align-items:center;gap:6px;padding:6px 11px;
+    border-radius:999px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.12);
+    cursor:pointer;font:600 12px/1 system-ui;color:#d6d6de;user-select:none;
+    transition:background .13s ease,border-color .13s ease,color .13s ease}
+  .crrav-genre:hover{border-color:rgba(255,255,255,.28)}
+  .crrav-genre input{position:absolute;opacity:0;width:0;height:0;margin:0}
+  .crrav-genre::before{content:'＋';font-size:11px;color:#8a8a94;line-height:1}
+  .crrav-genre.on{background:rgba(224,87,74,.16);border-color:rgba(224,87,74,.55);color:#ffb3a8}
+  .crrav-genre.on::before{content:'✕';font-size:10px;font-weight:800;color:#ffb3a8}
+  .crrav-genre-empty{font:400 11.5px/1.5 system-ui;color:#8a8a94}
+  .crrav-genreadd{display:flex;gap:8px;margin-top:10px}
+  .crrav-genreadd .crrav-genre-more{flex:1 1 auto;min-width:0}
+  .crrav-genreadd .crrav-genre-addbtn{flex:0 0 auto}
+  .crrav-sactions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+  /* Bloc d'actions des réglages : action principale en tête, puis cartes étiquetées.
+     Chaque carte est empilée proprement — titre, explication, puis boutons pleine
+     largeur — plutôt que des boutons collés à droite du titre qui débordent sur mobile. */
+  .crrav-sactions-primary{margin-top:16px}
+  .crrav-sactions-primary>.crrav-btn{flex:1 1 auto;min-width:0}
+  .crrav-sactions-primary>[data-act="settings-save"]{flex:2 1 0}
+  .crrav-setcard{margin-top:12px;padding:13px 14px;border-radius:12px;
+    background:rgba(255,255,255,.035);border:1px solid rgba(255,255,255,.09)}
+  .crrav-setcard.danger{background:rgba(224,87,74,.06);border-color:rgba(224,87,74,.28)}
+  .crrav-setcard-h{display:flex;align-items:center;gap:8px;min-width:0}
+  .crrav-setcard-t{font:800 10.5px/1.2 system-ui;letter-spacing:.06em;text-transform:uppercase;
+    color:#9a9aa2}
+  .crrav-setcard.danger .crrav-setcard-t{color:#e79b91}
+  .crrav-setcard-note{margin:7px 0 11px;font:400 11px/1.5 system-ui;color:#8a8a94}
+  .crrav-setcard-btns{display:flex;gap:8px;flex-wrap:wrap}
+  .crrav-setcard-btns>.crrav-btn{flex:1 1 0;min-width:0}
+  .crrav-maint .crrav-accordion-body>.crrav-setcard{margin-top:0}
+  /* (30) Barre de recherche interne aux Réglages */
+  .crrav-setsearch{position:relative;z-index:4;display:flex;align-items:center;gap:9px;
+    margin:0 0 12px;padding:10px 12px;border-radius:12px;
+    background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.12);
+    transition:border-color .15s ease,box-shadow .15s ease,background .15s ease}
+  .crrav-setsearch:focus-within{border-color:#f47521;background:rgba(244,117,33,.06);
+    box-shadow:0 0 0 3px rgba(244,117,33,.18)}
+  .crrav-setsearch-ico{flex:0 0 auto;font-size:13px;opacity:.75}
+  .crrav-setsearch-input{flex:1 1 auto;min-width:0;background:transparent;border:0;outline:0;
+    color:#fff;font:600 13.5px/1.2 system-ui}
+  .crrav-setsearch-input::placeholder{color:#8a8a94;font-weight:400}
+  .crrav-setsearch-clear{flex:0 0 auto;width:24px;height:24px;border:0;border-radius:7px;cursor:pointer;
+    background:rgba(255,255,255,.1);color:#cfcfd6;font-size:11px;line-height:1;transition:background .15s ease}
+  .crrav-setsearch-clear:hover{background:rgba(255,255,255,.2)}
+  .crrav-setsearch-empty{padding:22px 6px;text-align:center;color:#8a8a94;font:500 12.5px/1.5 system-ui}
+  /* (30) Barre d'actions collante en bas de la sheet plein écran (mobile uniquement) */
+  .crrav-sheetfoot{display:none}
+
+  /* Diagnostic sonde (affichage écran pour mobile) */
+  .crrav-probe{margin-top:16px;padding:14px;border-radius:12px;background:#0f0f14;
+    border:1px solid rgba(255,255,255,.1)}
+  .crrav-probe h3{margin:0 0 8px;font:800 13px/1 system-ui}
+  .crrav-probe>p{margin:0 0 12px;font:400 11.5px/1.5 system-ui;color:#9a9aa4}
+  .crrav-probe-tbl{width:100%;border-collapse:collapse;margin-top:12px;font:600 12px/1 system-ui}
+  .crrav-probe-tbl th{text-align:left;padding:8px 6px;color:#8a8a94;font-weight:700;
+    text-transform:uppercase;font-size:10px;letter-spacing:.05em;border-bottom:1px solid rgba(255,255,255,.1)}
+  .crrav-probe-tbl td{padding:9px 6px;border-bottom:1px solid rgba(255,255,255,.05);
+    font-variant-numeric:tabular-nums}
+  .crrav-probe-tbl tbody tr:nth-child(even){background:rgba(255,255,255,.025)}
+  .crrav-probe-tbl tr.crrav-row-err td{color:#ff9a8f}
+  .crrav-probe-tbl tr.crrav-row-warn td{color:#ffd58f}
+  .crrav-probe-err{color:#ff9a8f;font:500 12px/1.4 system-ui}
+  .crrav-diag{margin-top:8px;display:flex;flex-direction:column;gap:2px}
+  .crrav-diagline{display:flex;justify-content:space-between;gap:10px;font:500 12px/1.5 system-ui;
+    padding:3px 0;border-bottom:1px solid rgba(255,255,255,.06)}
+  .crrav-diagline span{color:#8f8f99}.crrav-diagline b{color:#e8e8ea;text-align:right}
+  .crrav-diagtbl{margin:4px 0;display:flex;flex-direction:column;gap:3px}
+  .crrav-diagrow{display:flex;flex-direction:column;gap:1px;padding:4px 6px;border-radius:6px;
+    background:rgba(255,255,255,.04)}
+  .crrav-diagrow.chosen{background:rgba(244,117,33,.16);border:1px solid rgba(244,117,33,.4)}
+  .crrav-diagrow span{font:600 12px/1.3 system-ui;color:#e8e8ea}
+  .crrav-diagrow small{font:400 10.5px/1.3 system-ui;color:#9a9aa2}
+  .crrav-btn.small{padding:6px 12px;font-size:11px;margin-top:8px;display:inline-block}
+  .crrav-probe-extract{margin-top:12px;padding:11px;border-radius:9px;font:500 12px/1.5 system-ui}
+  .crrav-probe-extract.ok{background:rgba(92,230,160,.1);border:1px solid rgba(92,230,160,.3);color:#c9c9d2}
+  .crrav-probe-extract.ko{background:rgba(224,87,74,.1);border:1px solid rgba(224,87,74,.35);color:#c9c9d2}
+  .crrav-probe-extract summary{margin-top:8px;cursor:pointer;color:#9fd6ff;font-size:11px}
+  .crrav-probe-raw{margin-top:8px;padding:9px;border-radius:7px;background:#0a0a0c;
+    font:400 10px/1.4 ui-monospace,monospace;color:#8a8a94;white-space:pre-wrap;word-break:break-all;
+    max-height:220px;overflow-y:auto}
+  .crrav-probe-rawhead{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px}
+  .crrav-probe-rawhead small{color:#8a8a94;font:600 10px/1.4 system-ui}
+  .crrav-copybtn{border:0;border-radius:6px;padding:4px 9px;font:700 10.5px/1 system-ui;cursor:pointer;
+    background:rgba(255,255,255,.08);color:#c9c9d2;border:1px solid rgba(255,255,255,.14);flex:0 0 auto}
+  .crrav-copybtn.copied{background:rgba(92,230,160,.18);border-color:rgba(92,230,160,.4);color:#8ef0bd}
+
+  /* Diagnostic complet unifié — un seul bouton, un rapport détaillé et lisible */
+  .crrav-fulldiag-cta{padding:16px;border-radius:12px;margin-top:2px;
+    background:linear-gradient(160deg,rgba(244,117,33,.14),rgba(244,117,33,.03));
+    border:1px solid rgba(244,117,33,.3)}
+  .crrav-fulldiag-cta>p{margin:0 0 12px;font:400 11.5px/1.5 system-ui;color:#c2c2ca}
+  .crrav-btn.primary{background:linear-gradient(135deg,#ffb347,#f47521);color:#141416;border:0;
+    font-weight:800;box-shadow:0 6px 18px rgba(244,117,33,.35)}
+  .crrav-btn.primary:hover{filter:brightness(1.05);box-shadow:0 9px 24px rgba(244,117,33,.45)}
+  .crrav-diag-summary{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0 4px}
+  .crrav-diag-badge{padding:6px 12px;border-radius:999px;font:700 12px/1 system-ui;
+    display:flex;align-items:center;gap:5px}
+  .crrav-diag-badge.ok{background:rgba(92,230,160,.14);color:#8ef0bd;border:1px solid rgba(92,230,160,.35)}
+  .crrav-diag-badge.warn{background:rgba(255,196,92,.14);color:#ffd58f;border:1px solid rgba(255,196,92,.35)}
+  .crrav-diag-badge.err{background:rgba(224,87,74,.14);color:#ff9a8f;border:1px solid rgba(224,87,74,.4)}
+  .crrav-diag-time{font:500 10.5px/1 system-ui;color:#8a8a94;margin-left:auto;align-self:center}
+  .crrav-diagcard{margin-top:10px;padding:12px 14px;border-radius:10px;background:#0f0f14;
+    border:1px solid rgba(255,255,255,.08);border-left:3px solid rgba(255,255,255,.2)}
+  .crrav-diagcard.ok{border-left-color:#5ce6a0}
+  .crrav-diagcard.warn{border-left-color:#ffc45c}
+  .crrav-diagcard.err{border-left-color:#e0574a}
+  .crrav-diagcard.pending{border-left-color:#f47521;opacity:.75}
+  .crrav-diagcard-head{display:flex;align-items:center;gap:8px;font:800 12.5px/1.3 system-ui}
+  .crrav-diagcard-head .ic{font-size:14px}
+  .crrav-diagcard-note{margin:6px 0 0;font:400 11px/1.5 system-ui;color:#9a9aa4}
+  .crrav-fulldiag-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
+
+  /* Bandeau d'activité global — tâches de fond (chargement, historique, AniList).
+     Placé dans .crrav-top (sticky), donc toujours visible quel que soit l'onglet ou le
+     défilement : c'était le reproche principal de l'ancien affichage, relégué en pied de
+     section et invisible si on n'était pas dessus. */
+  .crrav-activitybar{margin-top:12px;display:flex;flex-direction:column;gap:8px}
+  .crrav-activity-row{display:flex;align-items:flex-start;gap:10px;padding:10px 13px;border-radius:11px;
+    background:linear-gradient(135deg,rgba(244,117,33,.16),rgba(244,117,33,.04));
+    border:1px solid rgba(244,117,33,.3)}
+  .crrav-activity-row.done{background:linear-gradient(135deg,rgba(92,230,160,.18),rgba(92,230,160,.04));
+    border-color:rgba(92,230,160,.38)}
+  .crrav-activity-spinner{width:14px;height:14px;margin-top:3px;border-radius:50%;flex:0 0 auto;
+    border:2px solid rgba(244,117,33,.28);border-top-color:#f47521;animation:crravSpin .75s linear infinite}
+  .crrav-activity-check{flex:0 0 auto;font-size:14px;line-height:1;margin-top:1px}
+  .crrav-activity-body{flex:1 1 auto;min-width:0}
+  .crrav-activity-toprow{display:flex;justify-content:space-between;align-items:baseline;gap:10px}
+  .crrav-activity-label{flex:1 1 auto;min-width:0;font:700 12.5px/1.4 system-ui;color:#f2f2f4;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .crrav-activity-eta{font:800 11px/1.4 system-ui;color:#ffb98a;flex:0 0 auto;white-space:nowrap}
+  .crrav-activity-row.done .crrav-activity-eta{color:#8ef0bd}
+  .crrav-activity-bar{margin-top:7px;height:5px;border-radius:99px;background:rgba(255,255,255,.1);
+    overflow:hidden;position:relative}
+  .crrav-activity-bar i{display:block;height:100%;border-radius:99px;
+    background:linear-gradient(90deg,#f47521,#ffb347);transition:width .5s ease}
+  .crrav-activity-row.done .crrav-activity-bar i{background:linear-gradient(90deg,#5ce6a0,#8ef0bd)}
+  .crrav-activity-bar.indeterminate i{position:absolute;top:0;width:32%!important;
+    animation:crravIndeterminate 1.25s ease-in-out infinite}
+  @keyframes crravIndeterminate{0%{left:-32%}100%{left:100%}}
+  /* Ligne de détail sous la barre : compte i/total + % + ETA, pour un repère plus riche
+     que le seul pourcentage (voir renderActivityBar). */
+  .crrav-activity-subrow{margin-top:4px;font:600 10.5px/1.3 system-ui;color:#a8a8b2}
+  @keyframes crravSpin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+  .crrav-diagdetails{margin-top:10px}
+  .crrav-diagdetails summary{cursor:pointer;color:#9fd6ff;font:600 11.5px/1.4 system-ui;list-style:none}
+  .crrav-diagdetails summary::-webkit-details-marker{display:none}
+  .crrav-diagdetails summary::before{content:'▸ ';color:#9fd6ff}
+  .crrav-diagdetails[open] summary::before{content:'▾ '}
+  .crrav-diagdetails>.crrav-diag{margin-top:8px}
+  .crrav-diagrow .rank{color:#8a8a94;font-weight:800;margin-right:2px}
+  .crrav-copybtn.copied{background:rgba(92,230,160,.18);color:#8ef0bd;border-color:rgba(92,230,160,.4)}
+  .crrav-btn{border:0;border-radius:9px;padding:9px 14px;font:700 12.5px/1 system-ui;cursor:pointer;
+    background:#f47521;color:#12120f}
+  .crrav-btn.ghost{background:rgba(255,255,255,.07);color:#f2f2f4;border:1px solid rgba(255,255,255,.14)}
+  .crrav-btn.ghost.sm{padding:4px 9px;font-size:14px;border-radius:8px;line-height:1;flex:0 0 auto}
+  .crrav-btn.danger{background:rgba(224,87,74,.15);color:#ff9a8f;border:1px solid rgba(224,87,74,.45)}
+
+  /* (27) panneau « Séries ignorées » : liste compacte, sa propre zone de défilement,
+     recherche + tri au-dessus — pour ne pas avoir à parcourir des dizaines d'entrées
+     pour trouver une série précise, ni faire défiler tout le reste de Réglages. */
+  .crrav-ignctrl{display:flex;gap:8px;margin:8px 0 10px;flex-wrap:wrap}
+  .crrav-ignctrl .crrav-search-ignored{flex:1 1 160px;min-width:140px}
+  .crrav-ignlist{max-height:260px;overflow-y:auto;border:1px solid rgba(255,255,255,.08);
+    border-radius:10px;background:rgba(255,255,255,.02)}
+  .crrav-ignrow{display:flex;align-items:center;gap:8px;padding:7px 10px;
+    border-bottom:1px solid rgba(255,255,255,.06);font:500 12.5px/1.3 system-ui}
+  .crrav-ignrow:last-child{border-bottom:0}
+  .crrav-ignrow-main{flex:1 1 auto;min-width:0}
+  .crrav-ignrow-head{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+  .crrav-ignrow-t{flex:1 1 auto;color:#f2f2f4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .crrav-ignrow-src{flex:0 0 auto;color:#8a8a94;font:600 10px/1 system-ui;text-transform:uppercase;
+    letter-spacing:.04em}
+  /* (30) jaquette en vignette : reprend le poster gardé à l'ignore (voir ignoreBtn) */
+  .crrav-ignrow-thumb{flex:0 0 auto;width:34px;height:48px;border-radius:6px;overflow:hidden;
+    background:#1d1d24;display:block}
+  .crrav-ignrow-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+  /* Le bouton « i » et le résumé du panneau réutilisent .crrav-info/.crrav-syn (même
+     mécanique de bascule au clic), mais en ligne plutôt qu'en overlay sur une jaquette :
+     pas assez de place ici, et une ligne compacte n'a pas besoin d'un survol plein cadre. */
+  .crrav-ignrow .crrav-info{position:static;width:18px;height:18px;flex:0 0 auto;
+    font-size:10px;line-height:16px}
+  .crrav-ignrow .crrav-syn{position:static;inset:auto;opacity:1;visibility:visible;display:none;
+    flex:1 1 100%;order:9;padding:0;margin-top:2px;background:none;backdrop-filter:none}
+  .crrav-ignrow .crrav-syn.show{display:block}
+  .crrav-ignrow .crrav-syn p{color:#a8a8b2}
+
+  /* (3) bandeau d'erreur */
+  .crrav-err{margin:10px 0 0;padding:10px 12px;border-radius:10px;display:flex;align-items:center;gap:10px;
+    background:rgba(224,87,74,.14);border:1px solid rgba(224,87,74,.45);color:#ffb4ab;font-size:12.5px}
+  .crrav-err b{color:#ff8a7d}
+  .crrav-err button{margin-left:auto;flex:0 0 auto}
+
+  /* (4) pull-to-refresh */
+  .crrav-ptr{position:fixed;top:0;left:50%;z-index:100000;margin-left:-18px;width:36px;height:36px;
+    border-radius:50%;display:grid;place-items:center;pointer-events:none;opacity:0;
+    background:#f47521;color:#12120f;font:800 15px/1 system-ui;transform:translateY(-40px)}
+  .crrav-ptr.spin{animation:crrav-spin .8s linear infinite}
+  @keyframes crrav-spin{to{transform:rotate(360deg)}}
+
+  .crrav-skel{background:#141419;border:1px solid rgba(255,255,255,.07);border-radius:14px;overflow:hidden}
+
+  /* Toast de confirmation (relance après changement de réglage) */
+  .crrav-toast{margin:0 20px 4px;padding:11px 16px;border-radius:10px;
+    background:linear-gradient(135deg,rgba(92,230,160,.15),rgba(20,20,25,.6));
+    border:1px solid rgba(92,230,160,.4);color:#8ef0bd;font:600 13px/1.4 system-ui;
+    animation:crrav-in .2s ease}
+  @media(max-width:600px){.crrav-toast{margin:0 14px 4px}}
+
+  /* Bouton « relancer avec ces genres » : apparaît quand les filtres live diffèrent
+     de la dernière recherche. Coloré pour signaler qu'une action est disponible. */
+  .crrav-relaunch{width:100%;margin-top:4px;background:linear-gradient(135deg,#ffb347,#f47521);
+    border:0;border-radius:10px;padding:11px;font:800 13px/1 system-ui;color:#12120f;cursor:pointer;
+    animation:crrav-in .2s ease}
+  .crrav-relaunch:hover{filter:brightness(1.07)}
+
+  /* Panneau statistiques */
+  .crrav-statswrap{padding:18px 20px 40px;display:flex;flex-direction:column;gap:20px}
+
+  /* Hero d'ouverture : un seul chiffre marquant avant le détail, pour ne pas noyer
+     l'essentiel dans les deux zones détaillées qui suivent. */
+  .crrav-statshero{border-radius:18px;padding:22px 24px;text-align:center;
+    background:linear-gradient(135deg,rgba(244,117,33,.22),rgba(159,214,255,.14));
+    border:1px solid rgba(244,117,33,.3)}
+  .crrav-statshero-num{font:800 42px/1 system-ui;letter-spacing:-.02em;
+    background:linear-gradient(90deg,#ffb347,#f47521);-webkit-background-clip:text;
+    background-clip:text;color:transparent;font-variant-numeric:tabular-nums}
+  .crrav-statshero-label{margin-top:6px;font:700 11.5px/1 system-ui;text-transform:uppercase;
+    letter-spacing:.08em;color:#c9c9d2}
+  .crrav-statshero-sub{margin-top:12px;display:flex;gap:16px;justify-content:center;
+    flex-wrap:wrap;font:600 12.5px/1 system-ui;color:#9a9aa4}
+  .crrav-statshero-sub b{color:#f2f2f4}
+  .crrav-statshero-eq{margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,.1);
+    font:500 11.5px/1.5 system-ui;color:#8a8a94}
+  .crrav-statshero-eq b{color:#ffcf55}
+
+  /* Faits marquants — petites cartes cliquables (série chronophage, mieux notée…) */
+  .crrav-highlights{margin-top:4px}
+  .crrav-highlights h3{margin:0 0 12px;font:800 14px/1 system-ui;display:flex;align-items:center;gap:8px}
+  .crrav-hlgrid{display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(180px,1fr))}
+  .crrav-hlcard{display:flex;align-items:center;gap:10px;background:#141419;
+    border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:12px 13px;
+    text-decoration:none;color:inherit;transition:border-color .15s ease;
+    animation:crrav-in .24s ease backwards}
+  a.crrav-hlcard:hover{border-color:#f47521}
+  /* (12) petite cascade plutôt qu'une apparition en bloc — coût nul, effet « wahou ».
+     hlCards et factCards partagent le même conteneur .crrav-hlgrid. */
+  .crrav-hlgrid .crrav-hlcard:nth-child(1){animation-delay:.02s}
+  .crrav-hlgrid .crrav-hlcard:nth-child(2){animation-delay:.05s}
+  .crrav-hlgrid .crrav-hlcard:nth-child(3){animation-delay:.08s}
+  .crrav-hlgrid .crrav-hlcard:nth-child(4){animation-delay:.11s}
+  .crrav-hlgrid .crrav-hlcard:nth-child(5){animation-delay:.14s}
+  .crrav-hlgrid .crrav-hlcard:nth-child(6){animation-delay:.17s}
+  .crrav-hlicon{font-size:20px;flex:0 0 auto}
+  .crrav-hlbody{min-width:0;display:flex;flex-direction:column;gap:2px}
+  .crrav-hlbody small{color:#9a9aa4;font-size:10px;text-transform:uppercase;letter-spacing:.05em}
+  .crrav-hlbody b{font:700 12.5px/1.25 system-ui;color:#f2f2f4;overflow:hidden;
+    text-overflow:ellipsis;white-space:nowrap}
+  .crrav-hlbody .crrav-hlmeta{font:700 11px/1 system-ui;color:#f47521}
+  .crrav-almost{margin-top:16px}
+  .crrav-almost h4{margin:0 0 10px;font:800 12.5px/1 system-ui;color:#e8e8ec;display:flex;align-items:center;gap:6px}
+
+  /* Zones : « dans tes listes » (orange) vs « hors listes » (bleu), pour qu'on ne les
+     confonde plus visuellement au premier coup d'œil. */
+  .crrav-statzone{border-radius:18px;padding:20px;background:#101014;
+    border:1px solid rgba(255,255,255,.08);border-left:3px solid transparent;
+    display:flex;flex-direction:column;gap:16px}
+  .crrav-statzone.instock{border-left-color:#f47521}
+  .crrav-statzone.outstock{border-left-color:#9fd6ff}
+  .crrav-statzone .crrav-statsection{gap:14px}
+
+  .crrav-statsection{display:flex;flex-direction:column;gap:14px}
+  .crrav-stath2{margin:0;font:800 15px/1 system-ui;letter-spacing:-.01em;display:flex;align-items:center;gap:10px;
+    padding-bottom:10px;border-bottom:1px solid rgba(255,255,255,.1)}
+  /* (24) Accordéon compact : sur les écrans étroits, "Répartition/Genres" et "Faits
+     marquants" sont repliés par défaut (moins de scroll) mais restent un simple
+     <details> natif — dépliable en un tap, sans JS supplémentaire pour l'interaction. */
+  .crrav-accordion{border:0;padding:0}
+  .crrav-accordion > summary{list-style:none;cursor:pointer;margin:0;font:800 15px/1 system-ui;
+    letter-spacing:-.01em;display:flex;align-items:center;gap:10px;padding-bottom:10px;
+    border-bottom:1px solid rgba(255,255,255,.1)}
+  .crrav-accordion > summary::-webkit-details-marker{display:none}
+  .crrav-accordion > summary::after{content:'▾';margin-left:auto;font-size:12px;color:#8a8a94;
+    transition:transform .15s}
+  .crrav-accordion:not([open]) > summary::after{transform:rotate(-90deg)}
+  .crrav-accordion > summary:focus-visible{outline:2px solid #f47521;outline-offset:2px;border-radius:4px}
+  .crrav-accordion-body{padding-top:14px;display:flex;flex-direction:column;gap:14px}
+  @media(max-width:600px){
+    .crrav-accordion > summary{padding:8px 0}
+  }
+  /* (28) Groupes de réglages thématiques + section diagnostic séparée */
+  .crrav-sgroups{display:flex;flex-direction:column;gap:10px}
+  /* Chaque groupe de réglages est une carte : séparation nette, coin arrondi, et un
+     liseré chaud quand il est ouvert — plus lisible qu'une longue liste à filets. */
+  .crrav-setgroup{margin:0;padding:0;border:1px solid rgba(255,255,255,.08);border-radius:14px;
+    background:rgba(255,255,255,.022);
+    transition:border-color .18s ease,background .18s ease,box-shadow .18s ease}
+  .crrav-setgroup:hover{border-color:rgba(255,255,255,.15)}
+  .crrav-setgroup[open]{background:rgba(255,255,255,.03);border-color:rgba(244,117,33,.24);
+    box-shadow:0 8px 22px rgba(0,0,0,.22)}
+  .crrav-setgroup>summary{padding:12px 14px;margin:0;border-radius:14px;border-bottom:0;gap:11px;
+    transition:background .15s ease}
+  .crrav-setgroup>summary:hover{background:rgba(255,255,255,.03)}
+  .crrav-setgroup[open]>summary{border-bottom:1px solid rgba(255,255,255,.07);border-radius:14px 14px 0 0}
+  .crrav-setgroup>.crrav-accordion-body{padding:14px}
+  .crrav-maint{margin-top:14px}
+  /* En-tête de groupe : pastille d'icône chaude + libellé + compteur discret */
+  .crrav-sg-ico{flex:0 0 auto;width:30px;height:30px;display:grid;place-items:center;font-size:15px;
+    border-radius:9px;background:linear-gradient(160deg,rgba(244,117,33,.20),rgba(244,117,33,.05));
+    border:1px solid rgba(244,117,33,.26);transition:transform .18s ease}
+  .crrav-setgroup[open] .crrav-sg-ico{transform:scale(1.06)}
+  .crrav-sg-lab{flex:1 1 auto;min-width:0;font:800 13.5px/1.2 system-ui;letter-spacing:-.01em;
+    color:#f2f2f4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .crrav-sg-n{flex:0 0 auto;font:800 10px/1 system-ui;color:#a8a8b4;background:rgba(255,255,255,.06);
+    border:1px solid rgba(255,255,255,.1);border-radius:999px;padding:3px 8px;font-variant-numeric:tabular-nums}
+  .crrav-diagsection{margin-top:22px;padding-top:16px;border-top:2px dashed rgba(255,255,255,.14)}
+  .crrav-diagsection .crrav-probe:first-child{margin-top:14px}
+  .crrav-biggrid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(130px,1fr))}
+  .crrav-bigstat{background:#141419;border:1px solid rgba(255,255,255,.08);border-radius:14px;
+    padding:16px;text-align:center}
+  .crrav-bigstat b{display:block;font:800 26px/1.1 system-ui;letter-spacing:-.02em;
+    font-variant-numeric:tabular-nums}
+  .crrav-bigstat.hot b{color:#f47521}
+  .crrav-bigstat small{color:#9a9aa4;font-size:11px;text-transform:uppercase;letter-spacing:.07em}
+  .crrav-loadcard{display:flex;flex-direction:column;gap:8px;justify-content:center}
+  .crrav-loadcard .crrav-relaunch{margin:0;font-size:12px;padding:9px}
+  .crrav-loadcard small{text-transform:none;letter-spacing:0}
+  /* Progression du scan d'historique */
+  .crrav-histprog{padding:4px 0}
+  .crrav-histprog-bar{height:10px;border-radius:5px;background:rgba(255,255,255,.09);overflow:hidden}
+  .crrav-histprog-bar i{display:block;height:100%;border-radius:5px;
+    background:linear-gradient(90deg,#ffb347,#f47521);transition:width .3s ease}
+  .crrav-histprog-txt{display:flex;justify-content:space-between;gap:12px;margin-top:9px;
+    font:600 12px/1.3 system-ui;color:#9a9aa4;flex-wrap:wrap;font-variant-numeric:tabular-nums}
+  .crrav-histprog-txt b{color:#f47521}
+  /* Top séries et genres hors listes */
+  .crrav-topseries{margin-top:16px}
+  .crrav-topseries h3{margin:0 0 10px;font:800 13px/1 system-ui;color:#e8e8ec}
+  .crrav-toprow{display:flex;align-items:center;gap:10px;padding:8px 0;text-decoration:none;color:inherit;
+    border-bottom:1px solid rgba(255,255,255,.06)}
+  .crrav-toprank{flex:0 0 22px;height:22px;border-radius:6px;display:flex;align-items:center;
+    justify-content:center;font:800 12px/1 system-ui;color:#0b0b0d;
+    background:linear-gradient(135deg,#ffb347,#f47521)}
+  .crrav-toptitle{flex:1;min-width:0;font:600 13px/1.3 system-ui;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .crrav-topmeta{flex:0 0 auto;font:600 11px/1 system-ui;color:#9a9aa4;font-variant-numeric:tabular-nums}
+  .crrav-gbar{display:flex;align-items:center;gap:9px;margin:6px 0}
+  .crrav-gbar-l{flex:0 0 34%;font:600 12px/1.2 system-ui;overflow:hidden;
+    text-overflow:ellipsis;white-space:nowrap}
+  .crrav-gbar-t{flex:1;height:8px;border-radius:4px;background:rgba(255,255,255,.08);overflow:hidden}
+  .crrav-gbar-t i{display:block;height:100%;border-radius:4px;
+    background:linear-gradient(90deg,#ffb347,#f47521)}
+  .crrav-gbar-n{flex:0 0 auto;font:700 11px/1 system-ui;color:#9a9aa4;min-width:18px;text-align:right}
+  .crrav-statcols{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
+  .crrav-statcard{background:#141419;border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:18px}
+  .crrav-statcard h3{margin:0 0 14px;font:800 14px/1 system-ui;display:flex;align-items:center;gap:8px}
+  .crrav-estim{font:700 9.5px/1 system-ui;text-transform:uppercase;letter-spacing:.08em;
+    color:#9fd6ff;border:1px solid rgba(159,214,255,.4);border-radius:5px;padding:3px 6px}
+  .crrav-estim-live{color:#ffcf7a;border-color:rgba(255,207,122,.5);animation:crrav-pulse 1.6s ease-in-out infinite}
+  @keyframes crrav-pulse{0%,100%{opacity:1}50%{opacity:.55}}
+  @media (prefers-reduced-motion:reduce){.crrav-estim-live{animation:none}}
+
+  /* Anneau de progression global */
+  .crrav-donut{width:120px;height:120px;border-radius:50%;margin:4px auto 14px;
+    background:conic-gradient(#f47521 calc(var(--p)*1%),rgba(255,255,255,.09) 0);
+    display:grid;place-items:center}
+  .crrav-donut-c{width:86px;height:86px;border-radius:50%;background:#141419;display:grid;
+    place-items:center;text-align:center}
+  .crrav-donut-c b{font:800 24px/1 system-ui;font-variant-numeric:tabular-nums}
+  .crrav-donut-c small{color:#9a9aa4;font-size:10px;text-transform:uppercase;letter-spacing:.08em}
+  .crrav-statlist{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:7px}
+  .crrav-statlist li{display:flex;align-items:center;gap:9px;font:600 12.5px/1 system-ui;color:#c9c9d2}
+  .crrav-dot{width:10px;height:10px;border-radius:50%;flex:0 0 auto}
+
+  /* Barres de genres */
+  .crrav-gbar{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+  .crrav-gbar-l{flex:0 0 96px;font:600 12px/1.2 system-ui;color:#c9c9d2;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .crrav-gbar-t{flex:1;height:8px;border-radius:4px;background:rgba(255,255,255,.09);overflow:hidden}
+  .crrav-gbar-t i{display:block;height:100%;border-radius:4px;background:linear-gradient(90deg,#ffb347,#f47521)}
+  .crrav-gbar-n{flex:0 0 auto;font:700 11.5px/1 system-ui;color:#9a9aa4;font-variant-numeric:tabular-nums}
+  .crrav-avgnote{margin:14px 0 0;font:500 12px/1.4 system-ui;color:#9a9aa4}
+  .crrav-avgnote b{color:#ffcf55}
+
+  /* Calendrier estimatif — le titre de série n'est JAMAIS tronqué */
+  .crrav-schedhint{margin:-4px 0 4px;font:400 11.5px/1.4 system-ui;color:#8a8a94}
+  .crrav-sched{display:flex;flex-direction:column;gap:8px}
+  .crrav-schedrow{display:block;padding:12px 14px;border-radius:12px;text-decoration:none;color:inherit;
+    background:#141419;border:1px solid rgba(255,255,255,.08)}
+  .crrav-schedrow:hover{border-color:#f47521}
+  .crrav-schedhead{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;
+    margin-bottom:5px}
+  .crrav-schedwhen{font:800 12px/1 system-ui;color:#f47521;text-transform:capitalize;
+    font-variant-numeric:tabular-nums}
+  .crrav-schednext{font:700 11px/1 system-ui;color:#9fd6ff;border:1px solid rgba(159,214,255,.35);
+    border-radius:6px;padding:3px 7px;white-space:nowrap}
+  .crrav-schedtitle{font:700 14.5px/1.3 system-ui;color:#f2f2f4;
+    white-space:normal;overflow-wrap:anywhere}
+  .crrav-schedcur{margin-top:3px;font:500 12px/1.3 system-ui;color:#9a9aa4}
+  .crrav-schedempty{margin:0;color:#8a8a94;font:400 12.5px/1.4 system-ui}
+  /* Calendrier enrichi */
+  .crrav-calweek{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0 6px}
+  .crrav-calweekstat{background:linear-gradient(180deg,#16161c,#121217);border:1px solid rgba(255,255,255,.08);
+    border-radius:14px;padding:10px 16px;min-width:98px}
+  .crrav-calweekstat b{display:block;font:800 20px/1.1 system-ui;font-variant-numeric:tabular-nums}
+  .crrav-calweekstat small{color:#9a9aa4;font-size:10.5px;text-transform:uppercase;letter-spacing:.07em}
+  .crrav-calweekstat.hot b{color:#ffb347}
+  .crrav-calday{margin:18px 0 9px;font:800 12px/1 system-ui;color:#9a9aa4;display:flex;align-items:center;
+    gap:10px;text-transform:uppercase;letter-spacing:.09em}
+  .crrav-calday::after{content:'';flex:1;height:1px;background:rgba(255,255,255,.08)}
+  .crrav-calday small{font:700 11px/1 system-ui;color:#6f6f79;text-transform:none;letter-spacing:0}
+  .crrav-calrow{content-visibility:auto;contain-intrinsic-size:auto 86px;
+    display:flex;gap:12px;align-items:center;padding:10px 12px;border-radius:14px;
+    background:linear-gradient(180deg,#16161c,#121217);border:1px solid rgba(255,255,255,.07);
+    margin-bottom:8px;text-decoration:none;color:inherit;position:relative;overflow:hidden;
+    transition:border-color .15s ease,transform .15s ease}
+  .crrav-calrow::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;background:transparent}
+  .crrav-calrow.soon::before{background:linear-gradient(180deg,#ffb347,#f47521)}
+  .crrav-calrow.out::before{background:#5ce6a0}
+  .crrav-calrow:hover{border-color:rgba(244,117,33,.55);transform:translateY(-1px)}
+  .crrav-caltime{flex:0 0 62px;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    padding:6px 0;border-radius:10px;background:rgba(255,255,255,.04)}
+  .crrav-caltime b{font:800 14px/1.1 system-ui;color:#f47521;font-variant-numeric:tabular-nums}
+  .crrav-calrow.out .crrav-caltime b{color:#5ce6a0}
+  .crrav-caltime small{margin-top:2px;font:600 9.5px/1.1 system-ui;color:#8a8a94;text-align:center}
+  .crrav-calposter{flex:0 0 44px;width:44px;height:62px;border-radius:8px;overflow:hidden;background:#1d1d24;display:block}
+  .crrav-calposter img{width:100%;height:100%;object-fit:cover;display:block}
+  .crrav-calmain{flex:1;min-width:0}
+  .crrav-caltitle{font:700 14px/1.25 system-ui;color:#f2f2f4;display:block;overflow-wrap:anywhere}
+  .crrav-calrow:hover .crrav-caltitle{color:#f47521}
+  .crrav-calmeta{margin-top:4px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;font:600 11.5px/1.3 system-ui;color:#9a9aa4}
+  .crrav-calnext{color:#9fd6ff;border:1px solid rgba(159,214,255,.3);border-radius:6px;padding:2px 6px;white-space:nowrap}
+  .crrav-calwhen{color:#f47521;font-variant-numeric:tabular-nums}
+  .crrav-calcount{color:#9a9aa4}
+  .crrav-late{color:#ffb347;font-weight:700}
+  .crrav-uptodate{color:#5ce6a0;font-weight:700}
+  .crrav-realbadge{font:800 9.5px/1 system-ui;text-transform:uppercase;letter-spacing:.06em;color:#5ce6a0;border:1px solid rgba(92,230,160,.4);border-radius:5px;padding:3px 6px}
+  .crrav-estbadge{font:800 9.5px/1 system-ui;text-transform:uppercase;letter-spacing:.06em;color:#9fd6ff;border:1px solid rgba(159,214,255,.35);border-radius:5px;padding:3px 6px}
+
+  @media(max-width:600px){
+    .crrav-statswrap{padding:14px}
+    .crrav-bigstat b{font-size:22px}
+  }
+
+  /* (#4) carte héros */
+  .crrav-hero{margin:20px 20px 0;display:flex;gap:18px;padding:16px;border-radius:16px;
+    background:linear-gradient(135deg,rgba(244,117,33,.1),rgba(20,20,25,.6));
+    border:1px solid rgba(255,255,255,.1);position:relative;overflow:hidden}
+  .crrav-hero-art{flex:0 0 110px;aspect-ratio:2/3;border-radius:12px;overflow:hidden;background:#1d1d24}
+  .crrav-hero-art img{width:100%;height:100%;object-fit:cover;display:block}
+  .crrav-hero-info{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center;gap:9px}
+  .crrav-hero-tag{align-self:flex-start;font:800 10px/1 system-ui;letter-spacing:.09em;
+    text-transform:uppercase;color:#12120f;background:var(--prog);padding:4px 9px;border-radius:6px}
+  .crrav-hero-title{font:800 22px/1.15 system-ui;letter-spacing:-.02em;color:#f2f2f4;text-decoration:none}
+  .crrav-hero-title:hover{color:var(--prog)}
+  .crrav-hero-meta{display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+    font:600 12.5px/1 system-ui;color:#a0a0aa;font-variant-numeric:tabular-nums}
+  .crrav-hero-star{color:#ffcf55}
+  .crrav-hero-left{color:var(--prog)}
+  .crrav-hero .crrav-ticks{max-width:420px}
+  .crrav-hero-btn{align-self:flex-start;margin-top:2px;text-decoration:none;border-radius:10px;
+    padding:10px 20px;font:800 13px/1 system-ui;color:#12120f;background:var(--prog)}
+  .crrav-hero-btn:hover{filter:brightness(1.08)}
+  @media(max-width:720px){
+    .crrav-hero{margin:14px;gap:13px;padding:13px}
+    .crrav-hero-art{flex-basis:80px}
+    .crrav-hero-title{font-size:17px}
+    .crrav-hero .crrav-ticks{display:none}
+  }
+  .crrav-skel div{aspect-ratio:2/3;background:linear-gradient(100deg,#17171d,#242432 45%,#17171d 70%);
+    background-size:200% 100%;animation:crrav-sh 1.3s infinite}
+  @keyframes crrav-sh{to{background-position:-200% 0}}
+
+  .crrav-msg{padding:60px 20px;text-align:center;color:#9a9aa4}
+  .crrav-msg h3{color:#f2f2f4;font-size:18px;margin:0 0 6px}
+  .crrav-msg button{margin-top:14px;background:#f47521;border:0;color:#12120f;font:700 14px/1 system-ui;
+    padding:11px 18px;border-radius:10px;cursor:pointer}
+  .crrav-foot{padding:0 20px 28px;color:#65656e;font-size:11.5px}
+
+  /* (15) réglages d'affichage propres au petit écran (le repli des filtres, lui,
+     est géré plus haut par .crrav-headercollapsed, commun à tous les écrans) */
+  @media(max-width:720px){
+    .crrav-top{padding:12px 14px 10px}
+    .crrav-stats{gap:16px;margin:10px 0 2px}
+    .crrav-stat b{font-size:20px}
+    .crrav-grid{grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:12px;padding:14px}
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+     GRANDS ÉCRANS — paliers min-width, donc TOTALEMENT inertes sur mobile.
+     Les effets les plus riches sont en plus conditionnés à (hover:hover) et
+     (pointer:fine) : une tablette tactile large n'y a pas droit non plus.
+     Tout reste en transform/opacity — aucun recalcul de mise en page.
+     ═══════════════════════════════════════════════════════════════════════════ */
+
+  /* ── Palier 1 : grand écran (≥1500px) ───────────────────────────────────── */
+  @media (min-width:1500px){
+    .crrav-top{padding:20px 34px 14px}
+    .crrav-brand{font-size:18px}
+    .crrav-grid{grid-template-columns:repeat(auto-fill,minmax(212px,1fr));gap:20px;padding:26px 34px}
+    .crrav-statswrap{padding:24px 34px 48px}
+    .crrav-sched{padding:0 2px}
+    .crrav-title{font-size:14.5px}
+    .crrav-tab{padding:9px 17px;font-size:13px}
+  }
+
+  /* ── Palier 2 : 2K et au-delà (≥1900px) ─────────────────────────────────── */
+  @media (min-width:1900px){
+    .crrav-top{padding:24px 48px 16px}
+    .crrav-brand{font-size:20px}
+    .crrav-grid{grid-template-columns:repeat(auto-fill,minmax(246px,1fr));gap:26px;padding:34px 48px}
+    .crrav-card{border-radius:20px}
+    .crrav-title{font-size:15.5px;min-height:2.7em}
+    .crrav-body{padding:14px 15px 15px;gap:10px}
+    .crrav-meta{font-size:12.5px}
+    .crrav-rating,.crrav-airing{font-size:12px;padding:5px 9px}
+
+    .crrav-statswrap{padding:30px 48px 60px}
+    /* Les statistiques respirent enfin sur deux colonnes au lieu d'un long ruban.
+       Ciblé sur .crrav-statsgrid : le calendrier réutilise .crrav-statswrap et doit,
+       lui, rester sur toute la largeur. */
+    .crrav-statsgrid{display:grid;grid-template-columns:1fr 1fr;gap:26px;align-items:start}
+    .crrav-statsgrid .crrav-statshero{grid-column:1/-1}
+    .crrav-statzone{padding:26px}
+
+    /* Calendrier : lignes plus généreuses, jaquettes plus grandes. */
+    .crrav-calrow{padding:14px 16px;gap:16px;contain-intrinsic-size:auto 104px}
+    .crrav-calposter{flex:0 0 56px;width:56px;height:78px}
+    .crrav-caltime{flex:0 0 74px}
+    .crrav-caltime b{font-size:16px}
+    .crrav-caltitle{font-size:15.5px}
+    .crrav-calweekstat{padding:13px 20px;min-width:118px}
+    .crrav-calweekstat b{font-size:24px}
+  }
+
+  /* ── Ultra-large (≥2600px) : on centre plutôt que d'étirer à l'infini ───── */
+  @media (min-width:2600px){
+    .crrav-top>*,.crrav-grid,.crrav-statswrap,.crrav-sched,.crrav-msg{
+      max-width:2400px;margin-left:auto;margin-right:auto}
+  }
+
+  /* ── Effets « wahou » réservés au pointeur précis sur grand écran ────────── */
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+     MODE TÉLÉVISION — « 10-foot UI »
+     Un téléviseur n'est PAS un grand moniteur : on lit à 2-3 m, on navigue à la
+     télécommande (donc aucun survol), et les bords peuvent être rognés (overscan).
+     D'où : typographie nettement agrandie (pas seulement proportionnelle), marges
+     de sécurité, et repères de SÉLECTION très visibles — sur TV c'est le focus,
+     pas le survol, qui guide l'utilisateur.
+     Déclenché automatiquement sur grand écran sans souris, ou forcé par le réglage.
+     ═══════════════════════════════════════════════════════════════════════════ */
+  .crrav-tv .crrav-top{padding:34px 68px 22px}
+  .crrav-tv .crrav-brand{font-size:34px}
+  .crrav-tv .crrav-tab{padding:14px 26px;font-size:18px;border-radius:14px}
+  .crrav-tv .crrav-sync,.crrav-tv .crrav-filtersbtn{height:52px;padding:0 22px;font-size:17px}
+  .crrav-tv .crrav-close{width:52px;height:52px;font-size:24px}
+  .crrav-tv .crrav-search{font-size:18px;padding:14px 18px}
+  .crrav-tv .crrav-chip{font-size:16px;padding:10px 18px}
+  .crrav-tv select{font-size:17px;padding:10px 14px}
+
+  /* Moins de cartes, mais lisibles de loin — l'inverse d'un moniteur. */
+  .crrav-tv .crrav-grid{grid-template-columns:repeat(auto-fill,minmax(330px,1fr));
+    gap:34px;padding:40px 68px}
+  .crrav-tv .crrav-card{border-radius:24px;contain-intrinsic-size:auto 460px}
+  .crrav-tv .crrav-title{font-size:21px;min-height:2.7em}
+  .crrav-tv .crrav-body{padding:20px 22px 22px;gap:14px}
+  .crrav-tv .crrav-meta{font-size:17px}
+  .crrav-tv .crrav-rating,.crrav-tv .crrav-airing{font-size:16px;padding:8px 13px;border-radius:10px}
+  .crrav-tv .crrav-bar{height:10px;border-radius:5px}
+  .crrav-tv .crrav-stat b{font-size:34px}
+  .crrav-tv .crrav-stat small{font-size:14px}
+
+  .crrav-tv .crrav-statswrap{padding:40px 68px 80px}
+  .crrav-tv .crrav-stath2{font-size:26px}
+  .crrav-tv .crrav-calrow{padding:20px 22px;gap:22px;contain-intrinsic-size:auto 140px}
+  .crrav-tv .crrav-calposter{flex:0 0 76px;width:76px;height:106px}
+  .crrav-tv .crrav-caltime{flex:0 0 96px}
+  .crrav-tv .crrav-caltime b{font-size:21px}
+  .crrav-tv .crrav-caltitle{font-size:21px}
+  .crrav-tv .crrav-calday{font-size:16px}
+  .crrav-tv .crrav-calweekstat b{font-size:32px}
+
+  /* Marges anti-rognage : sur beaucoup de téléviseurs, les bords sont coupés. */
+  .crrav-tv .crrav-content{padding:0 2.5%}
+
+  /* Le FOCUS remplace le survol : c'est le seul repère de navigation à la télécommande.
+     Il doit être impossible à manquer depuis le canapé. */
+  .crrav-tv a:focus-visible,.crrav-tv button:focus-visible,
+  .crrav-tv select:focus-visible,.crrav-tv input:focus-visible{
+    outline:5px solid #f47521;outline-offset:4px;border-radius:12px}
+  .crrav-tv .crrav-card:focus-within{transform:translateY(-6px) scale(1.02);
+    box-shadow:0 0 0 4px #f47521,0 30px 70px -20px rgba(var(--hue,244,117,33),.9)}
+  .crrav-tv .crrav-card:focus-within::after{opacity:1}
+  .crrav-tv .crrav-lrow:focus-within,.crrav-tv .crrav-calrow:focus-within{
+    outline:4px solid #f47521;outline-offset:3px}
+  
+
+  /* ── Mode TV sur dalle 4K (viewport CSS très large) ──────────────────────────
+     En 4K sans mise à l'échelle, le navigateur voit ~3840 px : des cartes de 330 px
+     donneraient une dizaine de colonnes minuscules vues du canapé. On agrandit donc
+     ENCORE, pour garder 4 à 5 colonnes lisibles de loin. Et on lève le bridage de
+     largeur du palier ultra-large : sur un téléviseur, on veut occuper la dalle.
+     Si Windows applique une mise à l'échelle (150 %/200 %), le viewport CSS est plus
+     petit et c'est simplement le palier TV standard qui s'applique — c'est voulu. */
+  @media (min-width:2600px){
+    .crrav-tv .crrav-top>*,.crrav-tv .crrav-grid,.crrav-tv .crrav-statswrap,
+    .crrav-tv .crrav-sched,.crrav-tv .crrav-msg{max-width:none}
+    .crrav-tv .crrav-top{padding:46px 96px 30px}
+    .crrav-tv .crrav-brand{font-size:46px}
+    .crrav-tv .crrav-tab{padding:18px 34px;font-size:24px;border-radius:18px}
+    .crrav-tv .crrav-sync,.crrav-tv .crrav-filtersbtn{height:68px;padding:0 30px;font-size:22px}
+    .crrav-tv .crrav-close{width:68px;height:68px;font-size:32px}
+    .crrav-tv .crrav-search{font-size:24px;padding:18px 24px}
+    .crrav-tv .crrav-chip{font-size:21px;padding:13px 24px}
+    .crrav-tv select{font-size:22px;padding:13px 18px}
+
+    .crrav-tv .crrav-grid{grid-template-columns:repeat(auto-fill,minmax(470px,1fr));
+      gap:48px;padding:56px 96px}
+    .crrav-tv .crrav-card{border-radius:30px;contain-intrinsic-size:auto 660px}
+    .crrav-tv .crrav-title{font-size:29px}
+    .crrav-tv .crrav-body{padding:26px 28px 28px;gap:18px}
+    .crrav-tv .crrav-meta{font-size:23px}
+    .crrav-tv .crrav-rating,.crrav-tv .crrav-airing{font-size:21px;padding:11px 17px;border-radius:12px}
+    .crrav-tv .crrav-bar{height:14px;border-radius:7px}
+    .crrav-tv .crrav-stat b{font-size:46px}
+    .crrav-tv .crrav-stat small{font-size:19px}
+
+    .crrav-tv .crrav-statswrap{padding:56px 96px 110px;gap:40px}
+    .crrav-tv .crrav-stath2{font-size:36px}
+    .crrav-tv .crrav-calrow{padding:28px 30px;gap:30px;contain-intrinsic-size:auto 190px}
+    .crrav-tv .crrav-calposter{flex:0 0 106px;width:106px;height:148px}
+    .crrav-tv .crrav-caltime{flex:0 0 132px}
+    .crrav-tv .crrav-caltime b{font-size:29px}
+    .crrav-tv .crrav-caltitle{font-size:29px}
+    .crrav-tv .crrav-calday{font-size:22px}
+    .crrav-tv .crrav-calweekstat b{font-size:44px}
+    .crrav-tv .crrav-calweekstat{padding:18px 28px;min-width:170px}
+
+    /* Repère de sélection proportionné à la dalle. */
+    .crrav-tv a:focus-visible,.crrav-tv button:focus-visible,
+    .crrav-tv select:focus-visible,.crrav-tv input:focus-visible{
+      outline-width:7px;outline-offset:6px}
+  }
+  
+  @media (min-width:1500px) and (hover:hover) and (pointer:fine){
+    /* Jaquette qui se rapproche doucement au survol. */
+    .crrav-thumb{overflow:hidden}
+    .crrav-thumb img{transition:transform .45s cubic-bezier(.2,.7,.3,1)}
+    .crrav-card:hover .crrav-thumb img{transform:scale(1.07)}
+
+    /* Soulèvement plus marqué + halo plus large qu'en mobile. */
+    .crrav-card:hover{transform:translateY(-8px) scale(1.015)}
+    .crrav-card::after{transition:opacity .25s ease}
+    .crrav-card:hover::after{
+      box-shadow:0 0 0 1px rgba(var(--hue,244,117,33),.6),
+        0 28px 60px -18px rgba(var(--hue,244,117,33),.85)}
+
+    /* Reflet qui balaie la carte au survol : un pseudo-élément translaté, rien de plus. */
+    .crrav-thumb::after{content:'';position:absolute;inset:0;pointer-events:none;z-index:3;
+      background:linear-gradient(105deg,transparent 38%,rgba(255,255,255,.16) 50%,transparent 62%);
+      transform:translateX(-120%);transition:transform .7s cubic-bezier(.2,.7,.3,1)}
+    .crrav-card:hover .crrav-thumb::after{transform:translateX(120%)}
+
+    /* Le titre glisse légèrement, la barre de progression s'illumine. */
+    .crrav-card:hover .crrav-bar{box-shadow:inset 0 1px 2px rgba(0,0,0,.35),
+      0 0 14px -2px var(--prog)}
+    .crrav-lrow:hover{transform:translateX(3px)}
+    .crrav-calrow:hover{transform:translateY(-2px) scale(1.004)}
+  }
+  `;
+
+  let root = null, fab = null, progressMsg = '';
+  // Horodatage de départ de l'activité générique en cours (chargement watchlist/listes/
+  // épisodes, découverte, orphelines, nouveautés — elles partagent toutes `progressMsg`
+  // ci-dessus). Posé/retiré par renderActivityBar() selon `anyBusy`, sert uniquement à
+  // estimer un temps restant quand le message contient un compte « i/total ».
+  let activityStartedAt = null;
+  // Affichage ponctuel (session, non persisté) de la barre de recherche globale quand le
+  // réglage CFG.showSearchBar est désactivé (par défaut) — voir renderNow() / togglesearch.
+  let searchBarForcedOpen = false;
+  // Message éphémère affiché en haut du panneau après une action (ex. relance sur
+  // changement de réglage). Disparaît seul.
+  let toastMsg = '';
+  let toastTimer = null;
+  function showToast(msg) {
+    toastMsg = msg;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { toastMsg = ''; render(); }, 4000);
+  }
+
+  function mountStyles() {
+    if (document.getElementById('crrav-css')) return;
+    const st = document.createElement('style');
+    st.id = 'crrav-css';
+    st.textContent = CSS;
+    (document.head || document.documentElement).appendChild(st);
+  }
+
+  // Agrège les statistiques à partir des séries DÉJÀ en mémoire — aucune requête.
+  // Sépare le global (toutes séries confondues) et le détail par liste.
+  function computeStats() {
+    const all = STATE.series.filter((s) => s.total > 0 && !IGNORED.has(s.id));
+
+    const agg = (arr) => {
+      const started = arr.filter((s) => s.seen > 0 && s.remaining > 0);
+      const done = arr.filter((s) => s.remaining === 0);
+      const untouched = arr.filter((s) => s.seen === 0);
+      const epSeen = arr.reduce((a, s) => a + s.seen, 0);
+      const epLeft = arr.reduce((a, s) => a + s.remaining, 0);
+      const secSeen = arr.reduce((a, s) =>
+        a + s.episodes.filter((e) => e.seen).reduce((b, e) => b + (e.dur || 0), 0), 0);
+      const secLeft = arr.reduce((a, s) => a + s.secLeft, 0);
+      return {
+        count: arr.length, started: started.length, done: done.length, untouched: untouched.length,
+        epSeen, epLeft, secSeen, secLeft,
+      };
+    };
+
+    // Top genres calculés uniquement sur les séries où tu as vu au moins un épisode.
+    const genres = {};
+    for (const s of all) {
+      if (s.seen === 0) continue;
+      for (const c of s.categories || []) genres[c] = (genres[c] || 0) + 1;
+    }
+    const topGenres = Object.entries(genres).sort((a, b) => b[1] - a[1]).slice(0, 8);
+
+    const rated = all.filter((s) => s.rating != null);
+    const avgRating = rated.length ? rated.reduce((a, s) => a + s.rating, 0) / rated.length : null;
+
+    const g = agg(all);
+
+    // Faits marquants — tout est déjà en mémoire (aucune requête ajoutée) :
+    // série la plus chronophage, mieux notée, la plus longue, presque finies…
+    const withSeenSec = all.map((s) => ({
+      s, sec: s.episodes.filter((e) => e.seen).reduce((a, e) => a + (e.dur || 0), 0),
+    })).filter((x) => x.sec > 0);
+    const mostWatched = withSeenSec.length
+      ? withSeenSec.reduce((a, b) => (b.sec > a.sec ? b : a)) : null;
+    const longest = all.length
+      ? all.reduce((a, b) => (b.total > a.total ? b : a)) : null;
+    const topRatedSeries = rated.length
+      ? rated.reduce((a, b) => (b.rating > a.rating ? b : a)) : null;
+    const almostDone = all
+      .filter((s) => s.remaining > 0 && s.remaining <= 2 && s.seen > 0)
+      .sort((a, b) => a.remaining - b.remaining)
+      .slice(0, 6);
+    const airingCount = all.filter((s) => s.airing).length;
+
+    // Top séries DANS tes listes, par temps réellement regardé (épisodes vus).
+    const topLists = all
+      .map((s) => ({
+        id: s.id, title: s.title, slug: s.slug,
+        episodes: s.seen,
+        seconds: s.episodes.filter((e) => e.seen).reduce((a, e) => a + (e.dur || 0), 0),
+      }))
+      .filter((x) => x.episodes > 0)
+      .sort((a, b) => b.seconds - a.seconds || b.episodes - a.episodes)
+      .slice(0, 5);
+
+    return {
+      global: g,
+      topLists,
+      topGenres,
+      genreCount: Object.keys(genres).length,
+      avgRating,
+      seriesWithGenres: all.filter((s) => s.seen > 0 && (s.categories || []).length).length,
+      highlights: {
+        mostWatched: mostWatched ? { title: mostWatched.s.title, id: mostWatched.s.id, slug: mostWatched.s.slug, sec: mostWatched.sec } : null,
+        longest: longest && longest.total ? { title: longest.title, id: longest.id, slug: longest.slug, total: longest.total } : null,
+        topRated: topRatedSeries ? { title: topRatedSeries.title, id: topRatedSeries.id, slug: topRatedSeries.slug, rating: topRatedSeries.rating } : null,
+        almostDone: almostDone.map((s) => ({ title: s.title, id: s.id, remaining: s.remaining, slug: s.slug })),
+        airingCount,
+        avgEpisodeSec: g.epSeen ? Math.round(g.secSeen / g.epSeen) : 0,
+      },
+      history: (() => {
+        const seenInMemory = all.filter((s) => s.seen > 0);
+        const seenIds = new Set(seenInMemory.map((s) => s.id));
+        const h = cachedWatchedIds();
+        if (h) for (const id of h.ids) seenIds.add(id);
+
+        // « Hors listes » = vu mais absent de tes listes, filtré par id ET par titre.
+        // Certaines séries ont un id d'historique différent de celui de la watchlist
+        // (versions audio, variantes régionales) : le seul filtre par id les faisait
+        // apparaître à tort hors listes (ex. Dr Stone, pourtant suivie). Le titre sert
+        // de garde-fou pour ces cas.
+        const norm = (t) => String(t || '').trim().toLowerCase();
+        const inLists = new Set(all.map((s) => s.id));
+        const inListTitles = new Set(all.map((s) => norm(s.title)).filter(Boolean));
+
+        // Détail hors-listes, depuis l'agrégat du scan (aucune requête), déjà trié par
+        // temps regardé. On écarte tout ce qui est dans tes listes (id ou titre).
+        const detail = HISTORY_DETAIL || (h && h.detail) || null;
+        const beyondDetail = (detail || [])
+          .filter((d) => !inLists.has(d.id) && !inListTitles.has(norm(d.title)))
+          .sort((a, b) => b.seconds - a.seconds || b.episodes - a.episodes);
+        // Repli par id quand aucun détail titré n'est disponible (vieux cache).
+        const beyondIds = [...seenIds].filter((id) => !inLists.has(id));
+        const beyondCount = detail ? beyondDetail.length : beyondIds.length;
+
+        let beyondEpisodes = 0, beyondSeconds = 0;
+        const beyondGenres = {};
+        for (const d of beyondDetail) {
+          beyondEpisodes += d.episodes;
+          beyondSeconds += d.seconds;
+          for (const g of d.genres || []) beyondGenres[g] = (beyondGenres[g] || 0) + 1;
+        }
+        const topSeries = beyondDetail.slice(0, 5).map((d) => ({
+          id: d.id, title: d.title || '(série sans titre)', episodes: d.episodes, seconds: d.seconds,
+        }));
+
+        return {
+          // Séries vues au total = celles suivies et entamées + celles hors listes.
+          // (Éviter le double comptage d'une série au double id, cf. ci-dessus.)
+          total: seenInMemory.length + beyondCount,
+          beyondLists: beyondCount,
+          beyondEpisodes, beyondSeconds,
+          topSeries,
+          beyondGenres: Object.entries(beyondGenres).sort((a, b) => b[1] - a[1]).slice(0, 8),
+          hasDetail: !!detail,
+          complete: h ? h.complete : false,
+          hasHistory: !!h,
+          inListsSeen: seenInMemory.length,
+        };
+      })(),
+    };
+  }
+
+  // Calendrier ESTIMATIF : la plupart des animes sortent chaque semaine, à jour ET heure
+  // fixes. On déduit les deux du dernier épisode connu (lastAired.air, timestamp complet),
+  // ainsi que le numéro du prochain épisode (dernier sorti + 1) et où tu en es.
+  // AUCUNE requête, aucune date future récupérée : pure déduction sur données en mémoire.
+  function estimatedSchedule() {
+    const JOURS = ['dimanche', 'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi'];
+    const now = new Date();
+    return STATE.series
+      .filter((s) => s.airing && s.lastAired && s.lastAired.air && !IGNORED.has(s.id))
+      .map((s) => {
+        const la = s.lastAired;
+        // Référence temporelle : availability_starts (heure réelle de mise en ligne) si
+        // disponible, sinon episode_air_date. Une date à minuit UTC pile ne porte AUCUNE
+        // heure exploitable : on le signale (hasTime=false) au lieu d'afficher un « 02h »
+        // qui n'est que le décalage de fuseau appliqué à minuit UTC.
+        const ref = la.avail || la.air;
+        const d = new Date(ref);
+        const midnightUTC = d.getUTCHours() === 0 && d.getUTCMinutes() === 0 && d.getUTCSeconds() === 0;
+        const hasTime = !midnightUTC;
+        const daysSince = Math.floor((Date.now() - (la.air || ref)) / DAY);
+
+        const hh = hasTime ? d.getHours() : 0;
+        const mm = hasTime ? d.getMinutes() : 0;
+
+        // Projection hebdomadaire à partir de la DERNIÈRE sortie, avancée jusqu'à tomber
+        // strictement dans le futur. L'ancien calcul par écart de jour de semaine donnait
+        // delta = 0 quand l'épisode venait de sortir le jour même : le « prochain » était
+        // reprogrammé aujourd'hui, si bien que la série apparaissait à la fois dans
+        // « Sorti aujourd'hui » et dans les prochaines sorties, comme un doublon.
+        const nextDate = new Date(la.air || ref);
+        if (hasTime) nextDate.setHours(hh, mm, 0, 0); else nextDate.setHours(0, 0, 0, 0);
+        do { nextDate.setDate(nextDate.getDate() + 7); } while (nextDate.getTime() <= Date.now());
+        const nextTs = nextDate.getTime();
+        // delta = nombre de jours calendaires d'ici la prochaine sortie (0 = aujourd'hui).
+        const midnight = new Date(); midnight.setHours(0, 0, 0, 0);
+        const delta = Math.round((new Date(nextDate).setHours(0, 0, 0, 0) - midnight.getTime()) / DAY);
+        const heure = hasTime
+          ? `${String(hh).padStart(2, '0')}h${mm ? String(mm).padStart(2, '0') : ''}`
+          : 'heure inconnue';
+
+        // Crunchyroll numérote parfois les saisons de façon cumulative (season_number
+        // = 12 pour une série qui n'a que 4 saisons visibles, à cause des versions
+        // linguistiques ou d'un comptage continu). Afficher « S12 » n'a alors aucun
+        // sens. On calcule le rang RÉEL de la saison parmi les saisons distinctes.
+        const distinctSeasons = [...new Set(s.episodes.map((e) => e.season))].sort((a, b) => a - b);
+        const seasonRank = distinctSeasons.indexOf(la.season) + 1;   // 1-based
+        const totalSeasons = distinctSeasons.length;
+
+        // Épisode suivant dans la même saison, et son existence probable.
+        const sameSeasonEps = s.episodes.filter((e) => e.season === la.season);
+        const maxNumThisSeason = sameSeasonEps.reduce((m, e) => Math.max(m, e.n || 0), 0);
+        const nextNum = (la.n || 0) + 1;
+        // Si le dernier épisode sorti est déjà le plus haut connu de sa saison, le
+        // prochain pourrait ouvrir une nouvelle saison — on le signale au lieu d'inventer.
+        const seasonMayEnd = la.n >= maxNumThisSeason;
+
+        // Position actuelle, avec le même rang de saison relatif.
+        let curRank = null;
+        if (s.lastSeen) {
+          const idx = distinctSeasons.indexOf(s.lastSeen.season);
+          curRank = idx >= 0 ? idx + 1 : null;
+        }
+
+        return {
+          s, weekday: nextDate.getDay(), weekdayName: JOURS[nextDate.getDay()],
+          delta, daysSince, heure, hh, mm, hasTime, nextTs,
+          seasonRank, totalSeasons, nextNum, seasonMayEnd,
+          curRank, current: s.lastSeen,
+        };
+      })
+      .filter((r) => r.daysSince <= 10)
+      .sort((a, b) => a.delta - b.delta || a.hh - b.hh);
+  }
+
+  function renderStats() {
+    if (STATE.loading && !STATE.series.length) {
+      return `<div class="crrav-msg"><h3>Chargement…</h3>
+        <p>Ouvre l'onglet « Reste à voir » d'abord pour charger tes séries.</p></div>`;
+    }
+    if (!STATE.series.length) {
+      return `<div class="crrav-msg"><h3>Pas encore de données</h3>
+        <p>Ouvre « Reste à voir » pour que je puisse calculer tes statistiques.</p></div>`;
+    }
+    const st = computeStats();
+    const g = st.global;
+    const h = st.history;
+    // Complète en tâche de fond les genres hors-listes manquants (voir enrichHistoryGenres) :
+    // si quelque chose change, un re-render est déclenché ; sinon, aucun effet.
+    if (h.hasDetail) idle(() => enrichHistoryGenres());
+    // (24) Repliés par défaut seulement sous 600px : sur desktop/tablette, rien ne
+    // change (tout reste ouvert, comme avant). Réévalué à chaque render — un
+    // changement d'orientation ou le dépliage d'un Z Fold rouvre naturellement.
+    const compact = window.innerWidth <= 600;
+    const hDone = Math.round(g.secSeen / 3600);
+    const pctDone = g.epSeen + g.epLeft > 0 ? Math.round((g.epSeen / (g.epSeen + g.epLeft)) * 100) : 0;
+    const beyondH = (h.hasHistory && h.hasDetail) ? Math.round(h.beyondSeconds / 3600) : 0;
+
+    const bigStat = (val, label, hot) =>
+      `<div class="crrav-bigstat${hot ? ' hot' : ''}"><b>${val}</b><small>${label}</small></div>`;
+
+    // — Genres, sur séries vues uniquement —
+    const maxGenre = st.topGenres.length ? st.topGenres[0][1] : 1;
+    const genreBars = st.topGenres.map(([gname, n]) =>
+      `<div class="crrav-gbar">
+        <span class="crrav-gbar-l">${escapeHtml(gname)}</span>
+        <span class="crrav-gbar-t"><i style="width:${Math.round((n / maxGenre) * 100)}%"></i></span>
+        <span class="crrav-gbar-n">${n}</span>
+      </div>`).join('');
+
+    // Hero d'ouverture : un seul chiffre marquant, tout de suite compris — le détail
+    // (listes / hors listes) vient juste dessous plutôt que d'être mélangé avec lui.
+    const heroTotal = hDone + beyondH;
+    const heroSub = beyondH
+      ? `<span><b>${hDone} h</b> dans tes listes</span><span>+ <b>${beyondH} h</b> hors listes</span>`
+      : `<span><b>${g.count}</b> séries suivies</span><span><b>${pctDone} %</b> déjà vus</span>`;
+
+    // Équivalences amusantes — pur calcul sur le total déjà connu, aucun coût.
+    const heroEq = (() => {
+      if (!heroTotal) return '';
+      const days = heroTotal / 24;
+      const movies = Math.round(heroTotal / 2);
+      const weeks35 = heroTotal / 35;
+      const parts = [`≈ <b>${days.toFixed(1)}</b> jour${days >= 2 ? 's' : ''} non-stop`];
+      if (movies > 0) parts.push(`≈ <b>${movies}</b> film${movies > 1 ? 's' : ''} de 2 h`);
+      if (weeks35 >= 0.3) parts.push(`≈ <b>${weeks35.toFixed(1)}</b> semaine${weeks35 >= 2 ? 's' : ''} de travail (35 h)`);
+      return `<div class="crrav-statshero-eq">${parts.join(' · ')}</div>`;
+    })();
+
+    // Faits marquants — tout est déjà en mémoire (aucune requête ajoutée).
+    const hl = st.highlights;
+    const seriesUrl = crSeriesUrl;
+    const hlCard = (icon, label, value, meta, url) => `<a class="crrav-hlcard" href="${escapeHtml(url)}">
+      <span class="crrav-hlicon">${icon}</span>
+      <div class="crrav-hlbody"><small>${label}</small><b>${escapeHtml(value)}</b>
+        ${meta ? `<span class="crrav-hlmeta">${escapeHtml(meta)}</span>` : ''}</div>
+    </a>`;
+    const hlCards = [
+      hl.mostWatched && hlCard('⏱️', 'Série la plus chronophage', hl.mostWatched.title,
+        `${Math.round(hl.mostWatched.sec / 3600)} h passées dessus`, seriesUrl(hl.mostWatched.id, hl.mostWatched.slug)),
+      hl.topRated && hlCard('⭐', 'Mieux notée dans tes listes', hl.topRated.title,
+        `★ ${hl.topRated.rating.toFixed(1)}`, seriesUrl(hl.topRated.id, hl.topRated.slug)),
+      hl.longest && hlCard('🎬', 'Le plus gros marathon', hl.longest.title,
+        `${hl.longest.total} épisodes`, seriesUrl(hl.longest.id, hl.longest.slug)),
+    ].filter(Boolean).join('');
+    const factStat = (icon, val, label) => `<div class="crrav-hlcard">
+      <span class="crrav-hlicon">${icon}</span>
+      <div class="crrav-hlbody"><small>${label}</small><b>${escapeHtml(String(val))}</b></div>
+    </div>`;
+    const factCards = [
+      factStat('📡', hl.airingCount, 'en diffusion en ce moment'),
+      factStat('🎭', st.genreCount, 'genres différents suivis'),
+      factStat('⏳', fmtDuration(hl.avgEpisodeSec), 'durée moyenne / épisode'),
+    ].join('');
+    const almostBlock = hl.almostDone.length ? `
+      <div class="crrav-almost">
+        <h4>🔥 Presque finies</h4>
+        <div class="crrav-chips">
+          ${hl.almostDone.map((s) => `<a class="crrav-chip" href="${escapeHtml(seriesUrl(s.id, s.slug))}">
+            ${escapeHtml(s.title)} · ${s.remaining} ép. restant${s.remaining > 1 ? 's' : ''}</a>`).join('')}
+        </div>
+      </div>` : '';
+
+    const topLists = st.topLists || [];
+    const topListsBlock = topLists.length ? `
+      <div class="crrav-topseries">
+        <h3>Tes séries suivies les plus regardées</h3>
+        ${topLists.map((s, i) => `<a class="crrav-toprow" href="${escapeHtml(seriesUrl(s.id, s.slug))}">
+          <span class="crrav-toprank">${i + 1}</span>
+          <span class="crrav-toptitle">${escapeHtml(s.title)}</span>
+          <span class="crrav-topmeta">${s.episodes} ép.${s.seconds ? ` \u00b7 ${Math.round(s.seconds / 3600)} h` : ''}</span>
+        </a>`).join('')}
+      </div>` : '';
+
+    const accordion = (id, icon, title, bodyHtml) => {
+      const open = !compact || statsAccordionOpen.has(id);
+      return `<details class="crrav-accordion" data-acc="${id}" ${open ? 'open' : ''}>
+        <summary>${icon} ${title}</summary>
+        <div class="crrav-accordion-body">${bodyHtml}</div>
+      </details>`;
+    };
+
+    return `<div class="crrav-statswrap crrav-statsgrid">
+
+      <div class="crrav-statshero">
+        <div class="crrav-statshero-num">${heroTotal} h</div>
+        <div class="crrav-statshero-label">regardées au total sur Crunchyroll</div>
+        <div class="crrav-statshero-sub">${heroSub}</div>
+        ${heroEq}
+      </div>
+
+      <div class="crrav-statzone instock">
+        <h2 class="crrav-stath2">📋 Dans tes listes</h2>
+        <p class="crrav-schedhint">Séries de ta watchlist et de tes listes personnalisées.</p>
+        <div class="crrav-biggrid">
+          ${bigStat(g.count, 'séries suivies')}
+          ${bigStat(g.epSeen, 'épisodes vus')}
+          ${bigStat(hDone + ' h', 'déjà regardées')}
+          ${bigStat(g.epLeft, 'épisodes à voir', true)}
+          ${bigStat(fmtDuration(g.secLeft), 'temps restant', true)}
+          ${bigStat(pctDone + ' %', 'de progression')}
+        </div>
+
+        ${accordion('repartition', '📊', 'Répartition & genres', `
+        <div class="crrav-statcols">
+          <section class="crrav-statcard">
+            <h3>Répartition</h3>
+            <div class="crrav-donut" style="--p:${pctDone}">
+              <div class="crrav-donut-c"><b>${pctDone}%</b><small>vus</small></div>
+            </div>
+            <ul class="crrav-statlist">
+              <li><span class="crrav-dot" style="background:#5ce6a0"></span>${g.done} terminées</li>
+              <li><span class="crrav-dot" style="background:#f47521"></span>${g.started} en cours</li>
+              <li><span class="crrav-dot" style="background:#4a4a55"></span>${g.untouched} pas commencées</li>
+            </ul>
+          </section>
+
+          <section class="crrav-statcard">
+            <h3>Genres les plus vus</h3>
+            ${genreBars || `<p class="crrav-schedempty">Genres indisponibles pour le moment —
+              ils apparaissent une fois tes séries analysées.</p>`}
+            ${st.avgRating != null
+              ? `<p class="crrav-avgnote">Note moyenne de ce que tu suis : <b>★ ${st.avgRating.toFixed(2)}</b></p>` : ''}
+          </section>
+        </div>`)}
+
+        ${accordion('faits', '🏆', 'Faits marquants', `
+        <div class="crrav-hlgrid">${hlCards}${factCards}</div>
+        ${almostBlock}`)}
+        ${topListsBlock}
+      </div>
+
+      <div class="crrav-statzone outstock">
+        ${historySection(st)}
+      </div>
+
+    </div>`;
+  }
+
+  // Sur mobile, pas d'accès à la console : quand le bloc Nouveautés finit vide, on affiche
+  // le détail du filtrage (voir N.debug, rempli par loadNewPremieres) directement dans
+  // l'app, repliable, pour comprendre à quelle étape ça tombe à zéro sans avoir à demander.
+  // Détail du filtrage du bloc « Nouveautés » quand il finit vide. Refonte pensée pour être
+  // lisible sans connaître le code : un seul entonnoir principal numéroté (au lieu de deux
+  // branches à plat mélangées avec les filtres finaux), les deux voies « déjà sortie » /
+  // « à venir » en sous-lignes indentées (elles s'additionnent, l'une OU l'autre suffit —
+  // ce n'est PAS un ET), une ligne de fusion qui montre le total combiné, et la ligne
+  // "Affichées" à la toute fin pour que le compte final soit visible même ici. La ligne où
+  // ça tombe à zéro en premier est surlignée ET accompagnée d'une suggestion concrète
+  // juste en dessous, plutôt qu'un conseil générique en bas de liste.
+  function renderNewPremieresDebug(d) {
+    if (!d) {
+      // Ne devrait plus arriver (voir le filet de sécurité dans renderNewPremieresSection),
+      // mais si ça arrive quand même, mieux vaut l'expliquer que de faire disparaître le
+      // bouton sans un mot.
+      return `<p class="crrav-premdebug-hint">Détail du filtrage pas encore disponible — un
+        rechargement est en cours, réessaie dans un instant.</p>`;
+    }
+    const combined = (d.cEp2Ok || 0) + (d.cUpcomingCand || 0);
+    const crFound = (d.cCrConfirmed || 0) + (d.cCrProbable || 0);
+
+    // Entonnoir principal : chaque étape ne peut que réduire (ou garder) le total de la
+    // précédente. C'est cette suite-là qui détermine où surligner « ça tombe à zéro ici ».
+    const funnel = [
+      { label: 'Épisode 1 dans la fenêtre AniList', value: d.cRaw,
+        note: `-${d.windowDays} j / +${d.upcomingDays} j`,
+        hint: 'Élargis la fenêtre dans Configurer → Nouveautés (jours « déjà sorti » et/ou « à venir »).' },
+      { label: 'Format « série » (film et musique exclus)', value: d.cFormat,
+        hint: 'Tout ce qui est sorti dans la fenêtre était un film ou un clip musical — repasse plus tard.' },
+      { label: 'Nouveauté confirmée (déjà sortie OU à venir)', value: combined, merge: true,
+        hint: 'Aucune des deux conditions ci-dessous n’est remplie par personne — repasse plus tard, '
+          + 'ou élargis la fenêtre.' },
+      { label: 'Titre exploitable', value: d.cTitle,
+        hint: 'Donnée AniList incomplète (titre manquant) sur tous les candidats — rare, réessaie plus tard.' },
+      { label: 'Pas ignorée par toi', value: d.cNotIgnored,
+        hint: 'Tu as ignoré toutes les nouveautés trouvées — dé-ignore-en une (bouton 🚫 sur sa carte) '
+          + 'pour la revoir apparaître ici.' },
+      { label: 'Absente de ta watchlist', value: d.cKnown,
+        hint: 'Tout ce qui a été trouvé est déjà dans tes listes Crunchyroll — rien de vraiment '
+          + '« nouveau » à te proposer pour l’instant, c’est plutôt bon signe !' },
+      { label: 'Genre pas exclu', value: d.cGenreOk,
+        hint: 'Vérifie les genres exclus dans Configurer (« hentai » exclu par défaut) — ils bloquent '
+          + 'peut-être tout le lot actuel.' },
+      { label: 'Repérée sur Crunchyroll (confirmée + probable)', value: crFound,
+        hint: 'Aucun de ces titres n’a pu être retrouvé sur Crunchyroll, même approximativement — ils '
+          + 'ne sont sans doute pas (encore) licenciés côté Crunchyroll.' },
+      { label: `Affichées (limite réglée à ${d.target ?? '?'})`, value: d.shown,
+        hint: 'Étape atteinte mais rien n’est affiché : la limite d’affichage est peut-être à 0, ou un '
+          + 'filtre de genre actif (puces au-dessus du bloc) exclut tout le lot — vérifie ces deux réglages.' },
+    ];
+
+    // Sous-détail des deux voies qui alimentent la ligne « Nouveauté confirmée » — purement
+    // informatif, pas de surlignage ici (ce sont deux chemins parallèles, pas une suite).
+    const branchRows = [
+      ['· Déjà sortie', d.cReleasedCand],
+      ['·  → toujours en diffusion (série pas terminée)', d.cStatusOk],
+      ['·  → épisode 2 pas encore publié', d.cEp2Ok],
+      ['· À venir (épisode 1 pas encore diffusé)', d.cUpcomingCand],
+    ];
+    // Sous-détail de la ligne « Repérée sur Crunchyroll ».
+    const crRows = [
+      ['· Confirmée (fiche fiable)', d.cCrConfirmed,
+        d.cCrFromLink != null ? `${d.cCrFromLink} via AniList, ${d.cCrFromSearch} via recherche CR` : null],
+      ['· Probable (correspondance moins sûre, affichée quand même)', d.cCrProbable],
+    ];
+
+    // Premier palier de l'entonnoir qui tombe à zéro : c'est LA cause de la liste vide.
+    // Tout ce qui suit dans l'entonnoir est mécaniquement à zéro aussi, pas la peine de le
+    // désigner comme responsable.
+    let bottleneckIdx = funnel.findIndex((step) => step.value === 0);
+    if (bottleneckIdx === -1) bottleneckIdx = funnel.length - 1; // filet de sécurité
+
+    const subRow = ([label, n, note]) => `<div class="crrav-premdebug-row crrav-premdebug-sub">
+        <b>${n}</b><span>${escapeHtml(label)}${note ? ` <small>(${escapeHtml(note)})</small>` : ''}</span>
+      </div>`;
+
+    const rows = funnel.map((step, i) => {
+      const isBottleneck = i === bottleneckIdx;
+      const rowHtml = `<div class="crrav-premdebug-row${step.merge ? ' crrav-premdebug-merge' : ''}${isBottleneck ? ' crrav-premdebug-zero' : ''}">
+        <b>${step.value}</b><span>${escapeHtml(step.label)}${step.note ? ` <small>(${escapeHtml(step.note)})</small>` : ''}</span>
+      </div>`;
+      const subHtml = step.merge ? branchRows.map(subRow).join('') : '';
+      const crSubHtml = (i === 7) ? crRows.map(subRow).join('') : '';
+      const hintHtml = isBottleneck
+        ? `<p class="crrav-premdebug-rowhint">💡 ${escapeHtml(step.hint)}</p>` : '';
+      // Le sous-détail d'une étape apparaît AVANT elle (ce sont ses ingrédients), le
+      // sous-détail CR apparaît APRÈS (c'est sa décomposition).
+      return subHtml + rowHtml + crSubHtml + hintHtml;
+    }).join('');
+
+    return `<details class="crrav-premdebug">
+      <summary>Pourquoi c'est vide ? (détail du filtrage)</summary>
+      <p class="crrav-premdebug-intro">Chaque ligne ne peut que réduire le total de la ligne du dessus.
+        La ligne en rouge est celle où ça tombe à zéro en premier — c'est la vraie cause, celles
+        d'en dessous sont juste la conséquence.</p>
+      ${rows}
+    </details>`;
+  }
+
+  // Bloc « Nouveautés » du Calendrier (voir loadNewPremieres) : séries dont l'épisode 1
+  // vient tout juste de sortir sur Crunchyroll, absentes de tes listes. Réglable dans
+  // Configurer (activé par défaut) — désactivé, le bloc ne s'affiche simplement pas.
+  function renderNewPremieresSection() {
+    if (!CFG.discoverNewPremieres) return '';
+    const N = STATE.newPremieres;
+    const f = STATE.filters;
+    const list = visibleNewPremieres();
+    const chips = catChips(newPremiereCategories(), f.newPremCatsIn, f.newPremCatsEx, 'newprem');
+    let body;
+    if (N.loading && !list.length) {
+      body = `<div class="crrav-grid">${Array.from({ length: 4 },
+        () => '<div class="crrav-skel"><div></div></div>').join('')}</div>`;
+    } else if (N.error) {
+      body = `<p class="crrav-warn">${escapeHtml(N.error)}</p>`;
+    } else if (!list.length) {
+      // Filet de sécurité : si on arrive ici sans détail de filtrage (`debug` vide) alors
+      // qu'on n'est pas en train de charger, c'est qu'un chargement a été interrompu ou
+      // sauté quelque part (ex. réglage changé hors de cet onglet) — on relance une fois
+      // plutôt que de laisser le bouton « Pourquoi c'est vide ? » disparaître sans explication.
+      if (!N.debug && !N.loading && !N._debugRetried) {
+        N._debugRetried = true;
+        refreshNewPremieres();
+      }
+      body = `<p class="crrav-schedempty">Rien de nouveau détecté pour l'instant — reviens plus tard.</p>
+        ${renderNewPremieresDebug(N.debug)}`;
+    } else {
+      body = `<div class="crrav-grid">${list.map(newPremiereCard).join('')}</div>`;
+    }
+    return `<div class="crrav-statsection">
+      <h2 class="crrav-stath2">🆕 Nouveautés</h2>
+      <p class="crrav-schedhint">Deux cas mélangés ici : épisode 1 tout juste sorti (repéré via
+        AniList), épisode 2 pas encore publié — et épisode 1 pas encore sorti mais prévu
+        prochainement (« Bientôt »). Seules les séries dont la fiche Crunchyroll a pu être
+        confirmée avec certitude sont proposées ici — pas de lien vers une simple recherche.
+        Une série « déjà sortie » disparaît d'elle-même dès que son épisode 2 sort ; une série
+        « à venir » bascule automatiquement en « déjà sortie » le jour J.</p>
+      ${chips}
+      ${body}
+    </div>`;
+  }
+
+  // Onglet Calendrier : prochaines sorties, regroupées par jour, avec compte à rebours,
+  // retard, posters et ajout à l'agenda. Date/numéro exacts via AniList quand la série y
+  // est reconnue, sinon jour et heure déduits du rythme hebdomadaire (estimation, zéro
+  // requête). L'ancien bouton « vraies dates » (scraping du calendrier de simulcast
+  // Crunchyroll) a été retiré : AniList couvre déjà ce besoin, sans requête HTML fragile.
+  function renderCalendrier() {
+    if (STATE.loading && !STATE.series.length) {
+      return `<div class="crrav-msg"><h3>Chargement…</h3>
+        <p>Ouvre l'onglet « Reste à voir » d'abord pour charger tes séries.</p></div>`;
+    }
+    if (!STATE.series.length) {
+      return `<div class="crrav-msg"><h3>Pas encore de données</h3>
+        <p>Ouvre « Reste à voir » pour que je puisse estimer les prochaines sorties.</p></div>`;
+    }
+
+    const est = estimatedSchedule();
+    const seriesUrl = crSeriesUrl;
+    const JOURS = ['dimanche', 'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi'];
+    const now = Date.now();
+
+    // Date/numéro exacts via AniList quand connus, sinon estimation au rythme hebdomadaire.
+    const events = est.map((r) => {
+      const s = r.s;
+      let whenTs, source, nextN, nextRank, seasonMayEnd, exactTime;
+      if (s.aniNextTs && s.aniNextTs > now - DAY && s.aniNextNum) {
+        whenTs = s.aniNextTs; source = 'anilist'; nextN = s.aniNextNum;
+        nextRank = r.seasonRank; seasonMayEnd = false; exactTime = true;
+      } else {
+        whenTs = r.nextTs; source = 'est'; nextN = r.nextNum; nextRank = r.seasonRank;
+        seasonMayEnd = r.seasonMayEnd; exactTime = r.hasTime;
+      }
+      return { r, whenTs, source, nextN, nextRank, seasonMayEnd, hasTime: exactTime };
+    }).sort((a, b) => a.whenTs - b.whenTs);
+
+    if (!events.length) {
+      return `<div class="crrav-statswrap"><div class="crrav-statsection">
+        <h2 class="crrav-stath2">Prochains épisodes</h2>
+        <div class="crrav-msg"><h3>Rien de prévu</h3>
+          <p>Aucune série en diffusion détectée en ce moment. Le calendrier se remplit
+          dès que tu suis un simulcast en cours.</p></div>
+      </div>
+      ${renderNewPremieresSection()}
+      </div>`;
+    }
+
+    // Sorti aujourd'hui : dernier épisode paru dans la journée en cours, toutes séries
+    // de tes listes confondues (pas seulement celles en diffusion). Zéro requête : la
+    // date de parution est déjà en mémoire.
+    const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
+    const todayStart = startOfToday.getTime();
+    const todayOut = STATE.series
+      .map((s) => {
+        const la = s.lastAired;
+        const ts = la ? (la.avail || la.air) : null;
+        return (ts && ts >= todayStart && ts < todayStart + DAY) ? { s, la, ts } : null;
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.ts - a.ts);
+
+    const todayBlock = todayOut.length ? `
+      <div class="crrav-calday">Sorti aujourd'hui <small>${todayOut.length} épisode${todayOut.length > 1 ? 's' : ''}</small></div>
+      ${todayOut.map(({ s, la }) => {
+        const vu = s.episodes.some((e) => e.id === la.id && e.seen);
+        return `<a class="crrav-calrow out" href="${seriesUrl(s.id, s.slug)}">
+          <div class="crrav-caltime"><b>✓</b><small>sorti</small></div>
+          <div class="crrav-calposter">
+            ${s.poster ? `<img loading="lazy" crossorigin="anonymous" src="${s.poster}" alt="" onerror="this.removeAttribute(&quot;crossorigin&quot;);this.src=this.src">` : ''}
+          </div>
+          <div class="crrav-calmain">
+            <span class="crrav-caltitle">${escapeHtml(s.title)}</span>
+            <div class="crrav-calmeta">
+              <span class="crrav-calnext">E${la.n}</span>
+              ${vu ? '<span class="crrav-uptodate">déjà vu ✓</span>'
+                   : '<span class="crrav-late">à regarder</span>'}
+            </div>
+          </div>
+        </a>`;
+      }).join('')}` : '';
+
+    const in7 = events.filter((e) => e.whenTs - now < 7 * DAY).length;
+    const behindTotal = events.reduce((a, e) => a + (e.r.s.remaining || 0), 0);
+    const weekBar = `<div class="crrav-calweek">
+      <div class="crrav-calweekstat"><b>${events.length}</b><small>séries en cours</small></div>
+      <div class="crrav-calweekstat"><b>${in7}</b><small>cette semaine</small></div>
+      ${behindTotal ? `<div class="crrav-calweekstat hot"><b>${behindTotal}</b><small>épisodes de retard</small></div>` : ''}
+    </div>`;
+
+    const dayKey = (ts) => { const d = new Date(ts); return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`; };
+    const today = dayKey(now), tomorrow = dayKey(now + DAY);
+    const groups = new Map();
+    for (const e of events) {
+      const k = dayKey(e.whenTs);
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(e);
+    }
+
+    const seasonTag = (rank, total) => (total > 1 && rank >= 1 ? `S${rank} ` : '');
+
+    const rowHtml = (e) => {
+      const s = e.r.s;
+      const d = new Date(e.whenTs);
+      // Heure affichée seulement si on la connaît vraiment (réelle, ou heure de mise en
+      // ligne relevée sur le dernier épisode). Sinon on annonce juste le jour.
+      const heure = e.hasTime
+        ? `${String(d.getHours()).padStart(2, '0')}h${d.getMinutes() ? String(d.getMinutes()).padStart(2, '0') : ''}`
+        : 'heure inconnue';
+      const diffH = (e.whenTs - now) / 3600e3;
+      const countdown = diffH < 0 ? 'imminent'
+        : diffH < 24 ? `dans ${Math.max(1, Math.round(diffH))} h`
+        : `dans ${Math.round(diffH / 24)} j`;
+      const nextLabel = (e.seasonMayEnd || e.nextN == null) ? 'prochain épisode'
+        : `${seasonTag(e.nextRank, e.r.totalSeasons)}E${e.nextN}`;
+      const badge = e.source === 'anilist' ? '<span class="crrav-realbadge crrav-anibadge">AniList</span>'
+        : '<span class="crrav-estbadge">estimé</span>';
+      const behind = s.remaining > 0 ? `<span class="crrav-late">${s.remaining} ép. de retard</span>`
+        : '<span class="crrav-uptodate">à jour ✓</span>';
+      const cur = e.r.current ? `tu en es à ${seasonTag(e.r.curRank, e.r.totalSeasons)}E${e.r.current.n}` : 'pas commencée';
+      // Reste à voir dans la saison en cours (AniList) + date du dernier épisode, si connus.
+      const endBits = [];
+      const aniLeft = plannedRemaining(s);
+      if (aniLeft != null && aniLeft > 0) endBits.push(`${aniLeft} restant${aniLeft > 1 ? 's' : ''}`);
+      if (s.seasonEndTs && s.seasonEndTs > now - DAY) endBits.push(`fin ${s.plannedApprox ? '~' : ''}${fmtShortDate(s.seasonEndTs)}`);
+      const seasonEnd = endBits.length
+        ? `<span class="crrav-planned" title="Épisodes restants et fin de saison — AniList">🗓 ${endBits.join(' · ')}</span>` : '';
+      const soon = diffH < 24;
+      return `<a class="crrav-calrow${soon ? ' soon' : ''}" href="${seriesUrl(s.id, s.slug)}">
+        <div class="crrav-caltime">
+          <b>${heure === 'heure inconnue' ? '—' : escapeHtml(heure)}</b>
+          <small>${escapeHtml(countdown)}</small>
+        </div>
+        <div class="crrav-calposter">
+          ${s.poster ? `<img loading="lazy" crossorigin="anonymous" src="${s.poster}" alt="" onerror="this.removeAttribute(&quot;crossorigin&quot;);this.src=this.src">` : ''}
+        </div>
+        <div class="crrav-calmain">
+          <span class="crrav-caltitle">${escapeHtml(s.title)}</span>
+          <div class="crrav-calmeta">
+            <span class="crrav-calnext">${nextLabel}</span>
+            ${badge}
+          </div>
+          <div class="crrav-calmeta">
+            ${behind}
+            <span class="crrav-calcount">${escapeHtml(cur)}</span>
+          </div>
+          ${seasonEnd ? `<div class="crrav-calmeta">${seasonEnd}</div>` : ''}
+        </div>
+      </a>`;
+    };
+
+    const sections = [...groups.entries()].map(([k, evs]) => {
+      const d = new Date(evs[0].whenTs);
+      const label = k === today ? "Aujourd'hui" : k === tomorrow ? 'Demain' : JOURS[d.getDay()];
+      return `<div class="crrav-calday">${label} <small>${d.getDate()}/${d.getMonth() + 1}</small></div>
+        ${evs.map(rowHtml).join('')}`;
+    }).join('');
+
+    const aniCount = events.filter((e) => e.source === 'anilist').length;
+    const headBadge = !aniCount ? '<span class="crrav-estim">estimation</span>'
+      : aniCount === events.length
+        ? '<span class="crrav-estim" style="color:#5ce6a0;border-color:rgba(92,230,160,.4)">AniList</span>'
+        : '<span class="crrav-estim">AniList + estimé</span>';
+    // Recherche AniList en cours en tâche de fond (voir enrichAnilistSchedule) : sans ce
+    // badge, rien ne distinguait « pas encore trouvé » de « en train d'être recherché » —
+    // une série passait de « estimé » à « AniList » sans qu'on sache qu'un travail était
+    // en cours entre-temps.
+    const ap = STATE.anilistProgress;
+    const progressBadge = ap
+      ? `<span class="crrav-estim crrav-estim-live">🔄 AniList : recherche en cours (${ap.done}/${ap.total})</span>`
+      : '';
+
+    return `<div class="crrav-statswrap">
+      <div class="crrav-statsection">
+        <h2 class="crrav-stath2">Prochains épisodes ${headBadge}${progressBadge}</h2>
+        <p class="crrav-schedhint">Date exacte du prochain épisode via AniList quand la série y est reconnue ;
+          sinon, jour et heure déduits du rythme hebdomadaire.</p>
+        ${weekBar}
+        <div class="crrav-sched">${todayBlock}${sections}</div>
+      </div>
+      ${renderNewPremieresSection()}
+    </div>`;
+  }
+
+  // Section « toutes tes séries vues ». Le total est TOUJOURS fiable (basé sur tes
+  // séries en mémoire), et l'historique Crunchyroll ne sert qu'à révéler ce que tu as
+  // vu HORS de tes listes — chargé à la demande, jamais imposé (contrainte de vitesse).
+  function historySection(st) {
+    const h = st.history;
+    const bigStat = (val, label, hot) =>
+      `<div class="crrav-bigstat${hot ? ' hot' : ''}"><b>${val}</b><small>${label}</small></div>`;
+
+    // Scan en cours : barre de progression en direct, à la place du bouton.
+    const prog = STATE.historyProgress;
+    if (prog) {
+      if (prog.error) {
+        return `<div class="crrav-statsection">
+          <h2 class="crrav-stath2">🧭 Toutes tes séries vues</h2>
+          <p class="crrav-probe-err">Échec du chargement : ${escapeHtml(prog.error)}</p>
+          <button class="crrav-relaunch" data-act="load-history">Réessayer</button>
+        </div>`;
+      }
+      const pct = prog.total ? Math.round((prog.done / prog.total) * 100) : 0;
+      const finished = prog.total && prog.done >= prog.total;
+      return `<div class="crrav-statsection">
+        <h2 class="crrav-stath2">🧭 Toutes tes séries vues</h2>
+        <p class="crrav-schedhint">${finished ? 'Terminé ✓' : 'Lecture de ton historique en cours…'}</p>
+        <div class="crrav-histprog">
+          <div class="crrav-histprog-bar"><i style="width:${pct}%"></i></div>
+          <div class="crrav-histprog-txt">
+            <span>${prog.done}/${prog.total || '?'} requêtes${prog.total ? ` · ${pct}%` : ''}</span>
+            <span><b>${prog.series || 0}</b> séries · ${prog.scanned || 0} épisodes</span>
+          </div>
+        </div>
+      </div>`;
+    }
+
+    const beyondBlock = h.hasHistory
+      ? bigStat(h.beyondLists, 'hors de tes listes')
+      : `<div class="crrav-bigstat crrav-loadcard">
+           <button class="crrav-relaunch" data-act="load-history">Inclure l'historique</button>
+           <small>pour compter ce que tu as vu hors de tes listes</small>
+         </div>`;
+
+    // Détail hors-listes (épisodes, heures) si le scan l'a fourni.
+    const beyondDetail = (h.hasHistory && h.hasDetail && h.beyondEpisodes) ? `
+      <div class="crrav-biggrid" style="margin-top:12px">
+        ${bigStat(h.beyondEpisodes, 'épisodes vus hors listes')}
+        ${bigStat(Math.round(h.beyondSeconds / 3600) + ' h', 'regardées hors listes')}
+      </div>` : '';
+
+    const topBlock = (h.topSeries && h.topSeries.length) ? `
+      <div class="crrav-topseries">
+        <h3>Tes séries hors listes les plus regardées</h3>
+        ${h.topSeries.map((s, i) => `<a class="crrav-toprow" href="${crSeriesUrl(s.id)}">
+          <span class="crrav-toprank">${i + 1}</span>
+          <span class="crrav-toptitle">${escapeHtml(s.title)}</span>
+          <span class="crrav-topmeta">${s.episodes} ép.${s.seconds ? ` \u00b7 ${Math.round(s.seconds / 3600)} h` : ''}</span>
+        </a>`).join('')}
+      </div>` : '';
+
+    const maxBg = h.beyondGenres && h.beyondGenres.length ? h.beyondGenres[0][1] : 1;
+    const beyondGenresBlock = (h.beyondGenres && h.beyondGenres.length) ? `
+      <div class="crrav-topseries">
+        <h3>Genres hors listes</h3>
+        ${h.beyondGenres.map(([g, n]) => `<div class="crrav-gbar">
+          <span class="crrav-gbar-l">${escapeHtml(g)}</span>
+          <span class="crrav-gbar-t"><i style="width:${Math.round((n / maxBg) * 100)}%"></i></span>
+          <span class="crrav-gbar-n">${n}</span>
+        </div>`).join('')}
+      </div>` : '';
+
+    return `<div class="crrav-statsection">
+      <h2 class="crrav-stath2">🧭 Toutes tes séries vues
+        ${h.hasHistory && !h.complete ? '<span class="crrav-estim">historique partiel</span>' : ''}</h2>
+      <p class="crrav-schedhint">Séries où tu as commencé au moins un épisode.${
+        h.hasHistory && !h.complete
+          ? ' Historique partiel : augmente le plafond d\'entrées dans les réglages.'
+          : ''}</p>
+      <div class="crrav-biggrid">
+        ${bigStat(h.total, 'séries vues au total')}
+        ${beyondBlock}
+      </div>
+      ${beyondDetail}
+      ${topBlock}
+      ${beyondGenresBlock}
+    </div>`;
+  }
+
+  function renderSuivi() {
+    const list = visibleSeries();
+    const f = STATE.filters;
+    const totalRemaining = list.reduce((a, s) => a + s.remaining, 0);
+    const secLeft = list.reduce((a, s) => a + s.secLeft, 0);
+
+    const chips = [
+      ['todo', 'À finir'],
+      ['started', 'En cours'],
+      ['notstarted', 'Pas commencées'],
+      ['uptodate', 'À jour'],
+      ['done', 'Terminées'],
+      ['all', 'Tout'],
+    ].map(([v, label]) =>
+      `<button class="crrav-chip" data-status="${v}" aria-pressed="${f.status === v}">${label}</button>`
+    ).join('') +
+      `<button class="crrav-chip" data-toggle="hideAiringSeason" aria-pressed="${f.hideAiringSeason}"
+        title="Masque les séries dont la saison où tu en es sort encore chaque semaine"
+        >Masquer les saisons en cours</button>` +
+      `<button class="crrav-chip" data-toggle="showIgnored" aria-pressed="${f.showIgnored}"
+        title="Affiche uniquement les séries que tu as ignorées, pour les restaurer"
+        >Ignorées${ignoredCount('watchlist') ? ` (${ignoredCount('watchlist')})` : ''}</button>` +
+      quickChips(f);
+
+    let body;
+    if (STATE.loading && !list.length) {
+      // (11) squelettes plutôt qu'un écran vide
+      body = `<div class="crrav-grid">${Array.from({ length: 12 },
+        () => '<div class="crrav-skel"><div></div></div>').join('')}</div>
+        <div class="crrav-foot">${escapeHtml(progressMsg)}</div>`;
+    } else if (STATE.loading) {
+      // Chargement progressif : ce qui est prêt est déjà lisible, le reste arrive.
+      // Sous un instantané, pas de squelettes : la liste est déjà complète.
+      const skels = STATE.fromSnapshot || STATE.filters.view === 'list' ? ''
+        : Array.from({ length: 4 }, () => '<div class="crrav-skel"><div></div></div>').join('');
+      body = `<div class="crrav-grid${STATE.filters.view === 'list' ? ' crrav-list' : ''}">${
+        list.map(card).join('')}${skels}</div>
+        <div class="crrav-foot">${escapeHtml(progressMsg)}</div>`;
+    } else if (STATE.error) {
+      body = `<div class="crrav-msg"><h3>Ça n'a pas marché</h3><p>${escapeHtml(STATE.error)}</p>
+        <button data-act="retry">Réessayer</button></div>`;
+    } else if (!list.length) {
+      body = `<div class="crrav-msg"><h3>Rien à afficher</h3>
+        <p>Aucune série ne correspond à ce filtre.</p></div>`;
+    } else {
+      body = `<div class="crrav-grid${STATE.filters.view === 'list' ? ' crrav-list' : ''}">${list.map(card).join('')}</div>`;
+    }
+
+    return `
+        ${STATE.fromSnapshot && STATE.loading
+          ? `<p class="crrav-warn" style="background:rgba(159,214,255,.1);border-color:rgba(159,214,255,.3);color:#9fd6ff">
+              Affichage du dernier état connu — actualisation en cours…</p>` : ''}
+        ${toastMsg ? `<div class="crrav-toast">${escapeHtml(toastMsg)}</div>` : ''}
+        <div class="crrav-stats">
+          <div class="crrav-stat"><b>${list.length}</b><small>séries</small></div>
+          <div class="crrav-stat hot"><b>${totalRemaining}</b><small>épisodes restants</small></div>
+          <div class="crrav-stat"><b>${fmtDuration(secLeft)}</b><small>à regarder</small></div>
+        </div>
+        <div class="crrav-controls">
+          <select class="crrav-select" data-act="sort">
+            <option value="remaining"${f.sort === 'remaining' ? ' selected' : ''}>Le plus d'épisodes à voir</option>
+            <option value="time"${f.sort === 'time' ? ' selected' : ''}>Le plus de temps à voir</option>
+            <option value="quickest"${f.sort === 'quickest' ? ' selected' : ''}>Finissable ce soir</option>
+            <option value="closest"${f.sort === 'closest' ? ' selected' : ''}>Bientôt fini</option>
+            <option value="progress"${f.sort === 'progress' ? ' selected' : ''}>Progression</option>
+            <option value="lastWatched"${f.sort === 'lastWatched' ? ' selected' : ''}>Dernier vu</option>
+            <option value="title"${f.sort === 'title' ? ' selected' : ''}>Titre A→Z</option>
+            <option value="recent"${f.sort === 'recent' ? ' selected' : ''}>Publication récente</option>
+            <option value="oldest"${f.sort === 'oldest' ? ' selected' : ''}>Publication ancienne</option>
+            <option value="leastProgress"${f.sort === 'leastProgress' ? ' selected' : ''}>Les plus délaissées</option>
+            <option value="longest"${f.sort === 'longest' ? ' selected' : ''}>Série la plus longue</option>
+            <option value="shortest"${f.sort === 'shortest' ? ' selected' : ''}>Série la plus courte</option>
+            <option value="titleDesc"${f.sort === 'titleDesc' ? ' selected' : ''}>Titre Z→A</option>
+            <option value="added"${f.sort === 'added' ? ' selected' : ''}>Ajout récent</option>
+          </select>
+          <div class="crrav-chips">${chips}</div>
+          ${catChips(categoriesOf(STATE.series), f.catsIn, f.catsEx, 'suivi')}
+        </div>
+      </div>
+      ${heroCard(list)}
+      ${body}
+      <div class="crrav-foot">${STATE.lastSync
+        ? `Synchronisé à ${STATE.lastSync.toLocaleTimeString('fr-FR')} · auto toutes les ${CFG.refreshMinutes} min`
+        : ''}</div>`;
+  }
+
+  function renderDecouverte() {
+    const D = STATE.discover;
+    const f = STATE.filters;
+    const list = visibleDiscover();
+    const cats = discoverCategories();
+    // Bandeau « Proches de X » : affiché UNIQUEMENT tant que le filtre genre correspond encore
+    // à la série source. Dès que l'utilisateur touche aux chips, le contexte n'est plus fidèle,
+    // on masque le bandeau (le filtre, lui, reste). Cas « genres introuvables » : tant qu'aucun
+    // filtre n'est posé.
+    const sameSet = (a, b) => {
+      const A = new Set((a || []).map((x) => String(x).toLowerCase()));
+      const B = new Set((b || []).map((x) => String(x).toLowerCase()));
+      if (A.size !== B.size) return false;
+      for (const x of A) if (!B.has(x)) return false;
+      return true;
+    };
+    const sim = D.similarTo;
+    const simActive = sim && (sim.genres.length
+      ? sameSet(f.discoverCatsIn, sim.genres)
+      : f.discoverCatsIn.length === 0);
+    const profile = buildTasteProfile();
+
+    let body;
+    if (D.loading) {
+      body = `<div class="crrav-grid">${Array.from({ length: 12 },
+        () => '<div class="crrav-skel"><div></div></div>').join('')}</div>
+        <div class="crrav-foot">${escapeHtml(progressMsg)}</div>`;
+    } else if (D.error) {
+      body = `<div class="crrav-msg"><h3>Ça n'a pas marché</h3><p>${escapeHtml(D.error)}</p>
+        <button data-act="retry">Réessayer</button></div>`;
+    } else if (!list.length) {
+      body = `<div class="crrav-msg"><h3>Rien à afficher</h3>
+        <p>${f.showIgnoredDiscover
+          ? 'Aucune pépite ignorée ici pour le moment.'
+          : D.series.length
+          ? 'Aucune pépite ne correspond à cette recherche.'
+          : "Aucune pépite trouvée pour l'instant. Réessaie plus tard, le classement popularité bouge."}</p></div>`;
+    } else {
+      const useList = f.view === 'list';
+      const cardFn = useList
+        ? (f.showIgnoredDiscover ? discoverIgnoredListRow : (x) => discoverListRow(x, profile))
+        : (f.showIgnoredDiscover ? discoverIgnoredCard : (x) => discoverCard(x, profile));
+      body = `<div class="crrav-grid${useList ? ' crrav-list' : ''}">${list.map(cardFn).join('')}</div>`;
+    }
+
+    return `
+        <p class="crrav-warn" style="background:rgba(159,214,255,.1);border-color:rgba(159,214,255,.3);color:#9fd6ff">
+          Séries populaires que tu n'as jamais regardées, absentes de toutes tes listes,
+          avec au plus ${CFG.discoverMaxSeasons} saisons et notées ${CFG.discoverMinRating}★ ou plus
+          ${CFG.discoverExcludeCategories.length ? `(hors ${CFG.discoverExcludeCategories.join(', ')})` : ''}.
+        </p>
+        ${simActive ? `
+        <div class="crrav-simbar">
+          <span class="crrav-simbar-txt">${sim.genres.length
+            ? `🪄 Proches de « <b>${escapeHtml(sim.title)}</b> » · ${sim.genres.map(escapeHtml).join(', ')}`
+            : `🪄 Genres de « <b>${escapeHtml(sim.title)}</b> » introuvables — séries populaires que tu n'as pas vues`}</span>
+          <button class="crrav-simbar-x" data-act="clear-similar" title="Réinitialiser la découverte" aria-label="Réinitialiser">✕</button>
+        </div>` : ''}
+        ${list.length && !f.showIgnoredDiscover ? `
+        <div class="crrav-siglegend">
+          <span class="crrav-siglegend-title">Ce que veulent dire les couleurs</span>
+          ${profile.size ? `<span class="crrav-siglegend-chip crrav-sig-pref" title="Un de tes 3 genres les plus regardés">🎯 genre préféré</span>
+          <span class="crrav-siglegend-chip crrav-sig-aff" title="Colle à tes genres les plus regardés">💚 dans tes goûts</span>` : ''}
+          <span class="crrav-siglegend-chip crrav-sig-rated" title="Note bien au-dessus du minimum">🏆 très bien notée</span>
+          <span class="crrav-siglegend-chip crrav-sig-pop" title="Tout en haut du classement popularité">🔥 très populaire</span>
+        </div>` : ''}
+        ${D.warning ? `<p class="crrav-warn">${escapeHtml(D.warning)}</p>` : ''}
+        <div class="crrav-stats">
+          <div class="crrav-stat"><b>${list.length}</b><small>pépites trouvées</small></div>
+          <div class="crrav-stat hot"><b>${list.reduce((a, s) => a + (s.episodes || 0), 0)}</b><small>épisodes à voir</small></div>
+          <div class="crrav-stat"><b>${fmtDuration(list.reduce((a, s) => a + (s.secTotal || 0), 0))}</b><small>à regarder</small></div>
+        </div>
+        <div class="crrav-controls">
+          <select class="crrav-select" data-act="sort" data-scope="discover">
+            <option value="relevance"${f.discoverSort === 'relevance' ? ' selected' : ''}>Pertinence (signaux + note)</option>
+            <option value="popularity"${f.discoverSort === 'popularity' ? ' selected' : ''}>Popularité</option>
+            <option value="seasons"${f.discoverSort === 'seasons' ? ' selected' : ''}>Le moins de saisons</option>
+            <option value="duration"${f.discoverSort === 'duration' ? ' selected' : ''}>Le moins de temps à voir</option>
+            <option value="recent"${f.discoverSort === 'recent' ? ' selected' : ''}>Publication récente</option>
+            <option value="oldest"${f.discoverSort === 'oldest' ? ' selected' : ''}>Publication ancienne</option>
+            <option value="seasonsDesc"${f.discoverSort === 'seasonsDesc' ? ' selected' : ''}>Le plus de saisons</option>
+            <option value="durationDesc"${f.discoverSort === 'durationDesc' ? ' selected' : ''}>Le plus de temps à voir</option>
+            <option value="episodes"${f.discoverSort === 'episodes' ? ' selected' : ''}>Le plus d'épisodes</option>
+            <option value="title"${f.discoverSort === 'title' ? ' selected' : ''}>Titre A→Z</option>
+            <option value="titleDesc"${f.discoverSort === 'titleDesc' ? ' selected' : ''}>Titre Z→A</option>
+          </select>
+          ${!D.loading && D.series.length && !f.showIgnoredDiscover
+            ? '<button class="crrav-sync" data-act="more-discover">🔄 30 autres pépites</button>'
+            : ''}
+          ${!D.loading && !f.showIgnoredDiscover
+            ? `<button class="crrav-sync" data-act="legendary-discover"
+                 title="Scanne beaucoup plus profond dans le classement popularité pour dénicher spécifiquement des pépites légendaires (3 signaux ou plus)"><span class="crrav-dice-gold">🎲</span> ${
+                D.legendaryHunt ? 'Encore des légendaires' : 'Dé légendaire'}</button>`
+            : ''}
+          <div class="crrav-chips">
+            <button class="crrav-chip" data-toggle="showIgnoredDiscover" aria-pressed="${f.showIgnoredDiscover}"
+              title="Affiche uniquement les pépites que tu as ignorées ici, pour les restaurer"
+              >Ignorées${ignoredCount('discover') ? ` (${ignoredCount('discover')})` : ''}</button>
+          </div>
+          ${cats.length && !f.showIgnoredDiscover ? `<div class="crrav-chips">
+            <span class="crrav-catlegend">Genres — 1 clic&nbsp;: garder · 2 clics&nbsp;: exclure</span>
+            ${cats.map((c) => {
+              const inc = f.discoverCatsIn.includes(c);
+              const exc = f.discoverCatsEx.includes(c);
+              const st = inc ? 'in' : exc ? 'ex' : '';
+              return `<button class="crrav-chip crrav-cat ${st}" data-cat="${escapeHtml(c)}"
+                aria-pressed="${inc || exc}"
+                title="${inc ? 'Gardé : seules ces séries s’affichent' : exc ? 'Exclu' : 'Cliquer pour ne garder que ce genre'}"
+                >${inc ? '✓ ' : exc ? '✕ ' : ''}${escapeHtml(c)}</button>`;
+            }).join('')}
+            ${f.discoverCatsIn.length || f.discoverCatsEx.length
+              ? '<button class="crrav-chip" data-act="cats-clear">Réinitialiser</button>' : ''}
+          </div>` : ''}
+          ${!D.loading && D.series.length && D.searchedFilters !== undefined
+            && D.searchedFilters !== genreFilterKey()
+            ? `<button class="crrav-relaunch" data-act="relaunch-discover"
+                 >🔎 Relancer la recherche avec ces genres</button>` : ''}
+        </div>
+      </div>
+      ${body}
+      <div class="crrav-foot">${D.lastSync
+        ? `Synchronisé à ${D.lastSync.toLocaleTimeString('fr-FR')}`
+        : ''}</div>`;
+  }
+
+  function renderOrphelines() {
+    const O = STATE.orphan;
+    const f = STATE.filters;
+    const list = visibleOrphelines();
+    const totalRemaining = list.reduce((a, s) => a + s.remaining, 0);
+    const secLeft = list.reduce((a, s) => a + s.secLeft, 0);
+
+    let body;
+    if (O.loading) {
+      body = `<div class="crrav-grid">${Array.from({ length: 12 },
+        () => '<div class="crrav-skel"><div></div></div>').join('')}</div>
+        <div class="crrav-foot">${escapeHtml(progressMsg)}</div>`;
+    } else if (O.error) {
+      body = `<div class="crrav-msg"><h3>Ça n'a pas marché</h3><p>${escapeHtml(O.error)}</p>
+        <button data-act="retry">Réessayer</button></div>`;
+    } else if (!list.length) {
+      body = `<div class="crrav-msg"><h3>Rien à afficher</h3>
+        <p>${O.series.length
+          ? 'Aucune série ne correspond à cette recherche.'
+          : "Aucune série entamée hors de tes listes pour l'instant."}</p></div>`;
+    } else {
+      body = `<div class="crrav-grid${STATE.filters.view === 'list' ? ' crrav-list' : ''}">${list.map(card).join('')}</div>`;
+    }
+
+    return `
+        <p class="crrav-warn" style="background:rgba(159,214,255,.1);border-color:rgba(159,214,255,.3);color:#9fd6ff">
+          Séries dont tu as vu au moins un épisode mais qui ne sont dans aucune de tes listes
+          (watchlist ou Crunchylists), et qu'il te reste à finir.
+        </p>
+        ${O.warning ? `<p class="crrav-warn">${escapeHtml(O.warning)}</p>` : ''}
+        <div class="crrav-stats">
+          <div class="crrav-stat"><b>${list.length}</b><small>séries</small></div>
+          <div class="crrav-stat hot"><b>${totalRemaining}</b><small>épisodes restants</small></div>
+          <div class="crrav-stat"><b>${fmtDuration(secLeft)}</b><small>à regarder</small></div>
+        </div>
+        <div class="crrav-controls">
+          <select class="crrav-select" data-act="sort" data-scope="orphan">
+            <option value="remaining"${f.orphanSort === 'remaining' ? ' selected' : ''}>Le plus d'épisodes à voir</option>
+            <option value="time"${f.orphanSort === 'time' ? ' selected' : ''}>Le plus de temps à voir</option>
+            <option value="quickest"${f.orphanSort === 'quickest' ? ' selected' : ''}>Finissable ce soir</option>
+            <option value="closest"${f.orphanSort === 'closest' ? ' selected' : ''}>Bientôt fini</option>
+            <option value="progress"${f.orphanSort === 'progress' ? ' selected' : ''}>Progression</option>
+            <option value="lastWatched"${f.orphanSort === 'lastWatched' ? ' selected' : ''}>Dernier vu</option>
+            <option value="recent"${f.orphanSort === 'recent' ? ' selected' : ''}>Publication récente</option>
+            <option value="oldest"${f.orphanSort === 'oldest' ? ' selected' : ''}>Publication ancienne</option>
+            <option value="leastProgress"${f.orphanSort === 'leastProgress' ? ' selected' : ''}>Les plus délaissées</option>
+            <option value="longest"${f.orphanSort === 'longest' ? ' selected' : ''}>Série la plus longue</option>
+            <option value="shortest"${f.orphanSort === 'shortest' ? ' selected' : ''}>Série la plus courte</option>
+            <option value="title"${f.orphanSort === 'title' ? ' selected' : ''}>Titre A→Z</option>
+            <option value="titleDesc"${f.orphanSort === 'titleDesc' ? ' selected' : ''}>Titre Z→A</option>
+          </select>
+          <div class="crrav-chips">${quickChips(f)}</div>
+          ${catChips(categoriesOf(STATE.orphan.series), f.orphanCatsIn, f.orphanCatsEx, 'orphan')}
+        </div>
+      </div>
+      ${body}
+      <div class="crrav-foot">${O.lastSync
+        ? `Synchronisé à ${O.lastSync.toLocaleTimeString('fr-FR')}`
+        : ''}</div>`;
+  }
+
+  // (1) formulaire de réglages : évite d'éditer le fichier à la main.
+  // (28) Réglages regroupés par thème (au lieu d'une seule longue grille) — chaque
+  // groupe reprend le tag `impact` déjà présent dans SETTINGS_SCHEMA, donc aucune
+  // duplication d'info à maintenir. Repliables comme les accordéons de Stats (même
+  // mécanisme, même Set de persistance) : ouverts par défaut sauf sur petit écran.
+  const SETTINGS_GROUPS = [
+    { key: 'suivi', icon: '📺', label: 'Suivi & visionnage' },
+    { key: 'discover', icon: '🧭', label: 'Découverte' },
+    { key: 'newpremieres', icon: '🆕', label: 'Calendrier — Nouveautés' },
+    { key: 'anilist', icon: '🗓', label: 'AniList' },
+    { key: 'history', icon: '🕘', label: 'Historique' },
+    { key: 'display', icon: '⚙', label: 'Affichage & performance' },
+  ];
+
+  // Univers des genres pour la checklist « genres exclus » : union des genres réellement
+  // rencontrés dans les données chargées (donc des libellés EXACTS, comparables au filtre)
+  // + les genres déjà exclus même s'ils n'apparaissent pas (ex. « hentai », filtré ailleurs).
+  function knownGenres() {
+    const loaded = categoriesOf([
+      ...STATE.series, ...STATE.orphan.series, ...STATE.discover.series,
+      ...((STATE.newPremieres && STATE.newPremieres.series) || []),
+    ]);
+    const byLow = new Map();
+    for (const c of loaded) { const l = c.toLowerCase(); if (!byLow.has(l)) byLow.set(l, c); }
+    for (const ex of (CFG.discoverExcludeCategories || [])) {
+      const l = String(ex).toLowerCase();
+      if (!byLow.has(l)) byLow.set(l, l.charAt(0).toUpperCase() + l.slice(1));
+    }
+    return [...byLow.entries()].sort((a, b) => a[1].localeCompare(b[1], 'fr'));
+  }
+
+  // (31) Genres exclus : case à cocher plutôt qu'un champ texte à virgules. La valeur
+  // reste portée par un <input data-set> caché (source de vérité lue par collectSettings).
+  function genreChecklistHtml(f) {
+    const excluded = new Set((CFG.discoverExcludeCategories || []).map((c) => String(c).toLowerCase()));
+    const items = knownGenres();
+    const value = [...excluded].join(', ');
+    const chips = items.length ? items.map(([low, lab]) => {
+      const on = excluded.has(low);
+      return `<label class="crrav-genre${on ? ' on' : ''}">
+        <input type="checkbox" class="crrav-genre-cb" value="${escapeHtml(low)}"${on ? ' checked' : ''}>
+        <span>${escapeHtml(lab)}</span></label>`;
+    }).join('') : `<span class="crrav-genre-empty">Les genres apparaîtront ici au fur et à mesure du chargement de tes séries et de la Découverte.</span>`;
+    return `<div class="crrav-field crrav-genrefield">
+      <label>${escapeHtml(f.label)}</label>
+      ${f.help ? `<small>${escapeHtml(f.help)}</small>` : ''}
+      <div class="crrav-genrelist" role="group" aria-label="${escapeHtml(f.label)}">${chips}</div>
+      <div class="crrav-genreadd">
+        <input type="text" class="crrav-genre-more" placeholder="Ajouter un genre…"
+          aria-label="Ajouter un genre à exclure" autocomplete="off">
+        <button type="button" class="crrav-btn ghost crrav-genre-addbtn">Ajouter</button>
+      </div>
+      <input type="text" class="crrav-genre-hidden" data-set="${f.key}" value="${escapeHtml(value)}" hidden>
+    </div>`;
+  }
+
+  function settingsFieldHtml(f) {
+    const val = CFG[f.key];
+    const id = `crrav-set-${f.key}`;
+    const help = f.help ? `<small>${escapeHtml(f.help)}</small>` : '';
+    if (f.type === 'bool') {
+      return `<label class="crrav-field bool">
+        <input type="checkbox" id="${id}" data-set="${f.key}"${val ? ' checked' : ''}>
+        <span>${escapeHtml(f.label)}</span></label>`;
+    }
+    if (f.type === 'list') {
+      // Seul champ « list » aujourd'hui : les genres exclus, rendus en cases à cocher.
+      if (f.key === 'discoverExcludeCategories') return genreChecklistHtml(f);
+      return `<div class="crrav-field"><label for="${id}">${escapeHtml(f.label)}</label>
+        <input type="text" id="${id}" data-set="${f.key}" value="${escapeHtml((val || []).join(', '))}">
+        ${help}</div>`;
+    }
+    if (f.type === 'listselect') {
+      const L = STATE.myLists;
+      if (!L.items.length && !L.loading) ensureMyListsLoaded();
+      const opts = L.loading && !L.items.length
+        ? `<option value="">Chargement de tes listes…</option>`
+        : !L.items.length
+          ? `<option value="">Aucune Crunchylist détectée</option>`
+          : L.items.map((l) => `<option value="${escapeHtml(l.id)}"${l.id === val ? ' selected' : ''}>${escapeHtml(l.title)}</option>`).join('');
+      return `<div class="crrav-field"><label for="${id}">${escapeHtml(f.label)}</label>
+        <select id="${id}" class="crrav-select" data-set="${f.key}">${opts}</select>
+        ${help}</div>`;
+    }
+    // (31) Note minimale : curseur avec étoiles plutôt qu'un champ à taper.
+    if (f.key === 'discoverMinRating') {
+      return `<div class="crrav-field crrav-ratingfield">
+        <label for="${id}">${escapeHtml(f.label)}</label>
+        <div class="crrav-rangewrap">
+          <input type="range" class="crrav-rangeinput" id="${id}" data-set="${f.key}"
+            value="${val}" min="${f.min}" max="${f.max}" step="${f.step ?? 0.5}"
+            aria-label="${escapeHtml(f.label)}">
+          <output class="crrav-rangeval" for="${id}"></output>
+        </div>
+        ${help}</div>`;
+    }
+    // (31) Champs numériques : boutons − / + pour incrémenter au doigt, + suffixe d'unité.
+    const shown = f.type === 'percent' ? Math.round(val * 100) : val;
+    const unit = f.type === 'percent' ? '%' : (f.unit || '');
+    const step = f.step ?? 1;
+    return `<div class="crrav-field">
+      <label for="${id}">${escapeHtml(f.label)}</label>
+      <div class="crrav-numwrap">
+        <button type="button" class="crrav-step" data-step-dir="down" aria-label="Diminuer" tabindex="-1">−</button>
+        <input type="number" id="${id}" data-set="${f.key}" value="${shown}"
+          ${f.min != null ? `min="${f.type === 'percent' ? f.min : f.min}"` : ''} ${f.max != null ? `max="${f.max}"` : ''}
+          step="${step}" inputmode="${step < 1 ? 'decimal' : 'numeric'}">
+        ${unit ? `<span class="crrav-unit">${escapeHtml(unit)}</span>` : ''}
+        <button type="button" class="crrav-step" data-step-dir="up" aria-label="Augmenter" tabindex="-1">+</button>
+      </div>
+      ${help}</div>`;
+  }
+
+  // (30) Recherche interne aux Réglages : filtre les champs par mot-clé (accent-insensible via
+  // aniNorm), masque les groupes sans correspondance et les déplie pour montrer les résultats,
+  // et neutralise les sections annexes (maintenance, séries ignorées, diagnostic) le temps de la
+  // recherche. Pur filtrage DOM : aucun re-render, le focus reste dans le champ.
+  function applySettingsFilter(input) {
+    if (!input) return;
+    settingsSearchQ = input.value;
+    const q = aniNorm(input.value);
+    const active = !!q;
+    const settingsRoot = input.closest('.crrav-settings');
+    if (!settingsRoot) return;
+    const scrollRoot = input.closest('.crrav-sheetbody') || settingsRoot.parentElement;
+
+    const clr = settingsRoot.querySelector('.crrav-setsearch-clear');
+    if (clr) clr.style.display = input.value ? '' : 'none';
+
+    const sgroups = settingsRoot.querySelector('.crrav-sgroups');
+    let anyVisible = false;
+    suppressAccToggle = true;
+    if (sgroups) {
+      sgroups.querySelectorAll(':scope > .crrav-setgroup').forEach((g) => {
+        let vis = 0;
+        g.querySelectorAll('.crrav-field').forEach((fld) => {
+          const show = !q || aniNorm(fld.textContent).includes(q);
+          fld.style.display = show ? '' : 'none';
+          if (show) vis++;
+        });
+        g.style.display = vis > 0 ? '' : 'none';
+        if (vis > 0) anyVisible = true;
+        if (active) g.open = true;
+        else g.open = statsAccordionOpen.has(g.dataset.acc) || window.innerWidth > 600;
+      });
+    }
+    suppressAccToggle = false;
+
+    const maint = settingsRoot.querySelector('.crrav-maint');
+    if (maint) maint.style.display = active ? 'none' : '';
+    if (scrollRoot) {
+      scrollRoot.querySelectorAll('.crrav-settings').forEach((el) => {
+        if (el !== settingsRoot) el.style.display = active ? 'none' : '';
+      });
+    }
+
+    let empty = settingsRoot.querySelector('.crrav-setsearch-empty');
+    if (active && !anyVisible && sgroups) {
+      if (!empty) {
+        empty = document.createElement('div');
+        empty.className = 'crrav-setsearch-empty';
+        sgroups.appendChild(empty);
+      }
+      empty.textContent = 'Aucun réglage ne correspond à « ' + input.value.trim() + ' ».';
+      empty.style.display = '';
+    } else if (empty) {
+      empty.style.display = 'none';
+    }
+  }
+
+  function settingsPanel() {
+    const compact = window.innerWidth <= 600;
+    const groups = SETTINGS_GROUPS.map((g) => {
+      const fs = SETTINGS_SCHEMA.filter((f) => f.impact === g.key);
+      if (!fs.length) return '';
+      const id = 'set-' + g.key;
+      const open = !compact || statsAccordionOpen.has(id);
+      return `<details class="crrav-accordion crrav-setgroup" data-acc="${id}" ${open ? 'open' : ''}>
+        <summary>
+          <span class="crrav-sg-ico">${g.icon}</span>
+          <span class="crrav-sg-lab">${g.label}</span>
+          <span class="crrav-sg-n">${fs.length}</span>
+        </summary>
+        <div class="crrav-accordion-body">
+          <div class="crrav-sgrid">${fs.map(settingsFieldHtml).join('')}</div>
+        </div>
+      </details>`;
+    }).join('');
+
+    const maintOpen = statsAccordionOpen.has('set-maint');
+    return `<div class="crrav-settings">
+      <h3>Réglages</h3>
+      <div class="crrav-setsearch">
+        <span class="crrav-setsearch-ico" aria-hidden="true">🔍</span>
+        <input type="text" class="crrav-setsearch-input" placeholder="Rechercher un réglage…"
+          value="${escapeHtml(settingsSearchQ)}" aria-label="Rechercher un réglage" autocomplete="off">
+        <button type="button" class="crrav-setsearch-clear" aria-label="Effacer la recherche"
+          style="display:none">✕</button>
+      </div>
+      <div class="crrav-sgroups">${groups}</div>
+      <div class="crrav-sactions crrav-sactions-primary">
+        <button class="crrav-btn primary" data-act="settings-save">Enregistrer et actualiser</button>
+        <button class="crrav-btn ghost" data-act="settings-reset">Valeurs par défaut</button>
+      </div>
+
+      <details class="crrav-accordion crrav-setgroup crrav-maint" data-acc="set-maint"${maintOpen ? ' open' : ''}>
+        <summary>🧰 Sauvegarde &amp; cache <small style="font-weight:500;color:#8a8a94">— export, import, vider le cache</small></summary>
+        <div class="crrav-accordion-body">
+          <section class="crrav-setcard">
+            <div class="crrav-setcard-h">
+              <span class="crrav-setcard-t">💾 Sauvegarde des réglages</span>
+            </div>
+            <p class="crrav-setcard-note">L'export contient tes réglages, filtres et séries ignorées
+              (pas le cache). Sert à retrouver ta configuration sur un autre appareil : le stockage du
+              navigateur est propre à chaque appareil et n'est jamais synchronisé.</p>
+            <div class="crrav-setcard-btns">
+              <button class="crrav-btn ghost" data-act="export-settings">⬇ Exporter</button>
+              <button class="crrav-btn ghost" data-act="import-settings">⬆ Importer</button>
+            </div>
+            <input type="file" accept="application/json,.json" data-import-file hidden>
+          </section>
+
+          <section class="crrav-setcard danger">
+            <div class="crrav-setcard-h">
+              <span class="crrav-setcard-t">🗑 Cache mémorisé</span>
+            </div>
+            <p class="crrav-setcard-note">Supprime les épisodes, notes et historiques mémorisés — mais
+              garde tes réglages, tes filtres et tes séries ignorées. Le rechargement suivant sera plus long.</p>
+            <div class="crrav-setcard-btns">
+              <button class="crrav-btn danger" data-act="clear-cache">Vider le cache</button>
+            </div>
+          </section>
+        </div>
+      </details>
+    </div>`;
+  }
+
+  // Diagnostic ouverture appli (voir crUrl) : entièrement synchrone, rien à charger — permet
+  // de voir depuis les Réglages, sans console (inaccessible sur téléphone), ce que le script
+  // détecte réellement sur cet appareil pour décider d'utiliser ou non l'intent Android.
+  function renderAppLinkDiag() {
+    const pill = (status, label) => `<span class="crrav-diag-badge ${status}" style="font-size:11px;padding:5px 10px">${label}</span>`;
+    const standalone = window.matchMedia('(display-mode: standalone)').matches;
+    let pills = pill(IS_ANDROID ? 'ok' : 'warn', IS_ANDROID ? '✅ Android détecté' : '⚠️ Android non détecté');
+    pills += pill(CFG.openInApp ? 'ok' : 'err', CFG.openInApp ? '✅ réglage activé' : '❌ réglage désactivé');
+    pills += pill('warn', standalone ? '📱 PWA installée (mode application)' : '🌐 onglet navigateur');
+    const sample = crSeriesUrl('G6497W726', 'test');
+    let h = `<div class="crrav-diag-summary" style="margin:10px 0 4px">${pills}</div>`;
+    h += `<p class="crrav-diagcard-note" style="margin:0;word-break:break-all">User-agent : ${escapeHtml(navigator.userAgent)}</p>`;
+    h += `<p class="crrav-diagcard-note" style="margin:2px 0 0;word-break:break-all">Lien généré pour une série : ${escapeHtml(sample)}</p>`;
+    if (!IS_ANDROID) {
+      h += `<p class="crrav-diagcard-note" style="margin:6px 0 0">Android non détecté par le user-agent : le lien reste en https:// classique quoi que fasse le réglage — c'est le comportement normal hors Android.</p>`;
+    } else if (!CFG.openInApp) {
+      h += `<p class="crrav-diagcard-note" style="margin:6px 0 0">Coche « Forcer l'ouverture dans l'appli Crunchyroll » plus haut dans les Réglages pour l'activer.</p>`;
+    } else {
+      const httpsBrut = 'https://www.crunchyroll.com/fr/series/G6497W726/test';
+      h += `<p class="crrav-diagcard-note" style="margin:6px 0 0">Tout est en place côté script : le lien intent est correct (il ouvre l'appli en onglet Edge classique). En PWA installée, le déclenchement dépend de conditions précises côté navigateur. Teste les 3 méthodes ci-dessous — un vrai appui sur chaque lien — et retiens celle qui ouvre l'appli Crunchyroll :</p>`;
+      const linkBtn = (label, href, blank) =>
+        `<a class="crrav-btn" data-applink-raw href="${escapeHtml(href)}"${blank ? ' target="_blank" rel="noopener"' : ''}`
+        + ` style="display:block;text-align:center;text-decoration:none;margin:6px 0">${label}</a>`;
+      h += `<div style="margin-top:8px">`
+        + linkBtn('🅐 intent:// + nouvel onglet (_blank)', sample, true)
+        + linkBtn('🅑 intent:// sans _blank', sample, false)
+        + linkBtn('🅒 lien https + nouvel onglet (_blank)', httpsBrut, true)
+        + `</div>`;
+      h += `<p class="crrav-diagcard-note" style="margin:8px 0 0">Note : la 🅒 s'appuie sur les App Links vérifiés de Crunchyroll (l'appli intercepte le lien https si Android l'y autorise). Compare aussi hors PWA (onglet Edge) pour isoler ce qui vient du mode application.</p>`;
+    }
+    return h;
+  }
+
+  // (28) Diagnostic entièrement à part des réglages courants : replié par défaut (quel
+  // que soit l'écran), pour ne jamais encombrer ce qu'on vient régler au quotidien.
+  // C'est de l'outillage de dépannage — utile en cas de pépin, pas à chaque visite.
+  function diagnosticPanel() {
+    const open = statsAccordionOpen.has('set-diag');
+    const detailOpen = statsAccordionOpen.has('set-diag-detail');
+    return `<div class="crrav-settings crrav-diagsection">
+      <details class="crrav-accordion crrav-setgroup" data-acc="set-diag" ${open ? 'open' : ''}>
+        <summary>🩺 Diagnostic <small style="font-weight:500;color:#8a8a94">— dépannage, pas nécessaire au quotidien</small></summary>
+        <div class="crrav-accordion-body">
+
+          <div class="crrav-fulldiag-cta">
+            <h3 style="margin:0 0 8px">Diagnostic complet</h3>
+            <p>Enchaîne tous les tests utiles en un clic — session, historique, AniList,
+              découpage en saisons, stockage local — et affiche un rapport unique et
+              détaillé ci-dessous. C'est le premier réflexe en cas de souci ; les tests
+              ciblés plus bas ne servent qu'à creuser un point précis ensuite.</p>
+            <button class="crrav-btn primary" data-act="full-diag"${STATE.fullDiagRunning ? ' disabled' : ''}>
+              ${STATE.fullDiagRunning ? '⏳ Diagnostic en cours…' : '🩺 Lancer le diagnostic complet'}</button>
+            ${renderFullDiagnosticReport()}
+          </div>
+
+          <details class="crrav-accordion" data-acc="set-diag-detail" ${detailOpen ? 'open' : ''} style="margin-top:18px">
+            <summary>Tests individuels <small style="font-weight:500;color:#8a8a94">— pour cibler une série précise</small></summary>
+            <div class="crrav-accordion-body">
+
+              <div class="crrav-probe">
+                <h3>Diagnostic — historique de visionnage</h3>
+                <p>Vérifie combien d'entrées ton historique Crunchyroll contient réellement.
+                  Sans rapport avec ta watchlist (tes séries suivies), qui est toujours lue en entier.</p>
+                <button class="crrav-btn" data-act="probe-history"${STATE.probeRunning ? ' disabled' : ''}>
+                  ${STATE.probeRunning ? '⏳ Test en cours…' : '🔍 Analyser mon historique'}</button>
+                ${renderProbeResult()}
+              </div>
+
+              <div class="crrav-probe">
+                <h3>Diagnostic — AniList (total prévu / fin de saison)</h3>
+                <p>Teste EN DIRECT la récupération du total d'épisodes et de la date de fin sur
+                  AniList, pour la série de ton choix. Si le titre affiché (parfois en français)
+                  ne matche rien, le script retente automatiquement avec le titre anglais de la
+                  même série (redemandé à Crunchyroll) — Crunchyroll ne fournit pas d'identifiant
+                  direct vers AniList/MAL/AniDB, donc le rapprochement reste par titre, mais en
+                  anglais il colle presque toujours bien mieux qu'en français.</p>
+                ${anilistStatusReadout()}
+                ${anilistDiagSeriesSelect()}
+                <button class="crrav-btn" data-act="probe-anilist"${STATE.anilistDiagRunning ? ' disabled' : ''}>
+                  ${STATE.anilistDiagRunning ? '⏳ Test en cours…' : '🔬 Tester AniList'}</button>
+                ${renderAnilistDiag()}
+              </div>
+
+              <div class="crrav-probe">
+                <h3>Diagnostic — découpage en saisons (Crunchyroll)</h3>
+                <p>Le « S6 » affiché sur une carte n'est PAS le numéro de saison brut de
+                  Crunchyroll : c'est le rang parmi les groupes d'épisodes distincts trouvés
+                  (voir ticks/calendrier). Si Crunchyroll découpe une saison officielle en
+                  plusieurs blocs (parties, cours), ce rang grimpe plus vite que le numéro de
+                  saison « grand public ». Ce tableau montre les groupes bruts, sans y toucher —
+                  même sélecteur de série que le diagnostic AniList ci-dessus.</p>
+                ${renderSeasonDiag()}
+              </div>
+
+              <div class="crrav-probe">
+                <h3>Diagnostic — ouverture de l'appli Crunchyroll</h3>
+                <p>Ce que le script détecte sur cet appareil/navigateur pour décider s'il doit
+                  rediriger les liens série/épisode vers l'appli Crunchyroll (voir le réglage
+                  plus haut). Utile sans avoir à ouvrir la console — impossible sur téléphone.</p>
+                ${renderAppLinkDiag()}
+              </div>
+
+            </div>
+          </details>
+
+        </div>
+      </details>
+    </div>`;
+  }
+
+  // Diagnostic saisons : entièrement local (les épisodes sont déjà en mémoire), donc pas
+  // de bouton ni de requête — se recalcule à chaque rendu selon la série sélectionnée
+  // dans anilistDiagSeriesSelect(). Montre pour chaque season_number BRUT de Crunchyroll
+  // le nombre d'épisodes, leur plage de numéros, et le rang qu'on lui attribue (celui
+  // affiché « S{rang} » sur les cartes/calendrier — voir distinctSeasons ailleurs).
+  function renderSeasonDiag() {
+    const s = (STATE.series || []).find((x) => x.id === STATE.anilistDiagTargetId);
+    if (!s) return `<div class="crrav-diagcard warn">
+      <div class="crrav-diagcard-head"><span class="ic">⚠</span>Choisis une série ci-dessus (diagnostic AniList)</div>
+    </div>`;
+    const groups = new Map();
+    for (const e of s.episodes) {
+      if (!groups.has(e.season)) groups.set(e.season, []);
+      groups.get(e.season).push(e);
+    }
+    const distinct = [...groups.keys()].sort((a, b) => a - b);
+    if (!distinct.length) return `<div class="crrav-diagcard warn">
+      <div class="crrav-diagcard-head"><span class="ic">⚠</span>Aucun épisode chargé pour cette série</div>
+    </div>`;
+    const lastSeenSeason = s.lastSeen ? s.lastSeen.season : null;
+    let rows = '';
+    distinct.forEach((raw, i) => {
+      const eps = groups.get(raw).sort((a, b) => (a.n || 0) - (b.n || 0));
+      const nums = eps.map((e) => e.n || 0);
+      const rank = i + 1;
+      const isCurrent = raw === lastSeenSeason;
+      rows += `<div class="crrav-diagrow${isCurrent ? ' chosen' : ''}">
+        <span>${isCurrent ? '📍 ' : ''}<span class="rank">S${rank}</span>
+          season_number brut ${escapeHtml(String(raw))}</span>
+        <small>${eps.length} épisode${eps.length > 1 ? 's' : ''} · E${Math.min(...nums)} à E${Math.max(...nums)}${
+          isCurrent ? ' · 📍 dernier vu ici' : ''}</small></div>`;
+    });
+    return `<div class="crrav-diagcard ok">
+      <div class="crrav-diagcard-head"><span class="ic">🗂️</span>${distinct.length} groupe${distinct.length > 1 ? 's' : ''}
+        de saisons détecté${distinct.length > 1 ? 's' : ''} pour « ${escapeHtml(s.title)} »</div>
+      <p class="crrav-diagcard-note">Le rang « S{n} » en gras est celui affiché sur les cartes/le calendrier —
+        pas forcément le season_number brut de Crunchyroll, indiqué à côté.</p>
+      <div class="crrav-diagtbl" style="margin-top:8px">${rows}</div>
+    </div>`;
+  }
+
+  // Liste déroulante des séries en diffusion, pour choisir laquelle diagnostiquer —
+  // plutôt que de toujours tester la même par défaut (Tsugai).
+  function anilistDiagSeriesSelect() {
+    const airing = (STATE.series || []).filter((s) => s.airing)
+      .sort((a, b) => a.title.localeCompare(b.title, 'fr'));
+    if (!airing.length) return '';
+    if (!STATE.anilistDiagTargetId || !airing.some((s) => s.id === STATE.anilistDiagTargetId)) {
+      STATE.anilistDiagTargetId = airing[0].id;
+    }
+    const opts = airing.map((s) =>
+      `<option value="${escapeHtml(s.id)}"${s.id === STATE.anilistDiagTargetId ? ' selected' : ''}>${
+        escapeHtml(s.title)}</option>`).join('');
+    return `<select class="crrav-select" data-act="diag-select-series" style="margin:6px 0">${opts}</select>`;
+  }
+
+  // Diagnostic AniList affiché À L'ÉCRAN (console inaccessible sur mobile) : lance la
+  // requête en direct et rapporte chaque étape (requête OK/bloquée, candidats, match,
+  // total, date). Révèle notamment un blocage CSP (requête « échec ») vs un simple
+  // non-match vs un total absent côté AniList.
+  async function runAnilistDiag() {
+    STATE.anilistDiagRunning = true;
+    STATE.anilistDiag = null;
+    forceRender();
+    const d = { steps: [] };
+    try {
+      const airingPool = STATE.series.filter((s) => s.airing);
+      const target = (STATE.anilistDiagTargetId && STATE.series.find((s) => s.id === STATE.anilistDiagTargetId))
+        || STATE.series.find((s) => /tsugai|daemon/i.test(s.title)) || airingPool[0] || STATE.series[0];
+      if (!target) { d.error = "Aucune série chargée. Ouvre d'abord « Reste à voir »."; }
+      else {
+        d.title = target.title;
+        d.airing = target.airing;
+        d.total = target.total;
+        d.settingOn = !!CFG.anilistSchedule;
+        const o = cacheReadRaw('anilist:' + target.id);
+        d.cache = o ? { av: o.v && o.v.av, matched: o.v && o.v.matched,
+          planned: o.v && o.v.plannedTotal, ageMin: Math.round((Date.now() - o.ts) / 60000) } : null;
+        let media = null;
+        try {
+          const res = await anilistSearch(target.title);
+          media = res.media; d.fetch = 'ok'; anilistClearCooldown(); d.terms = res.terms; d.perTerm = res.perTerm;
+        } catch (e) { d.fetch = 'échec'; d.fetchError = (e && (e.message || String(e))) || 'inconnue'; d.fetchStatus = (e && e.httpStatus) || null; }
+        if (media) {
+          let best = aniPickMatch(media, target);   // remplit __titleScore
+          let scoredAgainst = target;
+          if (!best) {
+            const enTitle = await getSeriesEnglishTitle(target.id);
+            d.enTitle = enTitle || '(aucun titre anglais renvoyé par Crunchyroll)';
+            if (enTitle && aniNorm(enTitle) !== aniNorm(target.title)) {
+              try {
+                const res2 = await anilistSearch(enTitle);
+                d.enTerms = res2.terms;
+                const seen = new Set(media.map((m) => m.id));
+                for (const m of res2.media) if (!seen.has(m.id)) { seen.add(m.id); media.push(m); }
+                scoredAgainst = { ...target, title: enTitle };
+                best = aniPickMatch(media, scoredAgainst);
+              } catch (e) { d.enFetchError = (e && (e.message || String(e))) || 'inconnue'; }
+            }
+          }
+          d.candidateCount = media.length;
+          d.candidates = media.slice(0, 6).map((m) => ({
+            titre: aniPrimaryTitle(m) || (m.title && m.title.romaji) || '?',
+            statut: m.status, episodes: m.episodes, annee: m.startDate && m.startDate.year,
+            score: (m.__titleScore || 0).toFixed(2), chosen: !!(best && m.id === best.id),
+          }));
+          if (best) {
+            const sch = computeAniSchedule(best, target);
+            d.match = aniPrimaryTitle(best);
+            d.matchedVia = scoredAgainst === target ? 'titre affiché' : 'titre anglais (repli CR)';
+            d.planned = sch.plannedTotal;
+            d.end = sch.seasonEndTs ? new Date(sch.seasonEndTs).toLocaleDateString('fr-FR') : null;
+            d.approx = sch.plannedApprox;
+            d.nextEp = sch.nextEpNum;
+            d.schedNodes = ((best.airingSchedule && best.airingSchedule.nodes) || []).length;
+          } else { d.match = null; }
+        }
+      }
+    } catch (e) { d.error = e && (e.message || String(e)); }
+    finally {
+      STATE.anilistDiag = d;
+      STATE.anilistDiagRunning = false;
+      forceRender();
+    }
+  }
+
+  // État AniList affiché en permanence (pas besoin de lancer le test). Sur mobile, c'est le
+  // moyen sûr de vérifier (a) quelle version du script tourne VRAIMENT, (b) si le réglage est
+  // actif, (c) l'état du coupe-circuit, (d) le dernier appel réel et son motif.
+  function anilistStatusReadout() {
+    const on = !!CFG.anilistSchedule;
+    const cd = anilistCooldownRemainingMs();
+    const last = anilistLastStatus();
+    const pill = (status, label) => `<span class="crrav-diag-badge ${status}" style="font-size:11px;padding:5px 10px">${label}</span>`;
+    let pills = pill(on ? 'ok' : 'err', on ? '✅ AniList activé' : '❌ AniList désactivé');
+    if (on) pills += cd > 0 ? pill('warn', `⛔ en pause ~${Math.ceil(cd / 60000)} min`) : pill('ok', '✅ prêt');
+    if (last) pills += pill(last.ok ? 'ok' : 'err', last.ok ? '✅ dernier appel OK' : `❌ dernier appel : ${last.status || '?'}`);
+    else pills += pill('warn', '— aucun appel encore');
+    let h = `<div class="crrav-diag-summary" style="margin:10px 0 4px">${pills}</div>`;
+    h += `<p class="crrav-diagcard-note" style="margin:0">Version du script chargée : v${SCRIPT_VERSION}.</p>`;
+    if (last) {
+      const ago = Math.max(0, Math.round((Date.now() - last.ts) / 60000));
+      h += `<p class="crrav-diagcard-note" style="margin:2px 0 0">Dernier appel ${ago === 0 ? "à l'instant" : 'il y a ' + ago + ' min'}${
+        last.reason ? ' — ' + escapeHtml(last.reason) : ''}.</p>`;
+    }
+    if (!last && on && cd === 0) {
+      h += `<p class="crrav-diagcard-note" style="margin:2px 0 0">Aucun appel n'a encore été lancé : si des
+        données AniList manquent malgré tout, c'est que le fond n'a pas (encore) de série « en diffusion »
+        à enrichir, ou que le réglage vient d'être (ré)activé. Lance « Tester AniList » ci-dessous pour
+        forcer un appel réel.</p>`;
+    }
+    return h;
+  }
+
+  function renderAnilistDiag() {
+    const d = STATE.anilistDiag;
+    if (!d) return '';
+    if (d.error) return `<div class="crrav-diagcard warn">
+      <div class="crrav-diagcard-head"><span class="ic">⚠</span>Test impossible</div>
+      <p class="crrav-diagcard-note">${escapeHtml(d.error)}</p>
+    </div>`;
+    const { status, note } = summarizeAnilistDiag(d);
+    const icon = { ok: '✅', warn: '⚠', err: '❌' }[status] || '•';
+    const line = (k, v) => `<div class="crrav-diagline"><span>${escapeHtml(k)}</span><b>${escapeHtml(String(v))}</b></div>`;
+
+    let fetchNote = '';
+    if (d.fetch && d.fetch !== 'ok') {
+      fetchNote = d.fetchStatus
+        ? `<p class="crrav-diagcard-note">La requête a atteint AniList, qui a répondu
+            <b>${escapeHtml(String(d.fetchStatus))}</b> — le plus souvent une API temporairement
+            limitée côté AniList (rien à réinstaller) ; réessaie plus tard.</p>`
+        : `<p class="crrav-diagcard-note">La requête n'a pas abouti (réseau ou CSP Crunchyroll qui bloque
+            l'appel) — vérifie que le script est à jour et que ton gestionnaire d'extensions n'a pas
+            bloqué anilist.co.</p>`;
+    }
+
+    let headline = `<div class="crrav-diag" style="margin-top:8px">
+      ${line('Série testée', d.title || '—')}
+      ${line('En diffusion', d.airing ? 'oui' : 'non')}
+    </div>`;
+
+    let matchBlock = '';
+    if ('match' in d && d.match) {
+      matchBlock = `<div class="crrav-diag" style="margin-top:8px">
+        ${line('Total prévu', d.planned ?? 'inconnu (episodes null + calendrier trop court)')}
+        ${line('Fin de saison', d.end ? ((d.approx ? '~' : '') + d.end) : 'inconnue')}
+        ${line('Prochain épisode', d.nextEp ?? '?')}
+        ${line('Trouvé via', d.matchedVia)}
+      </div>`;
+    }
+
+    let candidatesBlock = '';
+    if (d.candidates && d.candidates.length) {
+      const rows = d.candidates.map((c, i) => `<div class="crrav-diagrow${c.chosen ? ' chosen' : ''}">
+        <span>${c.chosen ? '🏆 ' : `<span class="rank">${i + 1}.</span> `}${escapeHtml(c.titre)}</span>
+        <small>${escapeHtml(c.statut || '?')} · ${c.episodes ?? 'ép?'} ép · ${c.annee ?? '?'} · score ${c.score}</small>
+      </div>`).join('');
+      candidatesBlock = `<details class="crrav-diagdetails"><summary>Candidats AniList testés (${d.candidateCount ?? d.candidates.length})</summary>
+        <div class="crrav-diagtbl" style="margin-top:6px">${rows}</div>
+      </details>`;
+    }
+
+    // Détails techniques : utiles pour creuser, pas pour la lecture au quotidien.
+    const techLines = [];
+    if (d.terms) techLines.push(['Termes cherchés (titre affiché)', d.terms.join(' | ') + (d.perTerm ? ' → ' + d.perTerm.join('/') : '')]);
+    if (d.enTitle) {
+      techLines.push(['Repli titre anglais (CR)', d.enTitle]);
+      if (d.enTerms) techLines.push(['Termes cherchés (EN)', d.enTerms.join(' | ')]);
+      if (d.enFetchError) techLines.push(['Requête EN', '❌ ' + d.enFetchError]);
+    }
+    techLines.push(['Vus/total CR', d.total]);
+    techLines.push(['Réglage AniList', d.settingOn ? 'activé' : 'DÉSACTIVÉ ⚠']);
+    if (d.match) techLines.push(['Épisodes datés AniList', d.schedNodes ?? 0]);
+    if (d.cache) techLines.push(['Cache AniList', `format av${d.cache.av ?? '?'} · ${d.cache.matched ? 'match' : 'no-match'} · ${d.cache.ageMin} min`]);
+    const techBlock = `<details class="crrav-diagdetails"><summary>Détails techniques</summary>
+      <div class="crrav-diag">${techLines.map(([k, v]) => line(k, v)).join('')}</div>
+    </details>`;
+
+    return `<div class="crrav-diagcard ${status}">
+      <div class="crrav-diagcard-head"><span class="ic">${icon}</span>${escapeHtml(note)}</div>
+      ${headline}${fetchNote}${matchBlock}${candidatesBlock}${techBlock}
+    </div>`;
+  }
+
+  // Affiche le résultat de la sonde directement à l'écran (pas la console, inaccessible
+  // sur mobile).
+  // Sonde la taille de page de l'historique, résultat affiché À L'ÉCRAN (mobile).
+  async function runHistoryProbe() {
+    STATE.probeRunning = true;
+    STATE.probeResult = null;
+    forceRender();
+    const rows = [];
+    try {
+      const accountId = await getAccountId();
+
+      // 1. Première page avec la VRAIE pagination page/page_size.
+      const t0 = performance.now();
+      const first = await api(`/content/v2/${accountId}/watch-history`, {
+        page: 1, page_size: 100, locale: CFG.locale, preferred_audio_language: 'ja-JP',
+      });
+      const firstCount = (first.data || []).length;
+      const total = typeof first.total === 'number' ? first.total : null;
+      rows.push({ label: 'page 1 (page_size=100)', count: firstCount,
+        note: total !== null ? `total annoncé : ${total}` : 'pas de total annoncé',
+        ms: Math.round(performance.now() - t0) });
+
+      // 2. Vérifie que page=2 renvoie des entrées DIFFÉRENTES (pagination correcte).
+      const firstIds = (first.data || []).map((x) => x.id).join(',');
+      const p2 = await api(`/content/v2/${accountId}/watch-history`, {
+        page: 2, page_size: 100, locale: CFG.locale, preferred_audio_language: 'ja-JP',
+      });
+      const p2Data = p2.data || [];
+      const p2Ids = p2Data.map((x) => x.id).join(',');
+      const startWorks = firstIds !== p2Ids && p2Data.length > 0;
+
+      // Cherche un éventuel champ de pagination dans la réponse (curseur/next).
+      const paginationField = Object.keys(first).filter((k) =>
+        /next|cursor|page|continuation|href|link/i.test(k)).join(', ') || '(aucun)';
+
+      rows.push({ label: 'page 2 (page_size=100)', count: p2Data.length,
+        note: startWorks ? 'entrées DIFFÉRENTES (pagination OK ✅)'
+          : 'MÊMES entrées (pagination cassée ❌)',
+        ms: 0 });
+
+      STATE.probeResult = { rows, depth: firstCount, total, realPageSize: firstCount,
+        deep: true, startWorks, paginationField,
+        firstMeta: JSON.stringify(Object.keys(first)) };
+
+      // 3. Extraction (comme avant), sur la première page.
+      const sample = (first.data || []).slice(0, 25);
+      let extracted = 0;
+      const distinctIds = new Set();
+      const reasons = { ok: 0, parentId: 0, seriesId: 0, panelType: 0, nothing: 0 };
+      const failSamples = [];
+      for (const it of sample) {
+        const ref = extractSeriesRef(it);
+        if (ref && ref.id) {
+          extracted++; distinctIds.add(ref.id);
+          // Par quel chemin l'ID a-t-il été trouvé ?
+          if (it.parent_type === 'series' && it.parent_id) reasons.parentId++;
+          else if (it.series_id) reasons.seriesId++;
+          else reasons.panelType++;
+          reasons.ok++;
+        } else {
+          reasons.nothing++;
+          if (failSamples.length < 2) {
+            failSamples.push(JSON.stringify(it, null, 1));
+          }
+        }
+      }
+      const one = sample[0];
+      const keys = one ? Object.keys(one) : [];
+      STATE.probeResult.extract = {
+        sampleSize: sample.length,
+        extracted,
+        distinctIds: distinctIds.size,
+        distinctList: [...distinctIds].slice(0, 12).join(', '),
+        keys: keys.join(', '),
+        reasons,
+        // Échantillon complet d'une entrée reconnue, et des entrées non reconnues.
+        rawSample: one ? JSON.stringify(one, null, 1) : '(vide)',
+        failSamples,
+      };
+    } catch (e) {
+      STATE.probeResult = { error: e.message || String(e) };
+    } finally {
+      STATE.probeRunning = false;
+      forceRender();
+    }
+  }
+
+  function renderProbeResult() {
+    const r = STATE.probeResult;
+    if (!r) return '';
+    if (r.error) return `<div class="crrav-diagcard err">
+      <div class="crrav-diagcard-head"><span class="ic">❌</span>Échec du test</div>
+      <p class="crrav-diagcard-note">${escapeHtml(r.error)}</p>
+    </div>`;
+    const { status, note } = summarizeHistoryProbe(r);
+    const icon = { ok: '✅', warn: '⚠', err: '❌' }[status] || '•';
+    const rows = r.rows.map((row) => {
+      const rowErr = /cassée|❌/.test(row.note);
+      return `<tr class="${rowErr ? 'crrav-row-err' : ''}">
+        <td>${escapeHtml(row.label)}</td>
+        <td><b>${row.count}</b></td>
+        <td>${escapeHtml(row.note)}</td>
+      </tr>`;
+    }).join('');
+    // Le conseil détaillé n'apparaît qu'en cas de souci — le verdict en tête de carte
+    // suffit dans le cas nominal, pas besoin de le répéter juste en dessous.
+    let advice = '';
+    if (r.deep && r.startWorks === false) {
+      advice = `<p class="crrav-diagcard-note">Champ de pagination détecté :
+        <b>${escapeHtml(r.paginationField || '(aucun)')}</b>.
+        ${r.paginationField && r.paginationField !== '(aucun)'
+          ? 'Une correction avec ce curseur est possible.'
+          : 'Il faudrait voir la réponse brute pour trouver le bon mécanisme.'}</p>`;
+    }
+    // Diagnostic d'extraction : le point critique quand « hors listes » reste bas.
+    let extractBlock = '';
+    if (r.extract) {
+      const e = r.extract;
+      const rate = e.sampleSize ? Math.round((e.extracted / e.sampleSize) * 100) : 0;
+      const bad = rate < 80;
+      const rz = e.reasons || {};
+      const failBlocks = (e.failSamples || []).map((f) =>
+        `<div class="crrav-probe-rawhead"><small>Entrée non reconnue</small>
+          <button class="crrav-copybtn" data-act="copy-raw" type="button">📋 Copier</button></div>
+        <div class="crrav-probe-raw">${escapeHtml(f)}</div>`).join('');
+      extractBlock = `<div class="crrav-probe-extract ${bad ? 'ko' : 'ok'}">
+        <b>Extraction :</b> ${e.extracted}/${e.sampleSize} entrées reconnues (${rate} %) →
+        <b>${e.distinctIds}</b> séries distinctes sur cet échantillon de 25.
+        <br><small>chemins : parent_id ${rz.parentId || 0} · series_id ${rz.seriesId || 0} ·
+        panel ${rz.panelType || 0} · échec ${rz.nothing || 0}</small>
+        ${e.distinctList ? `<br><small>IDs trouvés : ${escapeHtml(e.distinctList)}</small>` : ''}
+        ${bad && failBlocks ? `<details open><summary>Entrées NON reconnues (le nœud du problème)</summary>
+          ${failBlocks}</details>` : ''}
+        <details><summary>Structure d'une entrée reconnue</summary>
+          <div class="crrav-probe-rawhead"><small>clés : ${escapeHtml(e.keys)}</small>
+            <button class="crrav-copybtn" data-act="copy-raw" type="button">📋 Copier</button></div>
+          <div class="crrav-probe-raw">${escapeHtml(e.rawSample)}</div>
+        </details>
+      </div>`;
+    }
+    return `<div class="crrav-diagcard ${status}">
+      <div class="crrav-diagcard-head"><span class="ic">${icon}</span>${escapeHtml(note)}</div>
+      <table class="crrav-probe-tbl">
+        <thead><tr><th>requête</th><th>reçu</th><th>état</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      ${advice}${extractBlock}
+    </div>`;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  (30) Diagnostic complet unifié
+  // ─────────────────────────────────────────────────────────────
+  // Un seul bouton qui enchaîne TOUS les tests utiles et affiche un rapport unique,
+  // détaillé, à l'écran (pas la console — inaccessible sur mobile, voir plus haut).
+  // Réutilise telles quelles les sondes existantes (runHistoryProbe, runAnilistDiag,
+  // renderSeasonDiag) plutôt que de dupliquer leur logique : ce diagnostic est un
+  // ORCHESTRATEUR, pas une réimplémentation.
+
+  // Verdict à partir du résultat déjà produit par runHistoryProbe().
+  function summarizeHistoryProbe(r) {
+    if (!r) return { status: 'err', note: "Le test n'a produit aucun résultat." };
+    if (r.error) return { status: 'err', note: r.error };
+    if (r.deep && r.startWorks === false) {
+      return { status: 'err', note: 'Pagination cassée : la page 2 renvoie les mêmes entrées que la page 1.' };
+    }
+    if (r.extract && r.extract.sampleSize) {
+      const rate = Math.round((r.extract.extracted / r.extract.sampleSize) * 100);
+      if (rate < 80) return { status: 'warn', note: `Taux d'extraction bas (${rate} %) sur l'échantillon testé.` };
+    }
+    return { status: 'ok', note: `${r.total ?? '?'} entrées au total côté Crunchyroll · pagination et extraction OK.` };
+  }
+
+  // Verdict à partir du résultat déjà produit par runAnilistDiag().
+  function summarizeAnilistDiag(d) {
+    if (!CFG.anilistSchedule) return { status: 'warn', note: 'Réglage AniList désactivé dans Réglages — rien n’est recherché.' };
+    if (!d || d.error) return { status: 'warn', note: (d && d.error) || 'Aucune série chargée à tester.' };
+    if (d.fetch !== 'ok') return { status: 'err', note: 'Requête AniList échouée : ' + (d.fetchError || 'inconnue') };
+    if (!d.match) return { status: 'warn', note: `Aucun match sûr trouvé pour « ${d.title} » (garde-fou anti faux positif).` };
+    return { status: 'ok', note: `Match trouvé pour « ${d.title} » — total prévu : ${d.planned ?? 'inconnu'}, fin : ${d.end || 'inconnue'}.` };
+  }
+
+  // Verdict pour le découpage en saisons de la série ciblée par le diagnostic AniList.
+  function summarizeSeasonDiag() {
+    const s = (STATE.series || []).find((x) => x.id === STATE.anilistDiagTargetId);
+    if (!s || !s.episodes || !s.episodes.length) {
+      return { status: 'warn', note: 'Aucune série avec épisodes chargés pour ce test (dépend du test AniList ci-dessus).' };
+    }
+    return { status: 'ok', note: `${s.episodes.length} épisode(s) analysés pour « ${s.title} ».` };
+  }
+
+  // Répartition du localStorage par groupe (même logique que resteAVoir.stats(), mais
+  // renvoyée en données plutôt qu'affichée en console.table).
+  function computeStorageDiag() {
+    const groups = {};
+    for (const k of Object.keys(localStorage)) {
+      if (!k.startsWith(LS)) continue;
+      const g = (k.slice(LS.length).split(':')[0]) || '(racine)';
+      const size = (k.length + (localStorage.getItem(k) || '').length) * 2;
+      groups[g] = groups[g] || { entrées: 0, octets: 0 };
+      groups[g].entrées++; groups[g].octets += size;
+    }
+    const total = lsBytes();
+    // ~5 Mo est l'estimation de quota déjà utilisée ailleurs dans ce script (voir
+    // stats() et les avertissements de purge) — pas une garantie du navigateur, un repère.
+    const pctOfQuota = Math.round((total / 5e6) * 100);
+    return { total, groups, pctOfQuota };
+  }
+
+  async function runFullDiagnostic() {
+    STATE.fullDiagRunning = true;
+    STATE.fullDiag = { steps: [], startedAt: Date.now() };
+    forceRender();
+    const addStep = (step) => { STATE.fullDiag.steps.push(step); forceRender(); };
+
+    // 1. Environnement — instantané, aucune requête réseau.
+    addStep({
+      id: 'env', title: 'Version & réglages', status: 'ok',
+      lines: [
+        ['Version du script chargée', 'v' + SCRIPT_VERSION],
+        ['Réglage AniList', CFG.anilistSchedule ? 'activé' : 'désactivé'],
+        ['Mode TV', CFG.tvMode ? 'activé' : 'désactivé'],
+        ['Séries chargées en mémoire', String(STATE.series.length)],
+        ['Dernière synchro', STATE.lastSync ? new Date(STATE.lastSync).toLocaleString('fr-FR') : 'jamais'],
+      ],
+    });
+
+    // 2. Session / jeton — token en mémoire + test de renouvellement par cookie.
+    try {
+      const valid = token ? await tokenWorks(token) : false;
+      let cookieOk = null;
+      try {
+        const c = await tokenFromCookie();
+        cookieOk = c ? await tokenWorks(c) : false;
+      } catch (_) { /* laissé à null : indéterminé (souci réseau), pas forcément un échec */ }
+      addStep({
+        id: 'token', title: 'Session / jeton', status: (token && valid) ? 'ok' : 'err',
+        lines: [
+          ['Jeton en mémoire', token ? token.slice(0, 22) + '…' : 'aucun'],
+          ['Expire dans', tokenExp ? Math.round((tokenExp - Date.now()) / 1000) + ' s' : '—'],
+          ['Capté depuis la page', sniffedToken ? 'oui' : 'non'],
+          ['Jeton actuel valide', token ? (valid ? '✅ oui' : '❌ non') : '—'],
+          ['Renouvellement par cookie', cookieOk === null ? '⚠ non testé' : (cookieOk ? '✅ fonctionne' : '❌ refusé')],
+        ],
+      });
+    } catch (e) {
+      addStep({ id: 'token', title: 'Session / jeton', status: 'err', note: e && (e.message || String(e)) });
+    }
+
+    // 3. Historique de visionnage — réutilise le diagnostic existant (mêmes requêtes).
+    await runHistoryProbe();
+    addStep({ id: 'history', title: 'Historique de visionnage',
+      ...summarizeHistoryProbe(STATE.probeResult), html: renderProbeResult() });
+
+    // 4. AniList — test en direct sur une série en diffusion.
+    await runAnilistDiag();
+    addStep({ id: 'anilist', title: 'AniList (total prévu / fin de saison)',
+      ...summarizeAnilistDiag(STATE.anilistDiag), html: anilistStatusReadout() + renderAnilistDiag() });
+
+    // 5. Découpage en saisons — entièrement local, sur la même série que le test AniList.
+    addStep({ id: 'seasons', title: 'Découpage en saisons (Crunchyroll)',
+      ...summarizeSeasonDiag(), html: renderSeasonDiag() });
+
+    // 6. Stockage local.
+    const storage = computeStorageDiag();
+    addStep({
+      id: 'storage', title: 'Stockage local',
+      status: storage.pctOfQuota > 85 ? 'err' : storage.pctOfQuota > 60 ? 'warn' : 'ok',
+      lines: [
+        ['Utilisé', `${fmtBytes(storage.total)} sur ~5 Mo (${storage.pctOfQuota} %)`],
+        ...Object.entries(storage.groups).sort((a, b) => b[1].octets - a[1].octets)
+          .map(([g, v]) => [g, `${v.entrées} entrée${v.entrées > 1 ? 's' : ''} · ${fmtBytes(v.octets)}`]),
+      ],
+    });
+
+    STATE.fullDiagRunning = false;
+    STATE.fullDiag.finishedAt = Date.now();
+    STATE.fullDiagText = buildFullDiagnosticText(STATE.fullDiag);
+    forceRender();
+  }
+
+  // Export texte simple du rapport (pour coller dans un message de support, par ex.) —
+  // ne reprend que l'essentiel (statut + note + lignes), pas les tableaux détaillés
+  // affichés à l'écran (candidats AniList, JSON brut…), pour rester lisible une fois collé.
+  function buildFullDiagnosticText(d) {
+    const lines = [`Diagnostic Mon Crunchy — v${SCRIPT_VERSION} — ${new Date().toLocaleString('fr-FR')}`, ''];
+    for (const s of d.steps) {
+      lines.push(`— ${s.title} : ${String(s.status || '?').toUpperCase()}`);
+      if (s.note) lines.push('  ' + s.note);
+      if (s.lines) for (const [k, v] of s.lines) lines.push(`  ${k} : ${v}`);
+      lines.push('');
+    }
+    return lines.join('\n');
+  }
+
+  function renderFullDiagnosticReport() {
+    const d = STATE.fullDiag;
+    if (!d) return '';
+    const steps = d.steps || [];
+    const counts = { ok: 0, warn: 0, err: 0 };
+    steps.forEach((s) => { if (counts[s.status] != null) counts[s.status]++; });
+    const icon = { ok: '✅', warn: '⚠', err: '❌' };
+    const cards = steps.map((s) => {
+      const body = s.lines
+        ? `<div class="crrav-diag">${s.lines.map(([k, v]) =>
+            `<div class="crrav-diagline"><span>${escapeHtml(k)}</span><b>${escapeHtml(String(v))}</b></div>`).join('')}</div>`
+        : '';
+      return `<div class="crrav-diagcard ${s.status}">
+        <div class="crrav-diagcard-head"><span class="ic">${icon[s.status] || '⏳'}</span>${escapeHtml(s.title)}</div>
+        ${s.note ? `<p class="crrav-diagcard-note">${escapeHtml(s.note)}</p>` : ''}
+        ${body}${s.html || ''}
+      </div>`;
+    }).join('');
+    const finished = !!d.finishedAt;
+    const summary = `<div class="crrav-diag-summary">
+      <span class="crrav-diag-badge ok">✅ ${counts.ok}</span>
+      <span class="crrav-diag-badge warn">⚠ ${counts.warn}</span>
+      <span class="crrav-diag-badge err">❌ ${counts.err}</span>
+      ${finished ? `<span class="crrav-diag-time">terminé en ${((d.finishedAt - d.startedAt) / 1000).toFixed(1)} s</span>` : ''}
+    </div>`;
+    return summary + cards + (finished ? `<div class="crrav-fulldiag-actions">
+        <button class="crrav-btn ghost" data-act="copy-full-diag" type="button">📋 Copier le rapport complet</button>
+      </div>` : '');
+  }
+
+  // Les séries ignorées depuis Découverte disparaissent des résultats : sans cette
+  // liste, plus aucun bouton nulle part pour revenir en arrière.
+  // (27) Repensé pour les watchlists chargées : liste compacte défilant dans sa PROPRE
+  // zone (au lieu d'un nuage de puces qui pousse tout le reste de Réglages vers le bas),
+  // avec recherche par titre et tri, pour retrouver une série précise sans tout parcourir.
+  function ignoredPanel() {
+    if (!IGNORED.size) {
+      return `<div class="crrav-settings">
+        <h3>Séries ignorées</h3>
+        <small style="color:#8a8a94;font:400 11px/1.4 system-ui">
+          Aucune. Le bouton ⊘ sur une affiche masque la série partout et l'empêche
+          de revenir dans Découverte.</small></div>`;
+    }
+    const needle = STATE.ignoredQ.trim().toLowerCase();
+    let entries = [...IGNORED.entries()].map(([id, v]) => ({
+      id, title: v.title || id, source: v.source, poster: v.poster || '', synopsis: v.synopsis || '',
+    }));
+    if (needle) entries = entries.filter((e) => e.title.toLowerCase().includes(needle));
+
+    const sort = STATE.ignoredSort;
+    const collator = (a, b) => a.title.localeCompare(b.title, 'fr', { sensitivity: 'base' });
+    if (sort === 'title-desc') entries.sort((a, b) => collator(b, a));
+    else if (sort === 'source') entries.sort((a, b) => (a.source === b.source ? collator(a, b) : a.source.localeCompare(b.source)));
+    else entries.sort(collator);   // title-asc, par défaut
+
+    const filtered = needle || sort !== 'title-asc';
+    const restoreLabel = needle ? `Réafficher ces ${entries.length}` : 'Tout réafficher';
+
+    // Jaquette en vignette + bouton « i » pour déplier le résumé (mémorisés au moment
+    // de l'ignore, voir ignoreBtn — pas de rappel réseau possible pour une série exclue).
+    const rows = entries.map((e) =>
+      `<div class="crrav-ignrow">
+        ${e.poster ? `<span class="crrav-ignrow-thumb">
+          <img loading="lazy" crossorigin="anonymous" src="${e.poster}" alt=""
+            onerror="this.removeAttribute(&quot;crossorigin&quot;);this.src=this.src"></span>` : ''}
+        <div class="crrav-ignrow-main">
+          <div class="crrav-ignrow-head">
+            <span class="crrav-ignrow-t">${escapeHtml(e.title)}</span>
+            <span class="crrav-ignrow-src">${e.source === 'discover' ? 'Découverte' : 'Watchlist'}</span>
+            ${e.synopsis ? '<button class="crrav-info" aria-expanded="false" aria-label="Lire le résumé">i</button>' : ''}
+            <button class="crrav-btn ghost sm" data-ignore="${e.id}" data-title="${escapeHtml(e.title)}"
+              data-source="${e.source}" title="Réafficher cette série">↺</button>
+            ${e.synopsis ? `<div class="crrav-syn"><p>${escapeHtml(e.synopsis)}</p></div>` : ''}
+          </div>
+        </div>
+      </div>`
+    ).join('') || `<p class="crrav-probe-err" style="margin:0">Aucune série ignorée ne correspond à « ${escapeHtml(STATE.ignoredQ.trim())} ».</p>`;
+
+    return `<div class="crrav-settings">
+      <h3>Séries ignorées (${entries.length}${needle ? ` sur ${IGNORED.size}` : ''})</h3>
+      <div class="crrav-ignctrl">
+        <input class="crrav-search crrav-search-ignored" placeholder="Chercher une série ignorée…"
+          value="${escapeHtml(STATE.ignoredQ)}">
+        <select class="crrav-select crrav-ignoredsort" data-act="ignored-sort">
+          <option value="title-asc"${sort === 'title-asc' ? ' selected' : ''}>Titre A→Z</option>
+          <option value="title-desc"${sort === 'title-desc' ? ' selected' : ''}>Titre Z→A</option>
+          <option value="source"${sort === 'source' ? ' selected' : ''}>Par source</option>
+        </select>
+      </div>
+      <div class="crrav-ignlist">${rows}</div>
+      <div class="crrav-sactions" style="margin-top:10px">
+        <button class="crrav-btn ghost" data-act="ignored-clear"${filtered ? ` data-scope-ids="${entries.map((e) => e.id).join(',')}"` : ''}
+          ${entries.length ? '' : 'disabled'}>${restoreLabel}</button>
+        <small style="color:#8a8a94;font:400 10.5px/1.4 system-ui;align-self:center">
+          Une fois ignorée, une série est masquée partout (Reste à voir, Hors listes et
+          Découverte). Chaque onglet a son propre chip « Ignorées » pour restaurer ;
+          cette liste rassemble tout, y compris pour un reset global.
+        </small>
+      </div>
+    </div>`;
+  }
+
+  // ─── Portabilité : export / import de la configuration ──────────────────────
+  // Le stockage navigateur est cloisonné par appareil : rien ne passe du PC au téléphone.
+  // On exporte donc l'état UTILISATEUR (réglages, filtres, ignorées, empreinte diffusion)
+  // — jamais le cache, qui est volumineux et se reconstruit tout seul.
+  function exportSettings() {
+    const payload = {
+      kind: 'mon-crunchy-config',
+      version: SCRIPT_VERSION,
+      exportedAt: new Date().toISOString(),
+      state: {
+        settings: APP_STATE.settings || {},
+        filters: APP_STATE.filters || {},
+        ignored: APP_STATE.ignored || {},
+        airsnap: APP_STATE.airsnap || {},
+      },
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const d = new Date();
+    const stamp = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    a.href = url;
+    a.download = `mon-crunchy-config-${stamp}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    // Libération différée : révoquer trop tôt annule le téléchargement sur certains mobiles.
+    setTimeout(() => safeCall(() => URL.revokeObjectURL(url), undefined, 'export:revoke'), 10000);
+    showToast('✓ Configuration exportée');
+  }
+
+  function importSettings(file) {
+    const reader = new FileReader();
+    reader.onerror = () => showToast('✗ Fichier illisible');
+    reader.onload = () => {
+      const parsed = safeCall(() => JSON.parse(String(reader.result)), null, 'import:parse');
+      if (!parsed || parsed.kind !== 'mon-crunchy-config' || !parsed.state) {
+        showToast("✗ Ce fichier n'est pas un export de Mon Crunchy");
+        return;
+      }
+      const st = parsed.state;
+      // Fusion prudente : on ne garde que les 4 sections attendues, et seulement si
+      // elles ont le bon type. Un fichier tronqué ne doit pas casser la configuration.
+      const next = { v: STATE_SCHEMA_VERSION };
+      for (const k of ['settings', 'filters', 'ignored', 'airsnap']) {
+        next[k] = (st[k] && typeof st[k] === 'object' && !Array.isArray(st[k])) ? st[k] : {};
+      }
+      APP_STATE = next;
+      if (!persistState(APP_STATE)) { showToast('✗ Import impossible (stockage plein)'); return; }
+      Object.assign(CFG, CFG_DEFAULTS);   // repart des défauts…
+      applySettings();                     // …puis applique les réglages importés
+      STATE.filters = loadFilters();
+      STATE.settingsOpen = false;
+      showToast('✓ Configuration importée — actualisation…');
+      forceRender();
+      refreshActive();
+    };
+    reader.readAsText(file);
+  }
+
+  function collectSettings() {
+    const patch = {};
+    root.querySelectorAll('[data-set]').forEach((el) => {
+      const f = SETTINGS_SCHEMA.find((x) => x.key === el.dataset.set);
+      if (!f) return;
+      if (f.type === 'bool') { patch[f.key] = el.checked; return; }
+      if (f.type === 'listselect') { patch[f.key] = el.value || null; return; }
+      if (f.type === 'list') {
+        patch[f.key] = el.value.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+        return;
+      }
+      let v = parseFloat(String(el.value).replace(',', '.'));
+      if (!Number.isFinite(v)) return;            // champ vidé : on garde l'ancienne valeur
+      if (f.type === 'percent') v /= 100;
+      if (f.type === 'int') v = Math.round(v);
+      const lo = f.type === 'percent' ? f.min / 100 : f.min;
+      const hi = f.type === 'percent' ? f.max / 100 : f.max;
+      if (lo != null) v = Math.max(lo, v);
+      if (hi != null) v = Math.min(hi, v);
+      patch[f.key] = v;
+    });
+    return patch;
+  }
+
+  // (2) ne détruit que les données re-téléchargeables.
+  function clearCache() {
+    // Réglages, filtres, ignorées et empreinte diffusion vivent maintenant dans
+    // une seule clé (STATE_KEY) : plus besoin d'un ensemble de clés à préserver.
+    const keep = new Set([STATE_KEY]);
+    const keys = Object.keys(localStorage).filter((k) => k.startsWith(LS) && !keep.has(k));
+    keys.forEach((k) => localStorage.removeItem(k));
+    eps3Store = null; eps3Dirty = false; clearTimeout(eps3FlushTimer);
+    LOG(`${keys.length} entrées de cache supprimées`);
+    return keys.length;
+  }
+
+  // Invalide seulement certains préfixes de cache (ex. épisodes, historique), pour
+  // qu'un changement de réglage rescanne la bonne chose sans tout retélécharger.
+  function invalidateCache(prefixes) {
+    let n = 0;
+    if (prefixes.includes('eps3:')) {
+      const store = loadEps3Store();
+      n += Object.keys(store).length;
+      for (const k of Object.keys(store)) delete store[k];
+      eps3Dirty = true;
+      flushEps3Store();
+    }
+    for (const k of Object.keys(localStorage)) {
+      if (!k.startsWith(LS)) continue;
+      if (prefixes.some((p) => p !== 'eps3:' && k.startsWith(LS + p))) { localStorage.removeItem(k); n++; }
+    }
+    LOG(`cache invalidé (${prefixes.join(', ')}) : ${n} entrées`);
+    return n;
+  }
+
+  // (3) l'erreur de l'onglet actif, remontée en haut plutôt que noyée dans la console.
+  function errorBanner() {
+    if (STATE.reconnecting) {
+      return `<div class="crrav-err" role="status" style="border-color:rgba(159,214,255,.45)">
+        <span>🔄 <b>Session expirée</b> — reconnexion automatique en cours…</span>
+        <button class="crrav-btn" data-act="reload">Recharger</button></div>`;
+    }
+    const err = STATE.tab === 'decouverte' ? STATE.discover.error
+      : STATE.tab === 'orphelines' ? STATE.orphan.error
+        : STATE.error;
+    let html = err ? `<div class="crrav-err" role="alert">
+      <span><b>Échec du chargement.</b> ${escapeHtml(err)}</span>
+      <button class="crrav-btn" data-act="retry">Réessayer</button>
+      <button class="crrav-btn" data-act="reload">Recharger la page</button></div>` : '';
+    // Avertissements globaux (pas des échecs de chargement à proprement parler, donc pas
+    // dans crrav-err ci-dessus) : rendus ICI, avant le contenu spécifique à l'onglet, pour
+    // rester visibles quel que soit l'onglet ouvert — auparavant limités à l'onglet Reste
+    // à voir, ce qui les rendait invisibles ailleurs (ex. anilistWarning pendant que
+    // l'utilisateur est sur Calendrier).
+    html += warningBanners();
+    return html;
+  }
+
+  // Bandeaux d'avertissement globaux, communs à tous les onglets (voir errorBanner()).
+  function warningBanners() {
+    const warn = (msg, bg, border, color) =>
+      `<p class="crrav-warn crrav-warn-keep" style="background:${bg};border-color:${border};color:${color}">${escapeHtml(msg)}</p>`;
+    // Bandeau compact repliable : le résumé tient sur UNE ligne (tronqué si besoin), le
+    // détail est masqué par défaut et s'ouvre au tap. Gain de place sur téléphone.
+    const warnFold = (summary, detail, bg, border, color) =>
+      `<details class="crrav-warn crrav-warn-keep" style="background:${bg};border-color:${border};color:${color}">`
+      + `<summary><span>${escapeHtml(summary)}</span></summary>`
+      + `<div class="crrav-warn-detail">${escapeHtml(detail)}</div></details>`;
+    let html = '';
+    if (STATE.apiWarning) html += warn(STATE.apiWarning, 'rgba(224,87,74,.12)', 'rgba(224,87,74,.4)', '#ff9a8f');
+    // AniList : la bannière est dérivée DIRECTEMENT du coupe-circuit (marqueur en cache posé
+    // dès le 1er 403/429, en fond COMME depuis le diagnostic manuel), et non d'un passage
+    // d'enrichissement où TOUT échoue. Sans ça, un 403 pouvait ne se voir nulle part : cache
+    // encore chaud → aucun passage ne se lance → aucune alerte n'est jamais posée.
+    const aniCd = CFG.anilistSchedule ? anilistCooldownRemainingMs() : 0;
+    if (aniCd > 0) {
+      const mins = Math.ceil(aniCd / 60000);
+      const last = anilistLastStatus();
+      const motif = (last && !last.ok && last.reason) ? ` Motif renvoyé : « ${last.reason} ».` : '';
+      html += warnFold(
+        `⚠ AniList en pause ~${mins} min — total prévu/fin de saison indisponibles`,
+        'Blocage côté AniList (API désactivée pour soulager leurs serveurs, ou IP temporairement '
+        + 'limitée pour trop de requêtes), pas un souci du script.' + motif
+        + ` Nouvelle tentative automatique dans ~${mins} min.`,
+        'rgba(224,87,74,.12)', 'rgba(224,87,74,.4)', '#ff9a8f');
+    } else if (STATE.anilistWarning) {
+      html += warnFold('⚠ AniList — récupération momentanément indisponible', STATE.anilistWarning,
+        'rgba(224,87,74,.12)', 'rgba(224,87,74,.4)', '#ff9a8f');
+    }
+    if (STATE.quotaWarning) html += warn(STATE.quotaWarning, 'rgba(244,181,60,.12)', 'rgba(244,181,60,.4)', '#f4b53c');
+    if (STATE.warning) html += `<p class="crrav-warn crrav-warn-keep">${escapeHtml(STATE.warning)}</p>`;
+    return html;
+  }
+
+  // Repère de rendu : quand la sheet réglages est ouverte sur mobile, un render()
+  // déclenché en fond (chargement progressif, teinte) reconstruisait toute la sheet à
+  // chaque appel — d'où le clignotement et la perte de focus sur les champs. On met à
+  // jour la sheet en place SANS la recréer si elle est déjà ouverte et inchangée.
+  let sheetOpenInDom = false;
+  let FORCE_RENDER = false;
+  // Rendu forcé : à utiliser quand une interaction doit reconstruire le DOM même si la
+  // sheet réglages est ouverte (changement d'onglet, saisie de réglage, fermeture).
+  function forceRender() { FORCE_RENDER = true; renderNow(); }
+
+  // render() regroupe les appels sur une frame : pendant un chargement, il était invoqué
+  // à chaque tronçon et à chaque tick de progression, or il reconstruit TOUT le DOM du
+  // panneau. N appels dans la même frame ne coûtent plus qu'une seule reconstruction.
+  // renderNow() reste disponible quand le DOM doit être lisible immédiatement après
+  // (restauration du focus dans la recherche, par exemple).
+  // Grand écran SANS souris = très probablement un téléviseur piloté à la télécommande.
+  // La détection ne peut pas être certaine (une borne tactile géante donnerait le même
+  // signal), d'où le réglage manuel qui force le mode dans tous les cas.
+  function isTvScreen() {
+    if (CFG.tvMode) return true;
+    return safeCall(() => window.matchMedia('(min-width:1900px) and (hover:none)').matches,
+      false, 'isTvScreen') || false;
+  }
+
+  // État de lissage par source de progression (clé stable par item de la barre —
+  // 'main'/'history'/'anilist'/'historyGenre', voir renderActivityBar). Persiste entre
+  // les rendus (variable de module), remis à zéro quand `total` change (nouvelle passe)
+  // ou que `done` repart en arrière.
+  const etaSmoothing = new Map();
+
+  // Estime un temps restant à partir d'un compteur (done/total). Remplace l'ancienne
+  // version (moyenne « depuis le début ») qui donnait des ETA en dents de scie : avec un
+  // pool en concurrence, les items reviennent par petits lots quasi simultanés — juste
+  // après un lot, la moyenne globale bondissait (rate ↑, ETA ↓ d'un coup), puis dérivait
+  // vers le haut pendant l'attente du lot suivant (rate ↓ pendant que le temps s'écoule
+  // sans nouvelle avancée), d'où le 50 s → 5 s → 15 s remonté.
+  // Ici : 1) le rythme (items/s) n'est recalculé QUE quand `done` avance réellement, par
+  // moyenne mobile exponentielle (lisse les à-coups au lieu de les répercuter tels quels) ;
+  // 2) entre deux avancées, le temps restant décompte simplement depuis la dernière mesure
+  // fiable (comme un minuteur), au lieu d'être recalculé from scratch à chaque rendu.
+  function estimateEta(key, done, total, startedAt) {
+    if (!startedAt || !total || !done || done <= 0) { etaSmoothing.delete(key); return null; }
+    const now = Date.now();
+    let st = etaSmoothing.get(key);
+    if (!st || st.total !== total || done < st.lastDone) {
+      st = { lastDone: 0, lastTs: startedAt, rateEma: null, total, ticks: 0 };
+      etaSmoothing.set(key, st);
+    }
+    if (done > st.lastDone) {
+      const dDone = done - st.lastDone;
+      const dt = Math.max(0.2, (now - st.lastTs) / 1000);   // plancher : évite un pic sur un lot quasi instantané
+      const instRate = dDone / dt;
+      // Lissage exponentiel (poids 40 % à la mesure la plus récente) : converge vers le
+      // rythme réel sur 2-3 lots au lieu de suivre chaque à-coup individuellement.
+      st.rateEma = st.rateEma == null ? instRate : (st.rateEma * 0.6 + instRate * 0.4);
+      st.lastDone = done; st.lastTs = now; st.ticks++;
+    }
+    // Au moins 2 avancées mesurées avant d'afficher un chiffre : sur la toute première,
+    // rien pour comparer — un temps annoncé tout de suite serait une estimation à vue.
+    if (!st.rateEma || st.ticks < 2) return null;
+    const elapsedSinceTick = (now - st.lastTs) / 1000;
+    const remainingS = Math.max(0, (total - done) / st.rateEma - elapsedSinceTick);
+    if (remainingS < 3) return 'quelques secondes';
+    if (remainingS < 60) return `~${Math.ceil(remainingS)} s`;
+    return `~${Math.ceil(remainingS / 60)} min`;
+  }
+
+  // (31) Bandeau d'activité — TOUJOURS dans .crrav-top (sticky), donc visible quel que
+  // soit l'onglet actif et la position de défilement. Regroupe les 4 sources de tâches
+  // de fond possibles : chargement générique (watchlist/listes/épisodes/découverte/
+  // orphelines/nouveautés — elles partagent `progressMsg`, préfixé « Étape n/total »
+  // quand la fonction appelante a plusieurs phases, voir stepLabel), scan de
+  // l'historique, enrichissement AniList planning+genres (séries suivies) et
+  // enrichissement genres « hors listes » (AniList + repli Crunchyroll). Avant, chacune
+  // n'était visible que noyée dans sa propre section, en bas de page — le reproche exact
+  // qui a motivé cette fonction.
+  function renderActivityBar() {
+    const anyBusy = STATE.loading || STATE.discover.loading || STATE.orphan.loading || STATE.newPremieres.loading;
+    if (anyBusy) { if (!activityStartedAt) activityStartedAt = Date.now(); }
+    else { activityStartedAt = null; etaSmoothing.delete('main'); }
+
+    const items = [];
+
+    if (anyBusy && progressMsg) {
+      // Certains messages embarquent un ou plusieurs comptes « i/total » — le préfixe
+      // « Étape n/total » qu'ajoute stepLabel EN est un lui-même, potentiellement suivi
+      // d'un compteur plus précis (ex. « Étape 4/4 · Analyse des épisodes… 8/29 »). On
+      // prend le DERNIER trouvé : c'est toujours le plus fin (le compteur d'étape sert
+      // de repli tant qu'aucun sous-compteur n'est encore apparu).
+      const all = [...progressMsg.matchAll(/(\d+)\s*\/\s*(\d+)/g)];
+      const last = all[all.length - 1];
+      const done = last ? +last[1] : null, total = last ? +last[2] : null;
+      items.push({
+        label: '🔄 ' + progressMsg,
+        count: total ? `${done}/${total}` : null,
+        pct: total ? Math.round((done / total) * 100) : null,
+        eta: total ? estimateEta('main', done, total, activityStartedAt) : null,
+        done: false,
+      });
+    }
+
+    const hp = STATE.historyProgress;
+    if (hp && !hp.error) {
+      const finished = hp.total && hp.done >= hp.total;
+      if (finished) etaSmoothing.delete('history');
+      items.push({
+        label: finished ? '🧭 Historique lu — ' + (hp.series || 0) + ' série(s) trouvée(s)'
+          : `🧭 Lecture de ton historique… ${hp.done}/${hp.total || '?'} requêtes` +
+            (hp.series ? ` · ${hp.series} série(s)` : ''),
+        count: hp.total ? `${hp.done}/${hp.total} requêtes` : null,
+        pct: hp.total ? Math.round((hp.done / hp.total) * 100) : null,
+        eta: finished ? null : estimateEta('history', hp.done, hp.total, hp.startedAt),
+        done: finished,
+      });
+    } else {
+      etaSmoothing.delete('history');
+    }
+
+    const ap = STATE.anilistProgress;
+    if (ap) {
+      items.push({
+        label: `🔬 AniList — total prévu, fin de saison & genres… ${ap.done}/${ap.total} série${ap.total > 1 ? 's' : ''}`,
+        count: `${ap.done}/${ap.total} séries`,
+        pct: ap.total ? Math.round((ap.done / ap.total) * 100) : null,
+        eta: estimateEta('anilist', ap.done, ap.total, ap.startedAt),
+        done: false,
+      });
+    } else {
+      etaSmoothing.delete('anilist');
+    }
+
+    const gp = STATE.historyGenreProgress;
+    if (gp) {
+      items.push({
+        label: `🧬 Genres hors listes (AniList + Crunchyroll)… ${gp.done}/${gp.total} série${gp.total > 1 ? 's' : ''}`,
+        count: `${gp.done}/${gp.total} séries`,
+        pct: gp.total ? Math.round((gp.done / gp.total) * 100) : null,
+        eta: estimateEta('historyGenre', gp.done, gp.total, gp.startedAt),
+        done: false,
+      });
+    } else {
+      etaSmoothing.delete('historyGenre');
+    }
+
+    if (!items.length) return '';
+
+    const rows = items.map((it) => `<div class="crrav-activity-row${it.done ? ' done' : ''}">
+      ${it.done ? '<span class="crrav-activity-check">✅</span>' : '<span class="crrav-activity-spinner"></span>'}
+      <div class="crrav-activity-body">
+        <div class="crrav-activity-toprow">
+          <span class="crrav-activity-label">${escapeHtml(it.label)}</span>
+          <span class="crrav-activity-eta">${
+            it.done ? 'terminé' : it.eta ? `⏱ ${it.eta} restantes`
+              : it.pct != null ? `${it.pct}%` : ''}</span>
+        </div>
+        <div class="crrav-activity-bar${it.pct == null && !it.done ? ' indeterminate' : ''}">
+          <i style="width:${it.done ? 100 : (it.pct ?? 0)}%"></i>
+        </div>
+        ${!it.done && it.count ? `<div class="crrav-activity-subrow">${it.count}${
+          it.pct != null ? ` · ${it.pct}%` : ''}${it.eta ? ` · ⏱ ${it.eta} restantes` : ''}</div>` : ''}
+      </div>
+    </div>`).join('');
+
+    return `<div class="crrav-activitybar">${rows}</div>`;
+  }
+
+  let renderScheduled = false;
+  function render() {
+    if (renderScheduled) return;
+    renderScheduled = true;
+    const run = () => { renderScheduled = false; renderNow(); };
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
+    else setTimeout(run, 16);
+  }
+
+  function renderNow() {
+    if (!root) return;
+    const content = root.querySelector('.crrav-content');
+    if (!content) return;
+    // Le DOM est intégralement remplacé : sans ça, un rafraîchissement de fond pendant
+    // que l'utilisateur fait défiler une longue liste le renvoyait en haut de page.
+    const prevScroll = content.scrollTop;
+    // La sheet Réglages a son PROPRE scroll (.crrav-sheetbody, voir plus bas dans ce
+    // fichier) : sans le sauver/restaurer séparément, tout forceRender() pendant qu'elle
+    // est ouverte (ex. clic sur un bouton de diagnostic) la remontait en haut — agaçant
+    // quand on enchaîne plusieurs tests.
+    const prevSheetEl = content.querySelector('.crrav-sheetbody');
+    const prevSheetScroll = prevSheetEl ? prevSheetEl.scrollTop : 0;
+
+    // Si la sheet réglages est déjà affichée et le reste, on ne reconstruit pas le DOM
+    // du contenu principal (masqué derrière elle) : cela évite le clignotement mobile
+    // et la perte de focus. On ne saute QUE les renders de fond (chargement, teinte) :
+    // un changement d'onglet, une saisie, ou la fermeture passent par forceRender().
+    const existingSheet = content.querySelector('.crrav-settingssheet');
+    if (STATE.settingsOpen && existingSheet && sheetOpenInDom && !FORCE_RENDER) {
+      return;
+    }
+    FORCE_RENDER = false;
+    sheetOpenInDom = STATE.settingsOpen;
+
+    root.classList.toggle('crrav-headercollapsed', STATE.filters.headerCollapsed);
+    root.classList.toggle('crrav-tv', isTvScreen());
+
+    const tabTitles = {
+      suivi: 'Séries de ta watchlist avec des épisodes à voir',
+      orphelines: "Séries vues au moins une fois mais absentes de tes listes, avec des épisodes non vus restants",
+      decouverte: 'Séries populaires jamais vues, à découvrir',
+      stats: 'Statistiques de visionnage',
+      calendrier: 'Prochains épisodes estimés',
+    };
+    const tabs = [
+      ['suivi', 'Reste à voir'],
+      ['orphelines', 'Hors listes'],
+      ['decouverte', 'Découverte'],
+      ['stats', 'Stats'],
+      ['calendrier', 'Calendrier'],
+    ].map(([v, label]) =>
+      `<button class="crrav-tab" data-tab="${v}" role="tab" aria-selected="${STATE.tab === v}"
+        title="${escapeHtml(tabTitles[v])}">${label}</button>`
+    ).join('');
+
+    // La bascule grille/liste n'a de sens que là où on affiche des cartes de séries.
+    // Découverte partage le même état (STATE.filters.view) que Reste à voir / Hors listes :
+    // basculer l'un bascule l'autre, comme demandé.
+    const viewBtn = STATE.tab === 'stats' || STATE.tab === 'calendrier' ? '' :
+      `<button class="crrav-sync" data-act="view"
+        title="${STATE.filters.view === 'list' ? 'Afficher en grille' : 'Afficher en liste compacte'}"
+        >${STATE.filters.view === 'list' ? '▦' : '☰'}</button>`;
+
+    // Bouton « autres pépites » : la même action que dans les contrôles de l'onglet
+    // (repliables), mais toujours visible en haut sur Découverte — sans avoir à déplier
+    // les filtres pour la trouver. Mêmes conditions que ce bouton-là (voir renderDecouverte).
+    const moreDiscoverBtn = STATE.tab === 'decouverte' && !STATE.discover.loading
+      && STATE.discover.series.length && !STATE.filters.showIgnoredDiscover
+      ? `<button class="crrav-sync crrav-icobtn" data-act="more-discover"
+          title="Charger 30 autres pépites">🎲<span class="crrav-btn-label">Autres pépites</span></button>`
+      : '';
+
+    // Raccourci « dé légendaire » : 🎲 réservé à CETTE action (scan profond, pépites
+    // légendaires uniquement) — ne pas réutiliser cette icône ailleurs, elle porte un sens
+    // précis pour l'utilisateur une fois qu'il l'a repérée dans le bouton complet de l'onglet.
+    const legendaryDiscoverBtn = STATE.tab === 'decouverte' && !STATE.discover.loading
+      && !STATE.filters.showIgnoredDiscover
+      ? `<button class="crrav-sync crrav-icobtn" data-act="legendary-discover"
+          title="Dé légendaire : scan profond pour dénicher des pépites légendaires"><span class="crrav-dice-gold">🎲</span><span class="crrav-btn-label">${
+          STATE.discover.legendaryHunt ? 'Encore des légendaires' : 'Dé légendaire'}</span></button>`
+      : '';
+
+    const settingsSheet = STATE.settingsOpen ? `
+      <div class="crrav-settingssheet">
+        <div class="crrav-sheethead">
+          <h2>Réglages</h2>
+          <button class="crrav-close" data-act="settings" aria-label="Fermer les réglages">✕</button>
+        </div>
+        <div class="crrav-sheetbody">${settingsPanel() + ignoredPanel() + diagnosticPanel()}</div>
+        <div class="crrav-sheetfoot">
+          <button class="crrav-btn ghost" data-act="settings-reset">Valeurs par défaut</button>
+          <button class="crrav-btn primary" data-act="settings-save">Enregistrer et actualiser</button>
+        </div>
+      </div>` : '';
+
+    const listPickerSheet = listPickerHtml();
+
+    // Recherche masquée par défaut (voir CFG.showSearchBar) : visible si le réglage
+    // permanent est actif, ou si affichée ponctuellement cette session (🔍 dans l'en-tête).
+    const searchVisible = CFG.showSearchBar || searchBarForcedOpen;
+    // Une requête restée active alors que la barre est maintenant masquée (ex. réglage
+    // désactivé après coup) laisserait l'affichage bloqué en mode « résultats de
+    // recherche » sans aucun champ visible pour la voir ou l'effacer — on la vide.
+    if (!searchVisible && STATE.filters.globalQ) { STATE.filters.globalQ = ''; saveFilters(); }
+
+    content.innerHTML = `
+      <div class="crrav-top">
+        <div class="crrav-row crrav-row-main">
+          <h1 class="crrav-brand">${logoSvg('panel', 18)}<span class="crrav-brand-text">Mon <span>Crunchy</span></span></h1>
+          ${!CFG.showSearchBar ? `<button class="crrav-sync crrav-icobtn" data-act="togglesearch"
+            aria-pressed="${searchBarForcedOpen}" title="${searchBarForcedOpen ? 'Masquer la recherche' : 'Chercher partout'}"
+            >🔍<span class="crrav-btn-label">Recherche</span></button>` : ''}
+          <button class="crrav-filtersbtn crrav-icobtn" data-act="filters" aria-pressed="${STATE.filters.headerCollapsed}"
+            title="${STATE.filters.headerCollapsed ? 'Déplier les filtres et les stats' : 'Replier les filtres et les stats'}"
+            >${STATE.filters.headerCollapsed ? '▸' : '▾'}<span class="crrav-btn-label">Filtres</span></button>
+          ${viewBtn}
+          ${moreDiscoverBtn}
+          ${legendaryDiscoverBtn}
+          <button class="crrav-sync crrav-icobtn crrav-hpush" data-act="retry" title="Actualiser">🔄<span class="crrav-btn-label">Actualiser</span></button>
+          <button class="crrav-sync crrav-icobtn crrav-tvbtn" data-act="tv" aria-pressed="${CFG.tvMode}"
+            title="${CFG.tvMode ? 'Repasser en affichage bureau' : 'Mode TV / salon — gros caractères lisibles de loin'}"
+            >📺<span class="crrav-btn-label">TV</span></button>
+          <button class="crrav-sync crrav-icobtn" data-act="settings" aria-expanded="${STATE.settingsOpen}"
+            title="Réglages">⚙<span class="crrav-btn-label">Réglages</span></button>
+          <button class="crrav-close" data-act="close" aria-label="Fermer">✕</button>
+        </div>
+        ${searchVisible ? `<div class="crrav-globalrow">
+          <input class="crrav-search crrav-search-global" data-scope="global"
+            placeholder="Chercher partout — tes listes, hors listes, découverte…"
+            value="${escapeHtml(STATE.filters.globalQ)}">
+          ${STATE.filters.globalQ ? `<button class="crrav-globalclear" data-act="clearglobal"
+            aria-label="Effacer la recherche">✕</button>` : ''}
+        </div>` : ''}
+        <div class="crrav-tabs" role="tablist">${tabs}</div>
+        ${renderActivityBar()}
+        ${errorBanner()}
+        ${STATE.filters.globalQ.trim() ? renderGlobalSearch()
+          : STATE.tab === 'decouverte' ? renderDecouverte()
+          : STATE.tab === 'orphelines' ? renderOrphelines()
+          : STATE.tab === 'stats' ? renderStats()
+          : STATE.tab === 'calendrier' ? renderCalendrier()
+          : renderSuivi()}`
+      + settingsSheet + listPickerSheet;
+
+    // Restauration du défilement, juste après le remplacement du DOM.
+    if (prevScroll > 0 && content.scrollHeight > content.clientHeight) content.scrollTop = prevScroll;
+    if (prevSheetScroll > 0) {
+      const sheetEl = content.querySelector('.crrav-sheetbody');
+      if (sheetEl) sheetEl.scrollTop = prevSheetScroll;
+    }
+
+    // Liens vers l'appli Crunchyroll (intent://) : sur Chromium (Edge/Chrome), un scheme
+    // externe n'est routé hors du conteneur PWA standalone vers l'OS QUE sur un vrai clic
+    // natif d'un lien ouvrant en _blank. On pose donc l'attribut ici, au rendu, pour que le
+    // tap soit 100 % natif (aucune manip JS au clic). Les liens de test du diagnostic
+    // (data-applink-raw) sont exclus : ils portent déjà leur propre target à comparer.
+    // Inutile sur Gecko, où c'est location.href qui déclenche l'intent (voir handler de clic).
+    if (!IS_GECKO) {
+      content.querySelectorAll('a[href^="intent://"]:not([data-applink-raw])').forEach((a) => {
+        a.target = '_blank';
+        a.rel = 'noopener';
+      });
+    }
+
+    // (#6) Après l'affichage, en tâche de fond : n'impacte jamais le temps de rendu.
+    idle(() => scheduleHueExtraction());
+
+    // (24) Le DOM est entièrement reconstruit à chaque render : on réenregistre les
+    // listeners toggle pour que l'ouverture/fermeture manuelle (mode compact) soit
+    // mémorisée et survive au prochain render plutôt que de revenir à l'état par défaut.
+    content.querySelectorAll('.crrav-accordion[data-acc]').forEach((el) => {
+      el.addEventListener('toggle', () => {
+        if (suppressAccToggle) return;
+        const id = el.dataset.acc;
+        if (el.open) statsAccordionOpen.add(id); else statsAccordionOpen.delete(id);
+      });
+    });
+
+    // (30) Recherche interne aux Réglages (filtre les champs à la volée, sans re-render).
+    const setSearch = content.querySelector('.crrav-setsearch-input');
+    if (setSearch) {
+      setSearch.addEventListener('input', () => applySettingsFilter(setSearch));
+      const setClr = content.querySelector('.crrav-setsearch-clear');
+      if (setClr) setClr.addEventListener('click', () => {
+        setSearch.value = ''; applySettingsFilter(setSearch); setSearch.focus();
+      });
+      if (settingsSearchQ) { setSearch.value = settingsSearchQ; applySettingsFilter(setSearch); }
+    }
+
+    // (31) Boutons − / + des champs numériques : incrémentent d'un pas, en respectant min/max.
+    content.querySelectorAll('.crrav-step').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const inp = btn.closest('.crrav-numwrap') && btn.closest('.crrav-numwrap').querySelector('input[data-set]');
+        if (!inp) return;
+        const step = parseFloat(inp.step) || 1;
+        const dir = btn.dataset.stepDir === 'up' ? 1 : -1;
+        let v = parseFloat(String(inp.value).replace(',', '.'));
+        if (!Number.isFinite(v)) v = parseFloat(inp.min) || 0;
+        v = Math.round((v + dir * step) / step) * step;          // évite la dérive flottante
+        v = parseFloat(v.toFixed(2));
+        if (inp.min !== '') v = Math.max(parseFloat(inp.min), v);
+        if (inp.max !== '') v = Math.min(parseFloat(inp.max), v);
+        inp.value = v;
+        inp.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    });
+
+    // (31) Curseur de note : libellé « ≥ x ★ » mis à jour en direct.
+    content.querySelectorAll('.crrav-rangeinput').forEach((rg) => {
+      const out = rg.closest('.crrav-rangewrap') && rg.closest('.crrav-rangewrap').querySelector('.crrav-rangeval');
+      const upd = () => {
+        if (!out) return;
+        const v = parseFloat(rg.value) || 0;
+        const pct = ((v - rg.min) / (rg.max - rg.min)) * 100;
+        rg.style.setProperty('--fill', pct + '%');
+        out.textContent = v === 0 ? 'toutes les notes' : '≥ ' + String(v).replace('.', ',') + ' ★';
+      };
+      rg.addEventListener('input', upd); upd();
+    });
+
+    // (31) Genres exclus : cases à cocher → met à jour l'<input caché> lu par collectSettings.
+    content.querySelectorAll('.crrav-genrefield').forEach((field) => {
+      const hidden = field.querySelector('.crrav-genre-hidden');
+      const list = field.querySelector('.crrav-genrelist');
+      if (!hidden || !list) return;
+      const recompute = () => {
+        const toks = [...list.querySelectorAll('.crrav-genre-cb:checked')]
+          .map((cb) => cb.value.trim().toLowerCase()).filter(Boolean);
+        hidden.value = [...new Set(toks)].join(', ');
+      };
+      list.addEventListener('change', (e) => {
+        const cb = e.target.closest('.crrav-genre-cb'); if (!cb) return;
+        const lab = cb.closest('.crrav-genre'); if (lab) lab.classList.toggle('on', cb.checked);
+        recompute();
+      });
+      const more = field.querySelector('.crrav-genre-more');
+      const addBtn = field.querySelector('.crrav-genre-addbtn');
+      const empty = list.querySelector('.crrav-genre-empty');
+      const add = () => {
+        const raw = (more.value || '').trim(); if (!raw) return;
+        const low = raw.toLowerCase();
+        const existing = [...list.querySelectorAll('.crrav-genre-cb')]
+          .find((cb) => cb.value.toLowerCase() === low);
+        if (existing) {
+          existing.checked = true;
+          const lab = existing.closest('.crrav-genre'); if (lab) lab.classList.add('on');
+        } else {
+          if (empty) empty.remove();
+          const lab = document.createElement('label');
+          lab.className = 'crrav-genre on';
+          const cb = document.createElement('input');
+          cb.type = 'checkbox'; cb.className = 'crrav-genre-cb'; cb.checked = true; cb.value = low;
+          const sp = document.createElement('span'); sp.textContent = raw;
+          lab.appendChild(cb); lab.appendChild(sp); list.appendChild(lab);
+        }
+        more.value = ''; recompute(); more.focus();
+      };
+      if (addBtn) addBtn.addEventListener('click', add);
+      if (more) more.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); add(); }
+      });
+    });
+
+    const search = content.querySelector('.crrav-search-global');
+    if (search) {
+      search.addEventListener('input', debounce((e) => {
+        STATE.filters.globalQ = e.target.value;
+        // (7) La recherche porte sur les 3 sources : si Hors listes ou Découverte
+        // n'ont encore jamais été chargées, on lance leur scan en tâche de fond —
+        // comme à l'ouverture normale de ces onglets — pour que leurs résultats
+        // apparaissent dès qu'ils sont prêts, sans que l'utilisateur ait à y penser.
+        if (STATE.filters.globalQ.trim()) {
+          if (!STATE.orphan.series.length && !STATE.orphan.loading) refreshOrphelines();
+          if (!STATE.discover.series.length && !STATE.discover.loading) refreshDiscover();
+        }
+        renderNow();                       // le focus est repris juste après : rendu immédiat
+        const s = root.querySelector('.crrav-search-global');
+        if (s) { s.focus(); s.setSelectionRange(s.value.length, s.value.length); }
+      }, 220));
+    }
+
+    // (27) Recherche dans le panneau « Séries ignorées » — même principe que la
+    // recherche globale (focus repris après le rendu), mais purement locale : pas de
+    // requête, juste un filtre sur la liste déjà en mémoire.
+    const ignSearch = content.querySelector('.crrav-search-ignored');
+    if (ignSearch) {
+      ignSearch.addEventListener('input', debounce((e) => {
+        STATE.ignoredQ = e.target.value;
+        forceRender();
+        const s = root.querySelector('.crrav-search-ignored');
+        if (s) { s.focus(); s.setSelectionRange(s.value.length, s.value.length); }
+      }, 180));
+    }
+  }
+
+  function debounce(fn, ms) {
+    let t;
+    return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
+  }
+
+  const refresh = () => loadAll((m) => { progressMsg = m; render(); });
+  const refreshDiscover = () => loadDiscover((m) => { progressMsg = m; render(); });
+  // Relance explicite : on force la fraîcheur (historique + ajouts récents en liste).
+  const relaunchDiscover = () => loadDiscover((m) => { progressMsg = m; render(); }, { force: true });
+  const refreshMoreDiscover = () => loadDiscover((m) => { progressMsg = m; render(); }, { more: true, force: true });
+  // 🎲 Dé légendaire : premier clic = recherche fraîche de pépites légendaires uniquement,
+  // scan bien plus profond. Un second clic, tant que le tirage précédent était déjà un dé
+  // légendaire, en cherche d'AUTRES (même logique que « 30 autres pépites », via `more`).
+  const legendaryHuntDiscover = () => loadDiscover((m) => { progressMsg = m; render(); },
+    { legendary: true, force: true, more: STATE.discover.legendaryHunt === true });
+  const refreshOrphelines = () => loadOrphelines((m) => { progressMsg = m; render(); });
+  const refreshNewPremieres = () => loadNewPremieres((m) => { progressMsg = m; render(); });
+  // Préchargement à l'INACTIVITÉ : prépare « Hors listes » pendant que tu lis, pour que
+  // l'onglet s'ouvre instantanément. Volontairement limité à cet onglet : Découverte
+  // lance une recherche coûteuse (des dizaines de requêtes) qu'il serait absurde de
+  // dépenser pour un onglet que tu n'ouvriras peut-être pas. Une seule fois par session,
+  // uniquement panneau ouvert, onglet visible et rien d'autre en cours.
+  let prefetched = false;
+  function prefetchIdle() {
+    if (prefetched || !CFG.prefetchTabs) return;
+    if (!root || root.style.display === 'none') return;
+    if (document.visibilityState !== 'visible') return;
+    if (STATE.loading || STATE.orphan.loading || STATE.orphan.series.length) return;
+    prefetched = true;
+    idle(() => {
+      // Re-vérification au moment de partir : l'utilisateur a pu changer d'onglet entre-temps.
+      if (STATE.loading || STATE.orphan.loading || STATE.orphan.series.length) return;
+      LOG('préchargement de Hors listes à l\'inactivité');
+      safeCall(() => loadOrphelines(() => {}), undefined, 'prefetch:orphan');
+    });
+  }
+
+  const refreshActive = () => {
+    clearPlayheadMemo();          // relance manuelle : on veut des progressions fraîches
+    // Relance manuelle (bouton « Réessayer » / « Actualiser ») : le token est
+    // probablement la cause de l'échec, on le marque périmé pour forcer un renouvellement.
+    token = null; tokenExp = 0;
+    return STATE.tab === 'decouverte' ? relaunchDiscover() :
+      STATE.tab === 'orphelines' ? refreshOrphelines() :
+      refresh();
+  };
+
+  function open() {
+    mountStyles();
+    if (!root) {
+      root = document.createElement('div');
+      root.className = 'crrav-overlay';
+      // Structure fixe : l'indicateur de pull-to-refresh doit survivre aux rendus,
+      // qui ne réécrivent que .crrav-content.
+      root.innerHTML = '<div class="crrav-ptr">↓</div><div class="crrav-content"></div>';
+      attachPullToRefresh(root, root.querySelector('.crrav-ptr'));
+      root.addEventListener('click', (e) => {
+        // Lien vers l'appli Crunchyroll (voir crUrl) : dans certains contextes — surtout une
+        // PWA installée (« mode application »), display:standalone — un simple <a href="intent://…">
+        // laissé au comportement par défaut du navigateur peut être avalé silencieusement (le
+        // conteneur standalone ne relaie pas toujours l'intent au système). On force donc la
+        // navigation explicitement via location.href, ce qui déclenche fiablement l'intent
+        // Android même dans ces cas-là. `debug(true)` (voir resteAVoir.debug) trace la tentative.
+        const appLink = e.target.closest('a[href^="intent://"]');
+        if (appLink) {
+          // Liens de test du diagnostic : comportement natif BRUT, on ne les touche pas
+          // (ils servent justement à comparer les méthodes de déclenchement entre elles).
+          if (appLink.hasAttribute('data-applink-raw')) return;
+          const href = appLink.getAttribute('href');
+          if (IS_GECKO) {
+            // Gecko : en PWA standalone le clic natif est avalé → navigation top-level
+            // explicite, seul moyen fiable d'y déclencher l'intent.
+            e.preventDefault();
+            LOG('ouverture appli Crunchyroll (Gecko/location.href) via', href);
+            window.location.href = href;
+            return;
+          }
+          // Chromium : le lien porte déjà target="_blank" (posé au rendu) et seul un vrai
+          // clic natif sur le lien réel sort du conteneur PWA standalone vers l'OS. On NE
+          // preventDefault PAS et on ne substitue AUCUN lien synthétique : on laisse le
+          // navigateur suivre le lien lui-même.
+          LOG('ouverture appli Crunchyroll (Chromium/clic natif _blank) via', href);
+          return;
+        }
+        const info = e.target.closest('.crrav-info');
+        if (info) {
+          e.preventDefault();
+          const syn = info.parentElement.querySelector('.crrav-syn');
+          if (syn) info.setAttribute('aria-expanded', String(syn.classList.toggle('show')));
+          return;
+        }
+        // (8) ignorer / restaurer : pas de rechargement, juste un re-rendu.
+        const sim = e.target.closest('[data-similar]');
+        if (sim) {
+          const knownCats = sim.dataset.similarCats ? sim.dataset.similarCats.split('|') : [];
+          discoverSimilarTo(sim.dataset.similar, sim.dataset.similarTitle, knownCats);
+          return;
+        }
+        const ign = e.target.closest('[data-ignore]');
+        if (ign) {
+          e.preventDefault();
+          toggleIgnored(ign.dataset.ignore, ign.dataset.title, ign.dataset.source,
+            ign.dataset.poster, ign.dataset.synopsis);
+          forceRender(); return;
+        }
+        // Ajout direct à une Crunchylist depuis Découverte (ou ouverture du choix de
+        // liste si CFG.askListEachTime est activé).
+        const addBtn2 = e.target.closest('[data-addlist]');
+        if (addBtn2) {
+          e.preventDefault();
+          const seriesId = addBtn2.dataset.addlist;
+          const title = addBtn2.dataset.title || '';
+          if (CFG.askListEachTime) {
+            STATE.listPicker = { seriesId, title };
+            ensureMyListsLoaded();
+            forceRender();
+          } else {
+            handleAddToList(seriesId, title, effectiveListId());
+          }
+          return;
+        }
+        // Choix d'une liste dans la feuille de sélection.
+        const pickOpt = e.target.closest('[data-picklist]');
+        if (pickOpt && STATE.listPicker) {
+          e.preventDefault();
+          const { seriesId, title } = STATE.listPicker;
+          STATE.listPicker = null;
+          handleAddToList(seriesId, title, pickOpt.dataset.picklist);
+          return;
+        }
+        if (e.target.closest('[data-picklist-cancel]')) {
+          e.preventDefault();
+          STATE.listPicker = null;
+          forceRender(); return;
+        }
+        if (e.target.classList && e.target.classList.contains('crrav-listpicker')) {
+          STATE.listPicker = null;
+          forceRender(); return;
+        }
+        // (9) cycle à trois états : neutre → garder → exclure → neutre.
+        const catScoped = e.target.closest('[data-cat][data-catscope]');
+        if (catScoped) {
+          // Puces de genre de Reste à voir / Hors listes : même cycle à 3 états
+          // (neutre → garder → exclure → neutre) que Découverte, mais SANS relance :
+          // tout est filtré en mémoire, donc aucune requête.
+          const scope = catScoped.dataset.catscope;
+          const c = catScoped.dataset.cat;
+          const IN = scope === 'orphan' ? STATE.filters.orphanCatsIn
+            : scope === 'newprem' ? STATE.filters.newPremCatsIn
+            : STATE.filters.catsIn;
+          const EX = scope === 'orphan' ? STATE.filters.orphanCatsEx
+            : scope === 'newprem' ? STATE.filters.newPremCatsEx
+            : STATE.filters.catsEx;
+          const iIn = IN.indexOf(c), iEx = EX.indexOf(c);
+          if (iIn === -1 && iEx === -1) IN.push(c);
+          else if (iIn !== -1) { IN.splice(iIn, 1); EX.push(c); }
+          else EX.splice(iEx, 1);
+          saveFilters(); render(); return;
+        }
+        const cat = e.target.closest('[data-cat]:not([data-catscope])');
+        if (cat) {
+          const c = cat.dataset.cat;
+          const IN = STATE.filters.discoverCatsIn;
+          const EX = STATE.filters.discoverCatsEx;
+          const iIn = IN.indexOf(c), iEx = EX.indexOf(c);
+          if (iIn === -1 && iEx === -1) IN.push(c);            // neutre → garder
+          else if (iIn !== -1) { IN.splice(iIn, 1); EX.push(c); }  // garder → exclure
+          else EX.splice(iEx, 1);                              // exclure → neutre
+          // Un clic manuel sur un genre sort du mode « baguette magique » (AND strict) :
+          // on repasse en filtre classique (OR), sinon cocher un 2e genre ne renverrait
+          // plus rien puisqu'aucune série ne cumule les deux par hasard.
+          STATE.filters.discoverCatsInMode = 'any';
+          saveFilters(); render(); return;
+        }
+        const toggle = e.target.closest('[data-toggle]');
+        if (toggle) {
+          const k = toggle.dataset.toggle;
+          STATE.filters[k] = !STATE.filters[k];
+          saveFilters();
+          STATE.settingsOpen ? forceRender() : render();
+          // (30) même logique qu'à l'ouverture de Réglages : la vue « Ignorées » de
+          // Découverte est le seul endroit où le poster ne peut PAS venir de STATE.
+          if ((k === 'showIgnored' || k === 'showIgnoredDiscover') && STATE.filters[k]) backfillIgnoredMeta();
+          return;
+        }
+        const chip = e.target.closest('.crrav-chip');
+        if (chip && chip.dataset.status) {
+          STATE.filters.status = chip.dataset.status;
+          saveFilters(); render(); return;
+        }
+        const tabBtn = e.target.closest('[data-tab]');
+        if (tabBtn) {
+          STATE.tab = tabBtn.dataset.tab;
+          STATE.filters.globalQ = '';   // (7) revient à la navigation par onglet normale
+          render();
+          if (STATE.tab === 'decouverte' && !STATE.discover.series.length && !STATE.discover.loading) {
+            refreshDiscover();
+          }
+          if (STATE.tab === 'decouverte') ensureMyListsLoaded();
+          if (STATE.tab === 'orphelines' && !STATE.orphan.series.length && !STATE.orphan.loading) {
+            refreshOrphelines();
+          }
+          if (STATE.tab === 'calendrier' && CFG.discoverNewPremieres
+            && !STATE.newPremieres.series.length && !STATE.newPremieres.loading) {
+            refreshNewPremieres();
+          }
+          return;
+        }
+        const act = e.target.closest('[data-act]');
+        if (!act) return;
+        if (act.dataset.act === 'close') close();
+        if (act.dataset.act === 'clearglobal') {
+          STATE.filters.globalQ = '';
+          renderNow();                     // idem : on relit le DOM juste derrière
+          const s = root.querySelector('.crrav-search-global');
+          if (s) s.focus();
+          return;
+        }
+        if (act.dataset.act === 'retry') refreshActive();
+        if (act.dataset.act === 'reload') { location.reload(); return; }
+        if (act.dataset.act === 'more-discover') refreshMoreDiscover();
+        if (act.dataset.act === 'relaunch-discover') relaunchDiscover();
+        if (act.dataset.act === 'legendary-discover') legendaryHuntDiscover();
+        if (act.dataset.act === 'clear-similar') {
+          STATE.discover.similarTo = null;
+          STATE.filters.discoverCatsIn = [];
+          STATE.filters.discoverCatsInMode = 'any';
+          STATE.discover.series = [];
+          render();
+          refreshDiscover();
+          return;
+        }
+        if (act.dataset.act === 'probe-history') {
+          runHistoryProbe();
+          return;
+        }
+        if (act.dataset.act === 'test-applink') {
+          const url = crSeriesUrl('G6497W726', 'test');
+          LOG('test manuel ouverture appli Crunchyroll via', url, '· moteur', IS_GECKO ? 'Gecko (location.href)' : 'Chromium (clic natif)');
+          openCrunchyrollApp(url);
+          return;
+        }
+        if (act.dataset.act === 'probe-anilist') {
+          runAnilistDiag();
+          return;
+        }
+        if (act.dataset.act === 'full-diag') {
+          runFullDiagnostic();
+          return;
+        }
+        if (act.dataset.act === 'load-history') {
+          const startedAt = Date.now();
+          STATE.historyProgress = { done: 0, total: 0, series: 0, startedAt };
+          forceRender();
+          (async () => {
+            try {
+              const accountId = await getAccountId();
+              await getWatchedSeriesIds(accountId, (p) => {
+                STATE.historyProgress = { ...p, startedAt };
+                forceRender();
+              });
+            } catch (e) {
+              STATE.historyProgress = { error: e.message || String(e) };
+              LOG('chargement historique échoué', e);
+            } finally {
+              // Petite pause pour laisser voir « terminé », puis on affiche les stats.
+              if (STATE.historyProgress && !STATE.historyProgress.error) {
+                STATE.historyProgress = { ...STATE.historyProgress, done: STATE.historyProgress.total };
+                forceRender();
+              }
+              setTimeout(() => { STATE.historyProgress = null; forceRender(); }, 1200);
+            }
+          })();
+          return;
+        }
+        if (act.dataset.act === 'filters') {
+          STATE.filters.headerCollapsed = !STATE.filters.headerCollapsed;
+          saveFilters(); render();
+        }
+        if (act.dataset.act === 'togglesearch') {
+          searchBarForcedOpen = !searchBarForcedOpen;
+          // Fermer arrête aussi une recherche en cours : sinon elle continuerait de
+          // filtrer l'affichage sans que le champ (pour la voir/l'effacer) soit visible.
+          if (!searchBarForcedOpen && STATE.filters.globalQ) { STATE.filters.globalQ = ''; saveFilters(); }
+          forceRender();
+          if (searchBarForcedOpen) {
+            requestAnimationFrame(() => {
+              const s = root && root.querySelector('.crrav-search-global');
+              if (s) s.focus();
+            });
+          }
+          return;
+        }
+        if (act.dataset.act === 'ignored-clear') {
+          const scopeIds = act.dataset.scopeIds;
+          if (scopeIds) {
+            // Recherche/tri actifs : on ne réaffiche QUE les entrées actuellement
+            // listées, pas la totalité des séries ignorées (qui peut être bien plus
+            // large que ce que la recherche montre).
+            for (const id of scopeIds.split(',')) IGNORED.delete(id);
+          } else {
+            IGNORED.clear();
+          }
+          saveIgnored(); forceRender();
+        }
+        if (act.dataset.act === 'cats-clear') {
+          const sc = act.dataset.catscope;
+          if (sc === 'orphan') { STATE.filters.orphanCatsIn = []; STATE.filters.orphanCatsEx = []; }
+          else if (sc === 'suivi') { STATE.filters.catsIn = []; STATE.filters.catsEx = []; }
+          else if (sc === 'newprem') { STATE.filters.newPremCatsIn = []; STATE.filters.newPremCatsEx = []; }
+          else { STATE.filters.discoverCatsIn = []; STATE.filters.discoverCatsEx = []; STATE.filters.discoverCatsInMode = 'any'; }
+          saveFilters(); render(); return;
+        }
+        if (act.dataset.act === 'view') {
+          STATE.filters.view = STATE.filters.view === 'list' ? 'grid' : 'list';
+          saveFilters(); render();
+        }
+        if (act.dataset.act === 'copy-raw') {
+          const head = act.closest('.crrav-probe-rawhead');
+          const raw = head && head.nextElementSibling;
+          copyTextToClipboard(act, raw ? raw.textContent : '');
+          return;
+        }
+        if (act.dataset.act === 'copy-full-diag') {
+          copyTextToClipboard(act, STATE.fullDiagText || '');
+          return;
+        }
+        if (act.dataset.act === 'settings') {
+          STATE.settingsOpen = !STATE.settingsOpen; forceRender();
+          // (30) comble jaquette/résumé manquants sur les entrées ignorées avant 2.87
+          // (voir backfillIgnoredMeta) — no-op si tout est déjà là.
+          if (STATE.settingsOpen) backfillIgnoredMeta();
+          // (fix) Sous ~720px OU sur tout écran tactile, la sheet passe en plein écran
+          // (position:fixed) et est donc visible immédiatement — inutile, et même
+          // contre-productif, d'y appliquer un scrollIntoView : sur un élément déjà
+          // fixed, ça peut faire défiler le fond de façon imprévisible (c'est ce qui
+          // causait le bug sur Z Fold ouvert). Seul le cas desktop-large-écran-souris
+          // (panneau inséré en ligne après le contenu) a besoin de ce scroll.
+          if (STATE.settingsOpen) {
+            const sheet = root.querySelector('.crrav-settingssheet');
+            const isFullscreenSheet = sheet && getComputedStyle(sheet).position === 'fixed';
+            if (sheet && !isFullscreenSheet) sheet.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          }
+        }
+        if (act.dataset.act === 'settings-save') {
+          // Empreinte AVANT changement, réglage par réglage, pour savoir précisément
+          // ce qui a bougé et ne relancer que ce qui le nécessite.
+          const snap = () => Object.fromEntries(SETTINGS_KEYS.map((k) =>
+            [k, JSON.stringify(CFG[k])]));
+          const before = snap();
+          saveSettings(collectSettings());
+          const after = snap();
+
+          // Impact le plus fort parmi les réglages modifiés.
+          const rank = { display: 0, anilist: 1, newpremieres: 1, discover: 2, history: 3, suivi: 4 };
+          let impact = null;
+          for (const f of SETTINGS_SCHEMA) {
+            if (before[f.key] !== after[f.key]) {
+              if (impact === null || rank[f.impact] > rank[impact]) impact = f.impact;
+            }
+          }
+
+          scheduleAutoRefresh();               // refreshMinutes a pu changer
+          STATE.settingsOpen = false;
+
+          if (impact === 'suivi') {
+            // Le calcul « vu / en diffusion / films » change : on rescanne les épisodes.
+            invalidateCache(['eps3:', 'snapshot']);
+            STATE.series = [];
+            showToast('✓ Réglage enregistré — réanalyse de tes séries en cours…');
+            progressMsg = 'Réanalyse de tes séries…';
+            forceRender();
+            refresh();
+          } else if (impact === 'history') {
+            // La profondeur d'historique change : on l'invalide, il sera rescanné.
+            invalidateCache(['watchedids:']);
+            STATE.discover.series = [];
+            showToast('✓ Réglage enregistré — relecture de ton historique en cours…');
+            progressMsg = 'Relecture de ton historique…';
+            forceRender();
+            // Si on est sur Stats, on recharge l'historique tout de suite ; sinon il le
+            // sera à la prochaine ouverture de Découverte/Stats.
+            if (STATE.tab === 'stats') {
+              (async () => {
+                try { await getWatchedSeriesIds(await getAccountId()); render(); }
+                catch (e) { LOG('relecture historique échouée', e); }
+              })();
+            }
+          } else if (impact === 'discover') {
+            STATE.discover.series = [];
+            showToast('✓ Réglage enregistré — nouvelle recherche de pépites…');
+            progressMsg = 'Nouvelle recherche de pépites…';
+            forceRender();
+            if (STATE.tab === 'decouverte') refreshDiscover();
+          } else if (impact === 'newpremieres') {
+            // Activé/désactivé : on repart d'une liste vierge (si désactivé, elle reste
+            // vide ; si réactivé, refreshNewPremieres la remplit si Calendrier est ouvert).
+            // On vide aussi `debug` avec `series` : sinon le panneau « Pourquoi c'est vide ? »
+            // continuait d'afficher le détail de l'ANCIEN chargement (avec d'anciens réglages)
+            // pendant la brève fenêtre avant le rechargement, ou restait bloqué à `null` (donc
+            // invisible) si ce réglage était changé hors de l'onglet Calendrier.
+            STATE.newPremieres.series = [];
+            STATE.newPremieres.debug = null;
+            showToast('✓ Réglage enregistré');
+            forceRender();
+            if (STATE.tab === 'calendrier' && CFG.discoverNewPremieres) refreshNewPremieres();
+          } else if (impact === 'anilist') {
+            // Le total prévu / fin de saison (AniList) est activé ou désactivé : on repart
+            // d'un cache AniList vierge et on ré-enrichit si c'est réactivé.
+            invalidateCache(['anilist:']);
+            for (const s of STATE.series) {
+              s.plannedTotal = null; s.seasonEndTs = null; s.plannedApprox = false; s.anilistStatus = null;
+            }
+            STATE.anilistWarning = null;   // réglage retouché : on laisse le prochain passage juger à neuf
+            showToast('✓ Réglage enregistré');
+            forceRender();
+            if (CFG.anilistSchedule) idle(() => enrichAnilistSchedule(STATE.series));
+          } else {
+            // impact 'display' ou aucun changement : simple ré-affichage, zéro requête.
+            showToast('✓ Réglages enregistrés');
+            forceRender();
+          }
+        }
+        if (act.dataset.act === 'settings-reset') {
+          resetSettings(); scheduleAutoRefresh(); forceRender();
+        }
+        if (act.dataset.act === 'tv') {
+          // Bascule directe : le mode TV se change bien plus souvent que les autres
+          // réglages (on branche puis débranche l'écran du salon), d'où ce raccourci.
+          saveSettings({ tvMode: !CFG.tvMode });
+          showToast(CFG.tvMode ? '📺 Mode TV activé' : '🖥 Affichage bureau restauré');
+          forceRender();
+          return;
+        }
+        if (act.dataset.act === 'export-settings') { exportSettings(); return; }
+        if (act.dataset.act === 'import-settings') {
+          const inp = root.querySelector('[data-import-file]');
+          if (inp) inp.click();
+          return;
+        }
+        if (act.dataset.act === 'clear-cache') {
+          const n = clearCache();
+          STATE.series = []; STATE.discover.series = []; STATE.orphan.series = [];
+          STATE.settingsOpen = false;
+          progressMsg = `${n} entrées de cache supprimées — tout est retéléchargé.`;
+          render();
+          refreshActive();
+        }
+      });
+      root.addEventListener('change', (e) => {
+        // Sélection d'un fichier de configuration à importer.
+        if (e.target.matches('[data-import-file]')) {
+          const file = e.target.files && e.target.files[0];
+          e.target.value = '';            // permet de réimporter le même fichier ensuite
+          if (file) importSettings(file);
+          return;
+        }
+        if (e.target.dataset.act === 'diag-select-series') {
+          STATE.anilistDiagTargetId = e.target.value;
+          STATE.anilistDiag = null;      // ancien résultat périmé, pour ne pas induire en erreur
+          forceRender();
+          return;
+        }
+        if (e.target.dataset.act === 'sort') {
+          const scope = e.target.dataset.scope;
+          const key = scope === 'discover' ? 'discoverSort' : scope === 'orphan' ? 'orphanSort' : 'sort';
+          STATE.filters[key] = e.target.value;
+          saveFilters(); render();
+        }
+        if (e.target.dataset.act === 'ignored-sort') {
+          STATE.ignoredSort = e.target.value;
+          forceRender();
+        }
+      });
+      document.body.appendChild(root);
+    }
+    root.style.display = 'block';
+    document.documentElement.style.overflow = 'hidden';
+
+    // Ouverture instantanée : on repeint le dernier état connu avant de lancer
+    // les ~25 s d'appels. Les données seront remplacées dès qu'elles arrivent.
+    if (!STATE.series.length && !STATE.loading) {
+      const snap = snapshotLoad();
+      if (snap) {
+        STATE.series = snap;
+        STATE.fromSnapshot = true;
+        LOG(`instantané affiché : ${snap.length} séries — actualisation en arrière-plan`);
+      }
+    }
+    render();
+    if (!STATE.loading && (!STATE.series.length || STATE.fromSnapshot)) refresh();
+  }
+
+  // (4) tirer vers le bas pour actualiser. Ne s'arme que si on est déjà tout en haut,
+  // sinon on volerait le défilement normal.
+  // (29) Le panneau Réglages a son PROPRE scroll (.crrav-sheetbody), indépendant de
+  // celui du fond sur lequel ce geste est branché. Sans garde-fou, le geste se fiait
+  // au scrollTop du fond (souvent resté à 0) au lieu de celui du panneau : il restait
+  // « armé » quoi qu'il arrive et interceptait chaque scroll dans Réglages, empêchant
+  // de simplement défiler. Désactivé tant que Réglages est ouvert.
+  function attachPullToRefresh(el, ind) {
+    let startY = 0, dist = 0, armed = false;
+    const MAX = 90, TRIGGER = 60;
+
+    el.addEventListener('touchstart', (e) => {
+      if (e.touches.length !== 1 || el.scrollTop > 0 || STATE.settingsOpen) { armed = false; return; }
+      armed = true; startY = e.touches[0].clientY; dist = 0;
+    }, { passive: true });
+
+    el.addEventListener('touchmove', (e) => {
+      if (!armed || STATE.settingsOpen) { armed = false; return; }
+      dist = e.touches[0].clientY - startY;
+      if (dist <= 0 || el.scrollTop > 0) { armed = false; ind.style.opacity = ''; ind.style.transform = ''; return; }
+      const d = Math.min(dist * 0.5, MAX);
+      ind.style.transform = `translateY(${d}px)`;
+      ind.style.opacity = String(Math.min(d / TRIGGER, 1));
+      if (d > 8) e.preventDefault();          // on prend la main sur le geste
+    }, { passive: false });
+
+    const end = () => {
+      if (!armed) return;
+      armed = false;
+      const d = Math.min(dist * 0.5, MAX);
+      ind.style.transform = '';
+      ind.style.opacity = '';
+      if (d >= TRIGGER && !isActiveLoading()) refreshActive();
+    };
+    el.addEventListener('touchend', end, { passive: true });
+    el.addEventListener('touchcancel', end, { passive: true });
+  }
+
+  const isActiveLoading = () => (
+    STATE.tab === 'decouverte' ? STATE.discover.loading
+      : STATE.tab === 'orphelines' ? STATE.orphan.loading
+        : STATE.loading
+  );
+
+  let autoTimer = null;
+  function scheduleAutoRefresh() {
+    if (autoTimer) clearInterval(autoTimer);
+    autoTimer = setInterval(() => {
+      if (root && root.style.display !== 'none' && STATE.tab === 'suivi' && !STATE.loading) refresh();
+    }, Math.max(1, CFG.refreshMinutes) * 60e3);
+  }
+
+  function close() {
+    if (root) root.style.display = 'none';
+    document.documentElement.style.overflow = '';
+    // (7) c'est ici, et seulement ici, qu'on considère la visite terminée :
+    // les pastilles « nouvel épisode » survivent aux rafraîchissements auto.
+    commitAirSnapshot();
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && root && root.style.display !== 'none') close();
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  //  6. Démarrage
+  // ─────────────────────────────────────────────────────────────
+  function addFab() {
+    if (!document.body) return false;
+    if (fab && document.body.contains(fab)) return true;
+    mountStyles();
+    fab = document.createElement('button');
+    fab.className = 'crrav-fab';
+    fab.type = 'button';
+    fab.innerHTML = `${logoSvg('fab', 18)}<span>Mon Crunchy</span>`;
+    fab.addEventListener('click', open);
+    document.body.appendChild(fab);
+    return true;
+  }
+
+  function boot() {
+    // Idempotent : le fallback « if (!fab) boot() » à 3 s peut rappeler boot() après un
+    // premier passage où addFab a échoué. Sans ce garde-fou on doublait les intervalles
+    // (addFab, refresh token) et les listeners resize/orientation/visibility. Le bouton,
+    // lui, reste couvert par l'intervalle addFab de 2 s installé juste en dessous.
+    if (boot.done) return;
+    boot.done = true;
+    LOG('boot — ajout du bouton');
+    try { addFab(); } catch (e) { console.error('[reste-à-voir] échec du bouton', e); }
+    setInterval(() => safeCall(addFab, undefined, 'addFab:interval'), 2000);
+    scheduleAutoRefresh();   // reprogrammable si tu changes le délai dans les réglages
+    let hiddenAt = 0;
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') { hiddenAt = Date.now(); return; }
+      if (document.visibilityState !== 'visible') return;
+      const awayMs = hiddenAt ? Date.now() - hiddenAt : 0;
+      hiddenAt = 0;
+      // Retour au premier plan. Les onglets mobiles gèlent en arrière-plan : au réveil,
+      // l'estimation d'expiration n'est pas fiable et le token est souvent mort. Dès qu'on
+      // s'est absenté un peu (ou qu'on approche de l'expiration estimée), on REVALIDE
+      // ACTIVEMENT le token (test + renouvellement si mort) — c'est précisément ce qui
+      // évite d'avoir à recharger la page à la main. Uniquement si le panneau a déjà servi.
+      if (root && (awayMs > 30e3 || Date.now() >= tokenExp - 15e3)) {
+        safeCall(() => revalidateToken(), undefined, 'resume:revalidate');
+      }
+      if (!root || root.style.display === 'none' || STATE.tab !== 'suivi' || STATE.loading) return;
+      if (STATE.lastSync && Date.now() - STATE.lastSync.getTime() > CFG.refreshMinutes * 60e3) refresh();
+    });
+    // Restauration depuis le cache bfcache (navigation arrière/avant, fréquente sur mobile) :
+    // pageshow.persisted est vrai et aucun visibilitychange n'est garanti.
+    window.addEventListener('pageshow', (e) => {
+      if (e && e.persisted && root) safeCall(() => revalidateToken(), undefined, 'pageshow:revalidate');
+    });
+
+    // (17) Le token Crunchyroll expire en ~5 min. Jusqu'ici on ne le renouvelait
+    // qu'après coup (au prochain appel, ou sur un 401). Ici, dès qu'il reste moins de
+    // 45 s de validité et que l'onglet est visible (inutile de renouveler un token
+    // qu'un onglet gelé en arrière-plan n'utilisera pas), on le renouvelle en silence
+    // pour que la première requête d'une action utilisateur ne paie jamais le coût
+    // d'un aller-retour de renouvellement.
+    setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      if (!token || !tokenExp) return;               // rien à renouveler tant qu'aucun appel n'a eu lieu
+      if (Date.now() < tokenExp - 45e3) return;       // encore assez de marge
+      safeCall(() => refreshToken(), undefined, 'proactiveTokenRefresh');
+    }, 20e3);
+
+    // Pliage/dépliage d'un écran (Z Fold), rotation, redimensionnement de fenêtre :
+    // la largeur bascule d'un « mobile » à un « desktop » (ou l'inverse) et le panneau
+    // pouvait rester dans un état de mise en page incohérent, jusqu'à disparaître.
+    // Un re-rendu au changement de taille recalcule tout proprement.
+    let resizeTimer = null;
+    let lastW = window.innerWidth;
+    const onResize = () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        // On ne re-rend que si la largeur a réellement franchi un seuil de mise en page
+        // (évite de re-rendre pour l'apparition du clavier, qui ne change que la hauteur).
+        if (Math.abs(window.innerWidth - lastW) < 2) return;
+        lastW = window.innerWidth;
+        if (root && root.style.display !== 'none') forceRender();
+      }, 200);
+    };
+    window.addEventListener('resize', onResize);
+    window.addEventListener('orientationchange', onResize);
+  }
+
+  // Debug : resteAVoir.find('spy'), resteAVoir.state, resteAVoir.refresh()
+  safeCall(() => {
+    window.resteAVoir = Object.assign(open, {
+      open, refresh, refreshDiscover, refreshOrphelines, refreshNewPremieres, state: STATE,
+      // Même comportement que le bouton « Vider le cache » : préserve réglages,
+      // filtres, séries ignorées et pastilles « nouveau ».
+      clearCache,
+      settings: CFG,
+      // Diagnostic du token : où en est la session, et chaque canal fonctionne-t-il ?
+      async tokenInfo() {
+        const info = {
+          'token en mémoire': token ? token.slice(0, 22) + '…' : 'aucun',
+          'expire dans (s)': tokenExp ? Math.round((tokenExp - Date.now()) / 1000) : '—',
+          'token capté de la page': sniffedToken ? 'oui' : 'non',
+          'token actuel valide ?': token ? (await tokenWorks(token) ? '✅ oui' : '❌ non') : '—',
+        };
+        console.log('%c[reste-à-voir] état du token', 'color:#f47521;font-weight:bold');
+        console.table(info);
+        LOG('test du renouvellement par cookie…');
+        const c = await tokenFromCookie();
+        console.log('  /auth/v1/token (cookie) :', c ? (await tokenWorks(c) ? '✅ fonctionne' : '⚠ renvoyé mais invalide') : '❌ refusé');
+        return info;
+      },
+
+      // Sonde 1 — le serveur est-il lent pour TOUT LE MONDE, ou seulement pour moi ?
+      // Compare les appels de l'application Crunchyroll aux miens, sur la même origine,
+      // à partir des mesures du navigateur (les mêmes que l'onglet Network).
+      async netTest(n = 5) {
+        await ensureToken();
+
+        // Mes propres essais, sur l'endpoint le plus léger qui soit.
+        for (let i = 0; i < n; i++) {
+          const u = `https://www.crunchyroll.com/accounts/v1/me?_=${Date.now()}_${i}`;
+          OUR_URLS.add(u);
+          try {
+            await RAW_FETCH(u, {
+              credentials: 'include',
+              headers: { Authorization: token, Accept: 'application/json' },
+            });
+          } catch (e) { console.warn(e); }
+        }
+
+        // Le navigateur enregistre ses mesures de façon asynchrone : lire tout de
+        // suite après le fetch renvoyait des colonnes vides (le bug de la 2.9.3).
+        await new Promise((r) => setTimeout(r, 300));
+
+        const API = /crunchyroll\.com\/(content\/v2|accounts\/v1|cms\/|content-reviews)/;
+        const entries = performance.getEntriesByType('resource').filter((r) => API.test(r.name));
+        const med = (a) => {
+          if (!a.length) return null;
+          const s2 = [...a].sort((x, y) => x - y);
+          return Math.round(s2[Math.floor(s2.length / 2)]);
+        };
+        const describe = (label, list) => {
+          if (!list.length) return { source: label, appels: 0 };
+          const ttfb = list.map((r) => r.responseStart - r.requestStart).filter((x) => x > 0);
+          return {
+            source: label,
+            appels: list.length,
+            'total médian (ms)': med(list.map((r) => r.duration)),
+            'attente serveur médiane (ms)': ttfb.length ? med(ttfb) : 'non exposée',
+            'via service worker': list.some((r) => r.workerStart > 0) ? 'oui' : 'non',
+          };
+        };
+        const mine = entries.filter((r) => OUR_URLS.has(r.name));
+        const app = entries.filter((r) => !OUR_URLS.has(r.name));
+
+        console.log('%c[reste-à-voir] qui est lent ?', 'color:#f47521;font-weight:bold');
+        console.table([describe("l'application Crunchyroll", app), describe('mon script', mine)]);
+        console.log('Lecture : chiffres proches → le serveur est lent pour tout le monde, ' +
+          "rien à corriger dans le script. Application rapide et script lent → c'est ma " +
+          "façon d'appeler qui est en cause (en-têtes manquants, très probablement).");
+        if (!app.length) {
+          console.warn("Aucun appel de l'application capté : navigue sur le site (accueil, " +
+            'une fiche série) puis relance cette commande.');
+        }
+        return { mine: describe('script', mine), app: describe('app', app) };
+      },
+
+      // Sonde 2 — peut-on demander plus de 100 GUID par requête sans perdre de résultats ?
+      // 68 des 103 requêtes sont des playheads : les regrouper diviserait d'autant.
+      // Vérification empirique plutôt que pari : gros lot comparé aux petits lots.
+      async probeBatch(size = 300) {
+        const all = [...new Set(STATE.series.flatMap((s) => s.episodes.flatMap((e) => e.ids)))];
+        if (!all.length) { console.warn('Ouvre d’abord le panneau pour charger des séries.'); return; }
+        if (all.length < size) size = all.length;
+        const ids = all.slice(0, size);
+        const accountId = await getAccountId();
+        const call = async (chunk) => {
+          const r = await api(`/content/v2/${accountId}/playheads`, { content_ids: chunk.join(',') });
+          return new Set((r.data || []).map((p) => p.content_id));
+        };
+
+        const t1 = performance.now();
+        const petits = new Set();
+        for (let i = 0; i < ids.length; i += 100) {
+          for (const x of await call(ids.slice(i, i + 100))) petits.add(x);
+        }
+        const msPetits = performance.now() - t1;
+
+        const t2 = performance.now();
+        let gros;
+        try { gros = await call(ids); }
+        catch (e) {
+          console.error(`[reste-à-voir] lot de ${size} REFUSÉ par l’API :`, e.message);
+          return { verdict: 'refusé', size };
+        }
+        const msGros = performance.now() - t2;
+
+        const manquants = [...petits].filter((x) => !gros.has(x));
+        const enTrop = [...gros].filter((x) => !petits.has(x));
+        const ok = !manquants.length && !enTrop.length;
+        console.log('%c[reste-à-voir] sonde taille de lot', 'color:#f47521;font-weight:bold');
+        console.table([{
+          'GUID testés': size,
+          'par lots de 100': `${Math.ceil(size / 100)} req · ${Math.round(msPetits)} ms · ${petits.size} résultats`,
+          'en 1 seul lot': `1 req · ${Math.round(msGros)} ms · ${gros.size} résultats`,
+          verdict: ok ? '✅ identique — regroupement SÛR' : `❌ ${manquants.length} perdus, ${enTrop.length} en trop`,
+        }]);
+        if (!ok) console.warn('Résultats perdus par le gros lot :', manquants.slice(0, 10));
+        return { ok, size, manquants, enTrop, msPetits, msGros };
+      },
+
+      // Diagnostic : où part la place, et le cache fonctionne-t-il ?
+      stats() {
+        const groups = {};
+        for (const k of Object.keys(localStorage)) {
+          if (!k.startsWith(LS)) continue;
+          const g = (k.slice(LS.length).split(':')[0]) || '(racine)';
+          const size = (k.length + (localStorage.getItem(k) || '').length) * 2;
+          groups[g] = groups[g] || { entrées: 0, octets: 0 };
+          groups[g].entrées++; groups[g].octets += size;
+        }
+        const table = Object.entries(groups)
+          .sort((a, b) => b[1].octets - a[1].octets)
+          .map(([g, v]) => ({ groupe: g, entrées: v.entrées, taille: fmtBytes(v.octets) }));
+        console.log(`%c[reste-à-voir] localStorage : ${fmtBytes(lsBytes())} sur ~5 Mo`,
+          'color:#f47521;font-weight:bold');
+        console.table(table);
+        console.log('compteurs du dernier chargement :', { ...STATS });
+        return { total: lsBytes(), groups, stats: { ...STATS } };
+      },
+      resetStats() {
+        resetCounters();
+        console.log('[reste-à-voir] compteurs remis à zéro');
+      },
+      // Diagnostic AniList : montre les candidats trouvés pour un titre et le match retenu
+      // (utile pour vérifier « pourquoi telle série n'affiche pas son total prévu »).
+      // Ex. : resteAVoir.probeAnilist('stugai')
+      async probeAnilist(query) {
+        const s = STATE.series.find((x) => x.title.toLowerCase().includes(String(query || '').toLowerCase()))
+          || { title: String(query || ''), airing: true, total: 0, lastAired: null };
+        console.log('%c[reste-à-voir] sonde AniList pour', 'color:#f47521;font-weight:bold', s.title);
+        const { media, terms } = await anilistSearch(s.title);
+        console.log('termes cherchés :', terms);
+        console.table(media.map((m) => ({
+          titre: aniPrimaryTitle(m), statut: m.status, épisodes: m.episodes,
+          début: m.startDate && m.startDate.year, format: m.format,
+          score_titre: (aniPickMatch([m], s), (m.__titleScore || 0).toFixed(2)),
+        })));
+        const best = aniPickMatch(media, s);
+        if (!best) { console.warn('Aucun match assez sûr — rien ne sera affiché (garde-fou anti faux positif).'); return null; }
+        const sched = computeAniSchedule(best, s);
+        console.log('✅ match retenu :', aniPrimaryTitle(best),
+          '· prévus :', sched.plannedTotal ?? '—',
+          '· fin :', sched.seasonEndTs ? new Date(sched.seasonEndTs).toLocaleDateString('fr-FR') : '—',
+          sched.plannedApprox ? '(date estimée)' : '(date exacte)');
+        return { match: aniPrimaryTitle(best), ...sched };
+      },
+      ignored: () => Object.fromEntries(IGNORED),
+      // Diagnostic ouverture appli Crunchyroll (voir crUrl) : à lancer depuis la console
+      // du téléphone si un lien série/épisode n'ouvre pas l'appli malgré le réglage activé.
+      // Ex. : resteAVoir.testAppLink()
+      testAppLink() {
+        const url = crSeriesUrl('G6497W726', 'test');
+        console.log('%c[reste-à-voir] diagnostic lien appli', 'color:#f47521;font-weight:bold');
+        console.table([{
+          'navigator.userAgent': navigator.userAgent,
+          'Android détecté': IS_ANDROID,
+          'moteur': IS_GECKO ? 'Gecko (Firefox) → location.href' : 'Chromium (Edge/Chrome) → clic natif',
+          'réglage openInApp': CFG.openInApp,
+          'affichage': window.matchMedia('(display-mode: standalone)').matches ? 'standalone (PWA installée)' : 'onglet navigateur',
+          'lien généré': url,
+        }]);
+        if (!IS_ANDROID) { console.warn('Android non détecté par le user-agent : le lien restera en https:// quoi que fasse le réglage.'); return url; }
+        if (!CFG.openInApp) { console.warn('Réglage désactivé : coche « Forcer l’ouverture dans l’appli Crunchyroll » dans les Réglages.'); return url; }
+        console.log('Test dans 2 s : ouverture via la stratégie adaptée au moteur (' + (IS_GECKO ? 'location.href' : 'clic natif sur <a>') + ')…');
+        setTimeout(() => { openCrunchyrollApp(url); }, 2000);
+        return url;
+      },
+      // Remise à zéro complète, réglages et séries ignorées compris.
+      resetAll() {
+        const keys = Object.keys(localStorage).filter((k) => k.startsWith(LS));
+        keys.forEach((k) => safeCall(() => localStorage.removeItem(k), undefined, 'resetAll'));
+        eps3Store = null; eps3Dirty = false; clearTimeout(eps3FlushTimer);
+        IGNORED = new Map();
+        AIR_SNAP = {};
+        APP_STATE = { v: STATE_SCHEMA_VERSION, settings: {}, filters: {}, ignored: {}, airsnap: {} };
+        resetSettings();
+        console.log(`[reste-à-voir] remise à zéro totale (${keys.length} entrées)`);
+      },
+      // Active/désactive le logging des erreurs normalement avalées silencieusement
+      // (voir safeCall). Persiste entre les sessions.
+      debug: (on) => safeCall.setDebug(on),
+      find(q) {
+        const needle = String(q || '').toLowerCase();
+        const cartes = STATE.series
+          .filter((s) => s.title.toLowerCase().includes(needle))
+          .map((s) => ({
+            titre_affiché: s.title, id_série_analysée: s.id,
+            lien: `https://www.crunchyroll.com/fr/series/${s.id}/${s.slug || ''}`,
+            vus: s.seen, total: s.total, temps_restant: fmtDuration(s.secLeft), en_diffusion: s.airing,
+          }));
+        const brut = (STATE.raw || [])
+          .map((it) => (it && (it.panel || it.object)) || it)
+          .filter((p) => {
+            if (!p) return false;
+            const meta = p.episode_metadata || {};
+            return [p.title, meta.series_title, meta.season_title]
+              .some((t) => String(t || '').toLowerCase().includes(needle));
+          })
+          .map((p) => ({
+            titre_épisode: p.title,
+            titre_série: (p.episode_metadata || {}).series_title || '—',
+            type: p.type || p.__class__, id: p.id,
+            id_série: (p.episode_metadata || {}).series_id || '—',
+            panel: p,
+          }));
+        console.log('%c— cartes affichées —', 'color:#f47521;font-weight:bold');
+        console.table(cartes);
+        console.log('%c— entrées correspondantes dans ta watchlist —', 'color:#f47521;font-weight:bold');
+        console.table(brut.map(({ panel, ...r }) => r));
+        if (brut.length) console.log('panels bruts :', brut.map((b) => b.panel));
+        return { cartes, brut };
+      },
+    });
+  }, undefined, 'debug-api-init');
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', boot, { once: true });
+    setTimeout(() => { if (!fab) boot(); }, 3000);
+  } else {
+    boot();
+  }
+})();
