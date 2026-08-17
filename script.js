@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      2.137.0
+// @version      2.139.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -183,6 +183,27 @@
         opts.signal.addEventListener('abort', () => control.abort());
       }
     });
+  }
+
+  // Garde-fou universel « horloge murale ». Certaines requêtes — surtout via
+  // GM_xmlhttpRequest sur Firefox Android quand l'onglet passe en arrière-plan — peuvent
+  // PENDRE sans jamais déclencher onload, onerror NI ontimeout : le timeout interne de GM
+  // est lui aussi gelé avec l'onglet, et un AbortController ne sert à rien si le canal ne
+  // rappelle aucun callback. On obtient alors un `await` qui ne se règle JAMAIS, et toute
+  // une passe (ex. enrichissement AniList) figée à mi-parcours. withDeadline force un rejet
+  // côté horloge : dès le retour au premier plan, ce setTimeout dégèle, tranche, et libère
+  // la file — même si la requête sous-jacente est morte silencieusement. La promesse
+  // orpheline est abandonnée (petit coût mémoire ponctuel) ; c'est le prix d'une file qui
+  // ne se bloque plus jamais.
+  function withDeadline(promise, ms, label) {
+    let timer = null;
+    const guard = new Promise((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error((label || 'requête') + ' : délai dépassé (garde-fou)')),
+        ms
+      );
+    });
+    return Promise.race([promise, guard]).finally(() => { if (timer) clearTimeout(timer); });
   }
 
   // ─── Mode debug + point d'entrée unique pour les erreurs avalées ───────────
@@ -945,7 +966,9 @@
     }
     if (!res.ok) throw new Error(`${res.status} sur ${path}`);
     paceOnSuccess();
-    const json = await res.json();
+    // Le timer d'abort (20 s) a été nettoyé dans le finally ci-dessus : la lecture du corps
+    // n'est plus couverte. Sur mobile, un flux figé après en-têtes bloquerait ici sans fin.
+    const json = await withDeadline(res.json(), 20000, `Crunchyroll ${key} (lecture réponse)`);
     // (#2) Détection de changement d'API : les endpoints de collection renvoient un
     // tableau `data`. S'il disparaît, l'API a changé de forme — on le dit clairement
     // plutôt que de laisser une erreur surgir dix lignes plus loin, sans contexte.
@@ -2203,18 +2226,24 @@
       const t = ctrl ? setTimeout(() => ctrl.abort(), 12000) : null;
       let r = null, transportErr = null;
       try {
-        r = await externalFetch(ANILIST_URL, {
+        // Double filet : AbortController 12 s (annule côté réseau quand le canal coopère)
+        // + withDeadline 16 s (tranche même si AUCUN callback GM ne se déclenche — cas de
+        // l'onglet mis en arrière-plan sur Firefox Android, où timeout GM et abort sont gelés).
+        r = await withDeadline(externalFetch(ANILIST_URL, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
           body: JSON.stringify({ query, variables }),
           signal: ctrl ? ctrl.signal : undefined,
-        });
+        }), 16000, 'AniList (réponse)');
       } catch (e) { transportErr = e; }
       finally { if (t) clearTimeout(t); }
 
       // Succès plein : on renvoie (et on distingue une éventuelle erreur GraphQL applicative).
       if (!transportErr && r && r.ok) {
-        const j = await r.json();
+        // Le timer d'abort a déjà été nettoyé ci-dessus : la lecture du corps n'est plus
+        // couverte par l'AbortController. Sur le canal fetch, un flux de réponse peut se
+        // figer APRÈS l'arrivée des en-têtes — d'où un garde-fou propre à cette lecture.
+        const j = await withDeadline(r.json(), 10000, 'AniList (lecture réponse)');
         if (j.errors && j.errors.length) {
           anilistNoteStatus(false, 200, j.errors[0].message || 'erreur GraphQL');
           throw new Error('AniList: ' + (j.errors[0].message || 'erreur'));
@@ -2238,7 +2267,7 @@
         reason = (transportErr.message || String(transportErr)) || 'échec réseau';
       } else {
         let bodyText = '';
-        try { bodyText = await r.text(); } catch (_) { /* corps illisible */ }
+        try { bodyText = await withDeadline(r.text(), 8000, 'AniList (lecture corps)'); } catch (_) { /* corps illisible ou trop lent */ }
         reason = anilistReason(status, bodyText);
       }
       anilistNoteStatus(false, status || null, reason);
@@ -2708,7 +2737,7 @@
     fromSnapshot: false,
     filters: loadFilters(),
     tab: 'suivi',
-    discover: { series: [], loading: false, error: null, warning: null, lastSync: null, excludedIds: new Set(), searchedFilters: undefined, similarTo: null, legendaryHunt: false },
+    discover: { series: [], loading: false, error: null, warning: null, lastSync: null, excludedIds: new Set(), searchedFilters: undefined, similarTo: null, legendaryHunt: false, cancelRequested: false },
     orphan: { series: [], loading: false, error: null, warning: null, lastSync: null },
     newPremieres: { series: [], loading: false, error: null, lastSync: null, debug: null },
     // Crunchylists détectées (id + titre), pour le bouton d'ajout depuis Découverte.
@@ -3094,6 +3123,7 @@
     D.loading = true;
     D.error = null;
     D.warning = null;
+    D.cancelRequested = false;      // remis à zéro à chaque lancement (voir bouton Interrompre)
     D.legendaryHunt = legendary;
     // (relance) recherche « standard » : on repart d'un historique d'exclusion vierge.
     // recherche « 30 autres » / « encore des légendaires » : on garde le souvenir des
@@ -3161,7 +3191,14 @@
       const target = legendary ? CFG.legendaryTarget : CFG.discoverTarget;
       const progressWord = legendary ? 'légendaires' : 'trouvées';
 
+      // Rang de popularité ABSOLU : le browse est trié par popularité, donc la position
+      // cumulée dans le flux (séries exclues comprises) est le vrai classement. On le pose
+      // sur chaque candidat pour que le signal 🔥 reflète la popularité réelle, pas la
+      // position courante du scan (qui gonflait sans fin). Interruption : on sort proprement
+      // dès que l'utilisateur demande d'arrêter, en gardant ce qui a déjà été trouvé.
+      let popRank = 0;
       for (let page = 0; page < maxPages && matches.length < target; page++) {
+        if (D.cancelRequested) break;
         onProgress(stepLabel(3, 3, `Séries populaires… page ${page + 1}/${maxPages} · ${matches.length}/${target} ${progressWord}`));
         const r = await api('/content/v2/discover/browse', {
           sort_by: 'popularity', n: CFG.discoverPageSize, start,
@@ -3173,6 +3210,7 @@
 
         const candidates = data
           .map((p) => p.panel || p)
+          .map((p) => { if (p) p.__popRank = popRank++; return p; })
           .filter((p) => {
             if (!p || !p.id) return false;
             if (excluded.has(p.id) || seenCandidate.has(p.id)) return false;
@@ -3194,6 +3232,7 @@
         // d'analyser les 50 candidats de la page.
         const results = [];
         for (let c = 0; c < candidates.length && matches.length + results.length < target; c += 8) {
+          if (D.cancelRequested) break;
           const slice = candidates.slice(c, c + 8);
           const got = await pool(slice, async (p) => {
             // 1. saisons : gratuit si le panel le donne, sinon 1 requête
@@ -3265,6 +3304,7 @@
               categories,
               episodes, secTotal, maxAir,
               order: seenCandidate.size,
+              popRank: p.__popRank,      // rang popularité réel (voir plus haut) → signal 🔥
             };
             // 🎲 5. dernier filtre, coûteux nulle part (calcul local) : en mode légendaire,
             // seules les pépites à 3 signaux ou plus comptent dans le quota. Une candidate
@@ -3282,7 +3322,15 @@
 
       const found = matches.slice(0, target);
       found.forEach((s) => D.excludedIds.add(s.id));
-      if (more && !found.length) {
+      if (D.cancelRequested) {
+        // Interrompu à la demande : on affiche ce qui a déjà été trouvé plutôt que rien.
+        D.series = more ? [...D.series, ...found] : found;
+        D.lastSync = new Date();
+        D.warning = found.length
+          ? `Recherche interrompue — ${found.length} pépite${found.length > 1 ? 's' : ''} déjà ${found.length > 1 ? 'trouvées' : 'trouvée'} affichée${found.length > 1 ? 's' : ''}.`
+          : "Recherche interrompue avant d'avoir trouvé une pépite.";
+        idle(() => fillMissingRatings(found));
+      } else if (more && !found.length) {
         D.warning = legendary
           ? "Aucune autre pépite légendaire trouvée pour l'instant — essaie d'élargir tes genres, ou réessaie plus tard."
           : "Aucune autre pépite trouvée pour l'instant — le classement popularité n'a " +
@@ -4493,23 +4541,61 @@
 
   // Signaux d'une carte Découverte : icônes parlantes + couleur du liseré dominant.
   // 🎯 genre préféré (top 3) · 💚 dans tes goûts · 🏆 très bien notée · 🔥 très populaire
-  // 3 icônes ou plus → carte « légendaire » (halo doré + ruban), c'est du certain.
+  //
+  // « Légendaire » repose désormais sur un SCORE, pas sur un simple comptage de badges.
+  // Ancien défaut : les 4 badges plafonnaient à 3 (🎯 et 💚 étaient exclusifs) ET 🔥
+  // s'appuyait sur s.order = position courante dans le scan, qui dépasse 20 dès la 2ᵉ page
+  // → 🔥 ne sortait jamais en profondeur, donc « ≥ 3 badges » quasi impossible (« 1/15 »
+  // sur 26 pages). Maintenant : le GOÛT peut cumuler 🎯 ET 💚 (une série dans ton genre
+  // préféré ET fortement affine mérite les deux), la note exceptionnelle et la popularité
+  // apportent des bonus, et « légendaire » = score ≥ 2.5. Résultat : une excellente reco
+  // taillée pour toi (genre préféré + affine + très bien notée) suffit, sans dépendre d'un
+  // 🔥 fragile. Plus de pépites trouvées, tout en gardant « légendaire » sélectif.
   function discoverSignals(s, profile) {
     const cats = s.categories || [];
     const isPref = !!(profile && profile.top.some((g) => cats.includes(g)));
     const aff = affinityScore(cats, profile);
-    const topRating = Math.max(4.6, (CFG.discoverMinRating || 0) + 0.1);
+    const strongAff = aff >= 0.55;
+    const someAff = aff >= 0.32;
+    const topRating = Math.max(4.4, (CFG.discoverMinRating || 0) + 0.1);
     const wellRated = s.rating != null && s.rating >= topRating;
-    const veryPopular = s.order != null && s.order < 20;
+    const superRated = s.rating != null && s.rating >= 4.7;
+    // s.popRank = rang RÉEL dans le classement popularité (posé pendant le scan), en repli
+    // sur s.order pour les anciennes cartes en cache. Fenêtre élargie (top 60) : au-delà de
+    // la 1ʳᵉ page, « très populaire » gardait tout son sens sans être inatteignable.
+    const rank = s.popRank != null ? s.popRank : s.order;
+    const veryPopular = rank != null && rank < 60;
+
     const badges = [];
     if (isPref) badges.push(['🎯', 'Un de tes genres préférés']);
-    else if (aff >= 0.5) badges.push(['💚', 'Dans tes goûts']);
+    // 💚 peut désormais coexister avec 🎯 (affinité forte), ou sortir seul (affinité
+    // correcte sans genre du top 3) : deux façons complémentaires de coller à tes goûts.
+    if (strongAff || (someAff && !isPref)) badges.push(['💚', 'Dans tes goûts']);
     if (wellRated) badges.push(['🏆', 'Très bien notée']);
     if (veryPopular) badges.push(['🔥', 'Tout en haut du classement']);
-    const lead = isPref ? 'pref' : aff >= 0.5 ? 'aff' : wellRated ? 'rated' : veryPopular ? 'pop' : '';
-    const legendary = badges.length >= 3;
-    const notable = badges.length === 2;
-    return { badges, lead, legendary, notable };
+
+    // Score « pépite ». Le goût est le cœur d'une reco perso (jusqu'à 2 pts : 🎯 + 💚).
+    // La note monte en deux paliers pour que « légendaire » exige une note VRAIMENT au
+    // sommet, pas juste au-dessus du minimum : 0,5 dès topRating, +0,5 à partir de 4,7
+    // (soit 1 pt plein pour une série d'exception). La popularité apporte un demi-point.
+    // Concrètement, « légendaire » (≥ 3) demande un fort match de goût ET soit une note
+    // d'exception, soit une bonne note doublée d'une popularité de tête — un vrai cran
+    // au-dessus de « notable », sans être hors d'atteinte comme avant.
+    let score = 0;
+    if (isPref) score += 1;
+    if (strongAff) score += 1; else if (someAff) score += 0.5;
+    if (wellRated) score += 0.5;
+    if (superRated) score += 0.5;
+    if (veryPopular) score += 0.5;
+
+    const lead = isPref ? 'pref' : (strongAff || someAff) ? 'aff' : wellRated ? 'rated' : veryPopular ? 'pop' : '';
+    // Légendaire = score ≥ 3 : concrètement, un vrai match de goût (genre préféré + forte
+    // affinité, ou l'un des deux plus un bonus) COMBINÉ à une excellente note. Bien plus
+    // atteignable qu'avant (où 🔥 cassé rendait « ≥ 3 badges » quasi impossible en
+    // profondeur), sans pour autant dorer une carte sur deux.
+    const legendary = score >= 3;
+    const notable = !legendary && score >= 2;
+    return { badges, lead, legendary, notable, score };
   }
 
   function sigMarkup(sig) {
@@ -4906,8 +4992,6 @@
   .crrav-card.crrav-sig::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;z-index:3;background:var(--sig)}
   .crrav-lrow-discover.crrav-sig::before{background:var(--sig);transform:scaleY(1)}
   .crrav-siglegend{display:flex;flex-wrap:wrap;align-items:center;gap:7px;margin:0 0 13px}
-  .crrav-siglegend-title{font:700 9.5px/1 system-ui;letter-spacing:.09em;text-transform:uppercase;
-    color:#71717c;margin-right:1px;white-space:nowrap}
   .crrav-siglegend-chip{display:inline-flex;align-items:center;gap:6px;white-space:nowrap;
     font:600 11.5px/1 system-ui;color:#d3d4da;padding:6px 11px 6px 9px;border-radius:9px;
     background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.07);
@@ -5467,6 +5551,12 @@
      défilement : c'était le reproche principal de l'ancien affichage, relégué en pied de
      section et invisible si on n'était pas dessus. */
   .crrav-activitybar{margin-top:12px;display:flex;flex-direction:column;gap:8px}
+  .crrav-foot{display:flex;align-items:center;justify-content:center;gap:12px;flex-wrap:wrap}
+  .crrav-cancel-btn{flex:none;background:rgba(255,90,90,.12);border:1px solid rgba(255,90,90,.4);
+    color:#ff9d9d;font:600 12px/1 system-ui;padding:7px 13px;border-radius:8px;cursor:pointer;
+    -webkit-tap-highlight-color:transparent;transition:background .15s,border-color .15s}
+  .crrav-cancel-btn:hover{background:rgba(255,90,90,.22);border-color:rgba(255,90,90,.6)}
+  .crrav-cancelling{flex:none;color:#ff9d9d;font:600 12px/1 system-ui;opacity:.85}
   .crrav-activity-row{display:flex;align-items:flex-start;gap:10px;padding:10px 13px;border-radius:11px;
     background:linear-gradient(135deg,rgba(244,117,33,.16),rgba(244,117,33,.04));
     border:1px solid rgba(244,117,33,.3)}
@@ -6935,7 +7025,12 @@
     if (D.loading) {
       body = `<div class="crrav-grid">${Array.from({ length: 12 },
         () => '<div class="crrav-skel"><div></div></div>').join('')}</div>
-        <div class="crrav-foot">${escapeHtml(progressMsg)}</div>`;
+        <div class="crrav-foot">
+          <span>${escapeHtml(progressMsg)}</span>
+          ${D.cancelRequested
+            ? '<span class="crrav-cancelling">Arrêt en cours…</span>'
+            : '<button class="crrav-cancel-btn" data-act="cancel-discover" title="Arrêter la recherche et afficher ce qui a déjà été trouvé">✕ Interrompre</button>'}
+        </div>`;
     } else if (D.error) {
       body = `<div class="crrav-msg"><h3>Ça n'a pas marché</h3><p>${escapeHtml(D.error)}</p>
         <button data-act="retry">Réessayer</button></div>`;
@@ -6969,7 +7064,6 @@
         </div>` : ''}
         ${list.length && !f.showIgnoredDiscover ? `
         <div class="crrav-siglegend">
-          <span class="crrav-siglegend-title">Ce que veulent dire les couleurs</span>
           ${profile.size ? `<span class="crrav-siglegend-chip crrav-sig-pref" title="Un de tes 3 genres les plus regardés">🎯 genre préféré</span>
           <span class="crrav-siglegend-chip crrav-sig-aff" title="Colle à tes genres les plus regardés">💚 dans tes goûts</span>` : ''}
           <span class="crrav-siglegend-chip crrav-sig-rated" title="Note bien au-dessus du minimum">🏆 très bien notée</span>
@@ -8921,6 +9015,14 @@
         if (act.dataset.act === 'more-discover') refreshMoreDiscover();
         if (act.dataset.act === 'relaunch-discover') relaunchDiscover();
         if (act.dataset.act === 'legendary-discover') legendaryHuntDiscover();
+        if (act.dataset.act === 'cancel-discover') {
+          // Interruption douce : on lève le drapeau, la boucle de scan sort au prochain
+          // point de contrôle (frontière de page/paquet) et affiche l'acquis. Pas de kill
+          // brutal — les requêtes déjà en vol se terminent, mais plus aucune n'est lancée.
+          STATE.discover.cancelRequested = true;
+          render();
+          return;
+        }
         if (act.dataset.act === 'clear-similar') {
           STATE.discover.similarTo = null;
           STATE.filters.discoverCatsIn = [];
