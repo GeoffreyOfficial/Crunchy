@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      2.139.0
+// @version      2.142.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -55,6 +55,14 @@
 
     // Onglet Découverte : séries populaires jamais vues, hors de toutes tes listes
     discoverMinRating: 4.5,
+    // Seuils 🏆/badge « très bien notée ». FIXES et INDÉPENDANTS de discoverMinRating
+    // (voir discoverSignals) — avant, wellRated valait max(4.4, discoverMinRating+0.1) :
+    // si tu montais discoverMinRating au-delà de ~4.6, wellRated devenait quasi inatteignable
+    // (ex. ≥4.9) alors que superRated restait fixé à 4.7 et devenait trivialement vrai pour
+    // toute carte affichée (déjà filtrée par discoverMinRating). Les deux seuils sont
+    // désormais stables quel que soit le réglage du filtre d'entrée.
+    discoverWellRatedThreshold: 4.6,
+    discoverSuperRatedThreshold: 4.8,
     discoverMaxSeasons: 3,     // 3 saisons ou moins accepté (fix : c'était < 3 avant)
     discoverExcludeCategories: ['romance', 'hentai'], // genres exclus par défaut de Découverte
                                // ET du Calendrier — bloc Nouveautés (slugs Crunchyroll en
@@ -1830,13 +1838,75 @@
     }
   }
 
+  // Panel /cms/series réduit aux SEULS champs réellement consommés (posterOf, extractGenres,
+  // panelSeasons, buildSeriesEntry). Le panel brut renvoyé par l'API pèse plusieurs Ko par
+  // série — images en de multiples résolutions (poster_tall ET poster_wide), descriptions
+  // étendues, maturity ratings, fenêtres de disponibilité, mots-clés… — dont on n'utilise
+  // presque rien. Mis en cache tel quel pour des centaines de séries, c'était de LOIN le
+  // premier poste de gaspillage du localStorage (d'où la limite ~5 Mo atteinte). On ne garde
+  // que l'essentiel : les genres collapsés en simples chaînes, et le poster réduit à UNE
+  // image (celle que posterOf aurait choisie). Idempotent : re-slimmer un panel déjà slim
+  // redonne le même objet (utilisé par la migration ci-dessous).
+  function slimPanel(panel) {
+    if (!panel || typeof panel !== 'object') return panel;
+    let posterImg = null;
+    try {
+      const arr = (panel.images.poster_tall || [])[0] || [];
+      const pick = arr.filter((i) => i && i.width >= 240)[0] || arr[arr.length - 1];
+      if (pick && pick.source) posterImg = { source: pick.source, width: pick.width };
+    } catch (_) { /* pas d'image exploitable */ }
+    const meta = panel.series_metadata || {};
+    return {
+      id: panel.id,
+      title: panel.title,
+      slug_title: panel.slug_title,
+      description: panel.description || '',
+      images: { poster_tall: posterImg ? [[posterImg]] : [] },
+      series_metadata: {
+        season_count: meta.season_count,
+        // Genres réduits à des chaînes simples (extractGenres les accepte tels quels) :
+        // on jette les objets tenant_categories (localization multi-langue, slugs, ids…).
+        tenant_categories: extractGenres(panel),
+      },
+    };
+  }
+
+  // Migration one-shot : réécrit en version SLIM les panels /cms/series déjà en cache sous
+  // leur forme brute (gonflée). Récupère l'espace SANS refetch — la lecture relit chaque
+  // entrée, la re-slimme, et ne réécrit que si ça rétrécit vraiment (donc no-op sur les
+  // entrées déjà slim). Gardée par un drapeau versionné pour ne tourner qu'une fois.
+  const SLIM_MIGRATION_FLAG = LS + 'slimpanels:v1';
+  function migrateSlimPanels() {
+    if (safeCall(() => localStorage.getItem(SLIM_MIGRATION_FLAG), null, 'slim:flag')) return;
+    let reclaimed = 0, n = 0;
+    for (const k of Object.keys(localStorage)) {
+      if (!k.startsWith(LS + 'series:')) continue;
+      const before = (localStorage.getItem(k) || '').length;
+      const parsed = safeCall(() => JSON.parse(localStorage.getItem(k)), null, 'slim:parse');
+      if (!parsed || !parsed.v) continue;
+      const slimmed = slimPanel(parsed.v);
+      const payload = JSON.stringify({ ts: parsed.ts || Date.now(), v: slimmed });
+      if (payload.length < before) {
+        safeCall(() => { localStorage.setItem(k, payload); }, undefined, 'slim:write');
+        reclaimed += (before - payload.length) * 2;   // UTF-16
+        n++;
+      }
+    }
+    safeCall(() => localStorage.setItem(SLIM_MIGRATION_FLAG, '1'), undefined, 'slim:flag:set');
+    if (n) LOG(`cache allégé : ${n} fiche(s) série compactée(s), ~${fmtBytes(reclaimed)} récupérés.`);
+  }
+
   async function getSeriesPanel(seriesId) {
     const cached = cacheGet('series:' + seriesId, 7 * DAY);
     if (cached) return cached;
     const r = await api(`/content/v2/cms/series/${seriesId}`, { locale: CFG.locale });
     const panel = (r.data || [])[0];
-    if (panel) cacheSet('series:' + seriesId, panel);
-    return panel;
+    if (!panel) return panel;
+    // On ne met en cache QUE la version slim, et on la renvoie telle quelle : les appelants
+    // ne lisent que des champs conservés, donc comportement identique cache chaud/froid.
+    const slim = slimPanel(panel);
+    cacheSet('series:' + seriesId, slim);
+    return slim;
   }
 
   // Depuis une carte « Reste à voir » : bascule sur Découverte pré-filtrée par les genres
@@ -2343,6 +2413,84 @@
     return { media, terms, perTerm };
   }
 
+  // ─── Recherche AniList GROUPÉE (plusieurs séries en une requête) ────────────────
+  // Le vrai frein aux 429 n'était pas le nombre de variantes par série (déjà regroupées),
+  // mais le fait d'émettre UNE requête HTTP PAR SÉRIE. Ici on regroupe plusieurs séries
+  // dans une seule requête via des alias `s{i}_{j}` (série i, variante de titre j), en deux
+  // phases :
+  //   • Phase 1 — recherche LÉGÈRE (fragment sans airingSchedule, la partie lourde) : sert
+  //     à trouver la bonne fiche. Peu coûteuse → on peut grouper plusieurs séries sans
+  //     exploser la complexité GraphQL.
+  //   • Phase 2 — airingSchedule ciblé, PAR ID, uniquement pour la poignée de séries en
+  //     diffusion dont le total d'épisodes n'est pas encore officiel (celles où l'on a
+  //     vraiment besoin du calendrier pour dater la fin de saison). computeAniSchedule sait
+  //     déjà se passer d'airingSchedule (extrapolation via nextAiringEpisode) pour le reste.
+  // Résultat : ~5 à 8× moins de requêtes AniList pour un même passage d'enrichissement.
+  const ANILIST_FRAGMENT_LIGHT = `fragment FL on Media {
+    id
+    title { romaji english native }
+    synonyms
+    format
+    status
+    episodes
+    genres
+    startDate { year }
+    nextAiringEpisode { episode airingAt }
+  }`;
+
+  // items : [{ key, title }] — construit une requête légère groupée. Renvoie
+  // Map(key → { media }), media = fiches candidates fusionnées/dédoublonnées pour cette série.
+  async function anilistSearchBatch(items) {
+    const out = new Map();
+    const valid = (items || []).filter((it) => it && it.key != null);
+    if (!valid.length) return out;
+    // Chaque série → ses 1-3 variantes de titre.
+    const perItem = valid.map((it) => ({ key: it.key, terms: anilistSearchTerms(it.title) }))
+      .filter((x) => x.terms.length);
+    if (!perItem.length) { for (const it of valid) out.set(it.key, { media: [] }); return out; }
+
+    const varDecls = [];
+    const pages = [];
+    const variables = {};
+    perItem.forEach((x, i) => {
+      x.terms.forEach((term, j) => {
+        varDecls.push(`$q${i}_${j}: String`);
+        pages.push(`s${i}_${j}: Page(perPage: 5) { media(search: $q${i}_${j}, type: ANIME, sort: SEARCH_MATCH) { ...FL } }`);
+        variables[`q${i}_${j}`] = term;
+      });
+    });
+    const query = `query (${varDecls.join(', ')}) {\n${pages.join('\n')}\n}\n${ANILIST_FRAGMENT_LIGHT}`;
+    const data = await anilistQuery(query, variables);   // peut lever (429/réseau) → géré par l'appelant
+
+    perItem.forEach((x, i) => {
+      const media = [];
+      const seen = new Set();
+      x.terms.forEach((_, j) => {
+        const arr = (data && data[`s${i}_${j}`] && data[`s${i}_${j}`].media) || [];
+        for (const m of arr) if (m && m.id != null && !seen.has(m.id)) { seen.add(m.id); media.push(m); }
+      });
+      out.set(x.key, { media });
+    });
+    return out;
+  }
+
+  // ids : [Int] — récupère airingSchedule + nextAiringEpisode par ID, groupés via alias
+  // `m{i}`. Renvoie Map(id → { nextAiringEpisode, airingSchedule }). Best-effort.
+  async function anilistFetchSchedules(ids) {
+    const out = new Map();
+    const clean = [...new Set((ids || []).filter((x) => Number.isFinite(x)))];
+    if (!clean.length) return out;
+    const blocks = clean.map((id, i) =>
+      `m${i}: Media(id: ${id}) { id nextAiringEpisode { episode airingAt } airingSchedule(perPage: 50) { nodes { episode airingAt } } }`
+    ).join('\n');
+    const data = await anilistQuery(`query {\n${blocks}\n}`, {});
+    clean.forEach((id, i) => {
+      const m = data && data[`m${i}`];
+      if (m) out.set(id, { nextAiringEpisode: m.nextAiringEpisode || null, airingSchedule: m.airingSchedule || null });
+    });
+    return out;
+  }
+
   // Normalisation pour comparer des titres : minuscule, sans accents ni ponctuation.
   function aniNorm(s) {
     return String(s || '').toLowerCase()
@@ -2580,43 +2728,122 @@
     STATE.anilistProgress = { done: 0, total: targets.length, startedAt: Date.now() };
     render();
     try {
-      let changed = 0, errors = 0, lastErrorMsg = '';
-      await pool(targets, async (s) => {
-        const v = await fetchAnilistSchedule(s);
-        if (!v || v.error) { errors++; lastErrorMsg = (v && v.error) || 'requête échouée'; return; }
-        s.plannedTotal = v.plannedTotal;
-        s.seasonEndTs = v.seasonEndTs;
-        s.plannedApprox = v.plannedApprox;
-        s.anilistStatus = v.anilistStatus;
-        s.aniNextTs = v.nextEpTs;
-        s.aniNextNum = v.nextEpNum;
-        // Fusion (jamais remplacement) : les genres Crunchyroll déjà posés sur la carte
-        // restent en tête, AniList vient seulement compléter ce qui manque (voir
-        // mergeGenreLists). Alimente directement les tops genres des Stats et le profil
-        // de goût de Découverte, qui lisent tous deux s.categories.
-        if (v.genres && v.genres.length) s.categories = mergeGenreLists(s.categories, v.genres);
-        if (v.matched && (v.plannedTotal || v.seasonEndTs || v.nextEpTs || v.genres.length)) changed++;
-      }, 2, (done, total) => {
-        // Léger throttle : un re-rendu à chaque item suffit pour un compte-rendu fluide
-        // (2 requêtes en parallèle max — voir la limite ci-dessus — donc jamais un flot
-        // de rendus intempestif).
-        STATE.anilistProgress = { done, total, startedAt: STATE.anilistProgress.startedAt };
+      let changed = 0;
+      const SEARCH_BATCH = 6;    // séries par requête de recherche légère
+      const SCHED_BATCH = 10;    // ids par requête airingSchedule
+      const best = new Map();    // s.id → meilleure fiche AniList retenue
+      const searched = new Set();// s.id ayant reçu une réponse (match OU non-match confirmé)
+      const noMatch = [];        // séries sans match en titre FR → repli titre anglais
+      let doneCount = 0, lastErrorMsg = '';
+      const startedAt = STATE.anilistProgress.startedAt;
+      const bumpProgress = () => {
+        STATE.anilistProgress = { done: doneCount, total: targets.length, startedAt };
         render();
-      });
+      };
+
+      // ── Phase 1 : recherche groupée sur le titre affiché (FR le plus souvent) ──
+      for (let i = 0; i < targets.length; i += SEARCH_BATCH) {
+        if (anilistCooldownRemainingMs() > 0) break;   // un 429 en cours de route : on s'arrête net
+        const batch = targets.slice(i, i + SEARCH_BATCH);
+        let map = null;
+        try {
+          map = await anilistSearchBatch(batch.map((s) => ({ key: s.id, title: s.title })));
+        } catch (e) { lastErrorMsg = (e && (e.message || String(e))) || 'requête échouée'; }
+        for (const s of batch) {
+          if (map) {
+            searched.add(s.id);
+            const r = map.get(s.id);
+            const m = r ? aniPickMatch(r.media, s) : null;
+            if (m) best.set(s.id, m); else noMatch.push(s);
+          }
+          doneCount++;
+        }
+        bumpProgress();
+      }
+
+      // ── Phase 1bis : repli titre anglais, groupé lui aussi ──
+      // Le titre anglais vient de Crunchyroll (endpoint distinct, mis en cache) — ce n'est
+      // PAS une requête AniList, donc sans incidence sur le rate limit d'AniList.
+      if (anilistCooldownRemainingMs() === 0 && noMatch.length) {
+        const enItems = [];
+        for (const s of noMatch) {
+          const enTitle = await getSeriesEnglishTitle(s.id);
+          if (enTitle && aniNorm(enTitle) !== aniNorm(s.title)) enItems.push({ s, enTitle });
+        }
+        for (let i = 0; i < enItems.length; i += SEARCH_BATCH) {
+          if (anilistCooldownRemainingMs() > 0) break;
+          const batch = enItems.slice(i, i + SEARCH_BATCH);
+          let map = null;
+          try {
+            map = await anilistSearchBatch(batch.map(({ s, enTitle }) => ({ key: s.id, title: enTitle })));
+          } catch (e) { lastErrorMsg = (e && (e.message || String(e))) || 'requête échouée'; }
+          if (map) for (const { s, enTitle } of batch) {
+            const r = map.get(s.id);
+            const m = r ? aniPickMatch(r.media, { ...s, title: enTitle }) : null;
+            if (m) best.set(s.id, m);
+          }
+        }
+      }
+
+      // ── Phase 2 : airingSchedule ciblé (précision fin de saison / prochain épisode) ──
+      // Uniquement les matchs EN DIFFUSION dont le total d'épisodes n'est pas officiel :
+      // pour tout le reste, computeAniSchedule se débrouille sans airingSchedule.
+      if (anilistCooldownRemainingMs() === 0) {
+        const needSched = [...best.values()]
+          .filter((m) => m && m.status === 'RELEASING' && !(Number.isFinite(m.episodes) && m.episodes > 0))
+          .map((m) => m.id);
+        for (let i = 0; i < needSched.length; i += SCHED_BATCH) {
+          if (anilistCooldownRemainingMs() > 0) break;
+          let sm = null;
+          try { sm = await anilistFetchSchedules(needSched.slice(i, i + SCHED_BATCH)); }
+          catch (_) { /* best-effort : on garde l'extrapolation via nextAiringEpisode */ }
+          if (sm) for (const m of best.values()) {
+            const extra = sm.get(m.id);
+            if (extra) {
+              if (extra.airingSchedule) m.airingSchedule = extra.airingSchedule;
+              if (extra.nextAiringEpisode) m.nextAiringEpisode = extra.nextAiringEpisode;
+            }
+          }
+        }
+      }
+
+      // ── Application des résultats + cache, pour les séries EFFECTIVEMENT interrogées ──
+      // (Une série d'un lot qui a échoué reste non-cachée → elle sera retentée au prochain
+      //  passage, une fois le coupe-circuit retombé. On ne cache jamais un faux non-match.)
+      for (const s of targets) {
+        if (!searched.has(s.id)) continue;
+        const m = best.get(s.id);
+        const result = { matched: false, ...EMPTY_ANI, aniId: null, aniTitle: '', av: ANILIST_CACHE_VER };
+        if (m) Object.assign(result, computeAniSchedule(m, s),
+          { matched: true, aniId: m.id, aniTitle: aniPrimaryTitle(m) });
+        cacheSet('anilist:' + s.id, result);
+        s.plannedTotal = result.plannedTotal;
+        s.seasonEndTs = result.seasonEndTs;
+        s.plannedApprox = result.plannedApprox;
+        s.anilistStatus = result.anilistStatus;
+        s.aniNextTs = result.nextEpTs;
+        s.aniNextNum = result.nextEpNum;
+        // Fusion (jamais remplacement) : les genres Crunchyroll déjà posés restent en tête,
+        // AniList complète ce qui manque (voir mergeGenreLists). Alimente les tops genres
+        // des Stats et le profil de goût de Découverte, qui lisent s.categories.
+        if (result.genres && result.genres.length) s.categories = mergeGenreLists(s.categories, result.genres);
+        if (result.matched && (result.plannedTotal || result.seasonEndTs || result.nextEpTs || result.genres.length)) changed++;
+      }
+      const errors = targets.length - searched.size;
+
       // Un échec isolé (timeout, série introuvable côté AniList) n'a rien d'alarmant et
-      // se résorbe seul au prochain passage. En revanche, si TOUTES les requêtes de ce
-      // passage échouent, c'est le signe d'un problème systémique (le plus souvent : la
-      // CSP de Crunchyroll qui bloque les appels vers anilist.co) — là, ça vaut la peine
-      // de le dire plutôt que de laisser croire que la fonctionnalité est juste inactive.
+      // se résorbe seul au prochain passage. En revanche, si TOUTES les séries de ce
+      // passage ont échoué, c'est le signe d'un problème systémique (le plus souvent : la
+      // CSP de Crunchyroll qui bloque les appels vers anilist.co, ou un 429) — là, ça vaut
+      // la peine de le dire plutôt que de laisser croire que la fonctionnalité est inactive.
       if (errors && errors === targets.length) {
-        STATE.anilistWarning = `AniList indisponible : les ${targets.length} requête(s) de ce passage ont ` +
-          `échoué (${lastErrorMsg}). Un « 403 » ici vient d'AniList (API volontairement désactivée le temps ` +
-          `de soulager leurs serveurs, ou IP temporairement limitée) : rien à voir avec l'installation du ` +
-          `script, et ça se rétablit tout seul. Détail : Réglages → diagnostic AniList (« Tester AniList »).`;
+        STATE.anilistWarning = `AniList indisponible : les ${targets.length} série(s) de ce passage n'ont ` +
+          `pas pu être récupérées (${lastErrorMsg}). Un « 403/429 » ici vient d'AniList (API volontairement ` +
+          `désactivée le temps de soulager leurs serveurs, ou IP temporairement limitée) : rien à voir avec ` +
+          `l'installation du script, et ça se rétablit tout seul. Détail : Réglages → diagnostic AniList.`;
         forceRender();
       } else if (errors < targets.length) {
-        // Au moins une requête a réussi ce passage-ci : AniList répond → on lève l'alerte et
-        // le coupe-circuit (les refus précédents étaient passagers).
+        // Au moins une série a abouti : AniList répond → on lève l'alerte et le coupe-circuit.
         anilistClearCooldown();
         if (STATE.anilistWarning) { STATE.anilistWarning = null; forceRender(); }
       }
@@ -4017,10 +4244,11 @@
     }
 
     const profile = buildTasteProfile();
-    const badgeCount = (s) => discoverSignals(s, profile).badges.length;
+    const sigScore = (s) => discoverSignals(s, profile).score;
     const sorters = {
-      // Le plus de pastilles pertinentes d'abord, note en départage, puis popularité.
-      relevance: (a, b) => badgeCount(b) - badgeCount(a)
+      // Meilleur score « pépite » d'abord (goût net + note + popularité), note en
+      // départage, puis popularité. Le score intègre déjà le malus des genres hors-goûts.
+      relevance: (a, b) => sigScore(b) - sigScore(a)
         || (b.rating || 0) - (a.rating || 0)
         || a.order - b.order,
       popularity: (a, b) => a.order - b.order,
@@ -4522,44 +4750,42 @@
     };
   }
 
-  // Affinité d'une candidate : moyenne des poids (normalisés 0..1) de SES genres déjà
-  // présents dans ton profil. On ignore les genres que tu n'as jamais regardés plutôt que
-  // de les compter comme 0 : sinon une série à 5 genres dont 2 seulement recoupent ton
-  // historique voit sa moyenne divisée par 5 au lieu de 2, et le badge « dans tes goûts »
-  // ne sort quasiment jamais (bug remonté : jamais vu en pratique).
-  function affinityScore(cats, profile) {
+  // Score de goût NET d'une candidate, borné dans [-1, +1]. Différence clé avec l'ancien
+  // affinityScore, qui IGNORAIT les genres jamais regardés : ici on les PÉNALISE. Sans ça,
+  // une série sport/comédie/drame décrochait « dans tes goûts » (voire « légendaire ») juste
+  // parce que la comédie te plaît, alors que sport et drame — que tu ne regardes pas — étaient
+  // simplement écartés du calcul. Désormais CHAQUE genre compte :
+  //   • présent dans ton profil → contribution positive (d'autant plus forte que tu le regardes) ;
+  //   • jamais regardé → malus (MISS_PENALTY).
+  // La moyenne sur TOUS les genres fait qu'un seul genre aimé, noyé dans des genres qui te
+  // sont étrangers, donne un solde faible ou négatif — donc pas un bon match global.
+  function tasteScore(cats, profile) {
     if (!profile || !profile.max || !cats.length) return 0;
-    let sum = 0, n = 0;
+    const MISS_PENALTY = 0.5;   // points retirés par genre jamais regardé
+    let sum = 0;
     for (const c of cats) {
       const w = profile.weights[c];
-      if (!w) continue;
-      sum += w / profile.max;
-      n++;
+      sum += w ? (w / profile.max) : -MISS_PENALTY;
     }
-    return n ? sum / n : 0;
+    return Math.max(-1, Math.min(1, sum / cats.length));
   }
 
   // Signaux d'une carte Découverte : icônes parlantes + couleur du liseré dominant.
   // 🎯 genre préféré (top 3) · 💚 dans tes goûts · 🏆 très bien notée · 🔥 très populaire
   //
-  // « Légendaire » repose désormais sur un SCORE, pas sur un simple comptage de badges.
-  // Ancien défaut : les 4 badges plafonnaient à 3 (🎯 et 💚 étaient exclusifs) ET 🔥
-  // s'appuyait sur s.order = position courante dans le scan, qui dépasse 20 dès la 2ᵉ page
-  // → 🔥 ne sortait jamais en profondeur, donc « ≥ 3 badges » quasi impossible (« 1/15 »
-  // sur 26 pages). Maintenant : le GOÛT peut cumuler 🎯 ET 💚 (une série dans ton genre
-  // préféré ET fortement affine mérite les deux), la note exceptionnelle et la popularité
-  // apportent des bonus, et « légendaire » = score ≥ 2.5. Résultat : une excellente reco
-  // taillée pour toi (genre préféré + affine + très bien notée) suffit, sans dépendre d'un
-  // 🔥 fragile. Plus de pépites trouvées, tout en gardant « légendaire » sélectif.
+  // « Légendaire » repose sur un SCORE dont le cœur est le GOÛT NET (voir tasteScore) :
+  // les genres que tu aimes rapportent, ceux que tu ne regardes jamais RETIRENT des points.
+  // C'est ce qui empêche une série majoritairement hors de tes goûts (ex. sport + drame)
+  // de décrocher « légendaire » juste parce qu'elle est AUSSI une comédie. La note et la
+  // popularité restent des bonus. « Légendaire » exige donc un vrai bon match global ET une
+  // excellente note (ou un match quasi parfait doublé d'une popularité de tête).
   function discoverSignals(s, profile) {
     const cats = s.categories || [];
     const isPref = !!(profile && profile.top.some((g) => cats.includes(g)));
-    const aff = affinityScore(cats, profile);
-    const strongAff = aff >= 0.55;
-    const someAff = aff >= 0.32;
-    const topRating = Math.max(4.4, (CFG.discoverMinRating || 0) + 0.1);
-    const wellRated = s.rating != null && s.rating >= topRating;
-    const superRated = s.rating != null && s.rating >= 4.7;
+    const taste = tasteScore(cats, profile);      // -1..1 : positif si aligné, négatif sinon
+    const goodTaste = taste >= 0.4;               // globalement bien dans tes goûts
+    const wellRated = s.rating != null && s.rating >= CFG.discoverWellRatedThreshold;
+    const superRated = s.rating != null && s.rating >= CFG.discoverSuperRatedThreshold;
     // s.popRank = rang RÉEL dans le classement popularité (posé pendant le scan), en repli
     // sur s.order pour les anciennes cartes en cache. Fenêtre élargie (top 60) : au-delà de
     // la 1ʳᵉ page, « très populaire » gardait tout son sens sans être inatteignable.
@@ -4567,32 +4793,24 @@
     const veryPopular = rank != null && rank < 60;
 
     const badges = [];
-    if (isPref) badges.push(['🎯', 'Un de tes genres préférés']);
-    // 💚 peut désormais coexister avec 🎯 (affinité forte), ou sortir seul (affinité
-    // correcte sans genre du top 3) : deux façons complémentaires de coller à tes goûts.
-    if (strongAff || (someAff && !isPref)) badges.push(['💚', 'Dans tes goûts']);
+    // 🎯 reste informatif (« contient un de tes genres préférés »), mais seulement si le
+    // goût global n'est pas franchement négatif : sinon un simple genre aimé, noyé dans des
+    // genres étrangers, arborerait 🎯 à tort (le cas sport/comédie/drame remonté).
+    if (isPref && taste > 0) badges.push(['🎯', 'Un de tes genres préférés']);
+    if (goodTaste) badges.push(['💚', 'Dans tes goûts']);
     if (wellRated) badges.push(['🏆', 'Très bien notée']);
     if (veryPopular) badges.push(['🔥', 'Tout en haut du classement']);
 
-    // Score « pépite ». Le goût est le cœur d'une reco perso (jusqu'à 2 pts : 🎯 + 💚).
-    // La note monte en deux paliers pour que « légendaire » exige une note VRAIMENT au
-    // sommet, pas juste au-dessus du minimum : 0,5 dès topRating, +0,5 à partir de 4,7
-    // (soit 1 pt plein pour une série d'exception). La popularité apporte un demi-point.
-    // Concrètement, « légendaire » (≥ 3) demande un fort match de goût ET soit une note
-    // d'exception, soit une bonne note doublée d'une popularité de tête — un vrai cran
-    // au-dessus de « notable », sans être hors d'atteinte comme avant.
-    let score = 0;
-    if (isPref) score += 1;
-    if (strongAff) score += 1; else if (someAff) score += 0.5;
+    // Score « pépite ». Le goût NET pèse le plus, et il peut être NÉGATIF : un genre jamais
+    // regardé fait baisser le score, pas seulement « ne l'augmente pas ». Un genre aimé ne
+    // suffit donc plus si le reste te correspond peu. La note (2 paliers) et la popularité
+    // ajoutent des bonus. « Légendaire » ≥ 3, « notable » ≥ 2.
+    let score = Math.max(-2, Math.min(2, taste * 2.5));   // goût : gros poids, positif ET négatif
     if (wellRated) score += 0.5;
     if (superRated) score += 0.5;
     if (veryPopular) score += 0.5;
 
-    const lead = isPref ? 'pref' : (strongAff || someAff) ? 'aff' : wellRated ? 'rated' : veryPopular ? 'pop' : '';
-    // Légendaire = score ≥ 3 : concrètement, un vrai match de goût (genre préféré + forte
-    // affinité, ou l'un des deux plus un bonus) COMBINÉ à une excellente note. Bien plus
-    // atteignable qu'avant (où 🔥 cassé rendait « ≥ 3 badges » quasi impossible en
-    // profondeur), sans pour autant dorer une carte sur deux.
+    const lead = (isPref && taste > 0) ? 'pref' : goodTaste ? 'aff' : wellRated ? 'rated' : veryPopular ? 'pop' : '';
     const legendary = score >= 3;
     const notable = !legendary && score >= 2;
     return { badges, lead, legendary, notable, score };
@@ -4865,34 +5083,44 @@
   .crrav-filtersbtn[aria-pressed="true"],.crrav-sync[aria-pressed="true"]{
     background:rgba(244,117,33,.18);border-color:rgba(244,117,33,.5)}
   /* Boutons icône seule du header (filtres, recherche, TV, réglages, actualiser) :
-     carrés compacts sous 720px — c'est ce qui permet de tout tenir sur une seule
-     ligne, y compris sur petit écran. Le libellé texte de chacun (.crrav-btn-label)
-     reste dans le DOM mais masqué, pour réapparaître au palier suivant. */
+     toujours compacts, quelle que soit la largeur. Avant, ils repassaient en icône+texte
+     à partir de 720px (pensé pour Z Fold ouvert) — mais sur Découverte (2 boutons de plus
+     que les autres onglets : 🎲 pépites / 🎲 légendaire) le viewport réel du Z Fold ouvert
+     dépasse parfois tout juste ce seuil, les libellés reviennent, la rangée devient trop
+     large pour tenir, et le débordement (scrollbar volontairement masquée, voir
+     .crrav-row-main) avale des boutons hors-écran sans aucun indice visuel — jusqu'à ✕
+     fermer. Le libellé texte de chacun (.crrav-btn-label) reste dans le DOM mais masqué
+     en permanence ; le title="…" porte l'info pour qui survole/appuie longuement. */
   .crrav-icobtn{width:36px;padding:0!important;display:inline-flex;align-items:center;
     justify-content:center;flex:0 0 auto;font-size:15px}
   .crrav-btn-label{display:none}
   /* Le mode TV/salon ne concerne que les grands écrans pilotés à distance : le bouton
      n'a pas sa place sur un mobile, où il ne ferait que voler de la largeur précieuse. */
   @media(max-width:720px){.crrav-tvbtn{display:none}}
-  /* À partir de 720px (Z Fold ouvert et plus large), la largeur ne manque plus : les
-     boutons redeviennent lisibles avec leur libellé plutôt que de rester en icône
-     seule par principe — l'icône-seule n'était qu'une contrainte du petit écran. */
+  /* Le nom « Mon Crunchy » à côté du logo reste réservé aux écrans larges (bureau/TV) :
+     sous 720px, seul le logo reste, pour ne pas rogner sur les boutons juste à côté. */
   @media(min-width:720px){
     .crrav-brand-text{display:inline}
-    .crrav-icobtn{width:auto;padding:0 14px!important;gap:7px}
-    .crrav-btn-label{display:inline;font:600 13px/1 system-ui}
   }
-  /* Cas particulier du bouton Actualiser (.crrav-hpush) : sur un écran tactile, le
-     rafraîchissement se fait déjà par pull-to-refresh, donc son libellé « Actualiser »
-     est superflu. Il réapparaissait pourtant dès 720px (Z Fold déplié et plus large) via
-     la règle ci-dessus. On le remasque donc quand le pointeur primaire est tactile
-     (pointer:coarse), indépendamment de la largeur — sélecteur plus spécifique, il gagne
-     sur .crrav-btn-label{display:inline}. Le mode TV (pointeur fin, grand écran) n'est pas
-     tactile : le libellé y reste visible, comme voulu. */
-  @media(pointer:coarse){.crrav-hpush .crrav-btn-label{display:none}}
+  /* Mode TV (salon, pilotage à distance) : lisible depuis le canapé, donc libellés texte
+     toujours visibles à côté des icônes — indépendamment de la largeur d'écran, via la
+     classe .crrav-tv plutôt qu'un seuil de viewport (voir plus haut pourquoi un seuil de
+     largeur seul n'est pas fiable). Cas particulier du bouton Actualiser (.crrav-hpush) :
+     sur un écran tactile, le rafraîchissement se fait déjà par pull-to-refresh, donc son
+     libellé « Actualiser » reste superflu même si le mode TV est actif sur un tel écran. */
+  .crrav-tv .crrav-icobtn{width:auto;padding:0 14px!important;gap:7px}
+  .crrav-tv .crrav-btn-label{display:inline;font:600 13px/1 system-ui}
+  @media(pointer:coarse){.crrav-tv .crrav-hpush .crrav-btn-label{display:none}}
 
   .crrav-warn{margin:10px 0 0;padding:9px 12px;border-radius:10px;font-size:12.5px;
     background:rgba(255,179,71,.12);border:1px solid rgba(255,179,71,.35);color:#ffcf8a}
+  /* Bandeau effaçable : le texte prend la place dispo, le ✕ reste calé à droite. */
+  .crrav-warn-dismiss{display:flex;align-items:flex-start;gap:10px}
+  .crrav-warn-dismiss>span{flex:1;min-width:0}
+  .crrav-warn-x{flex:none;background:transparent;border:0;color:inherit;cursor:pointer;
+    font-size:15px;line-height:1;padding:2px 4px;margin:-2px -2px 0 0;opacity:.7;
+    border-radius:6px;-webkit-tap-highlight-color:transparent}
+  .crrav-warn-x:hover{opacity:1;background:rgba(255,255,255,.1)}
   /* Variante repliable : une seule ligne (résumé) dépliable au tap — gain de place mobile.
      Repose sur <details> natif : aucun JS, robuste à la reconstruction du DOM. */
   details.crrav-warn{padding:0}
@@ -4991,7 +5219,7 @@
   .crrav-sig-pop{--sig:#5db4ff}
   .crrav-card.crrav-sig::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;z-index:3;background:var(--sig)}
   .crrav-lrow-discover.crrav-sig::before{background:var(--sig);transform:scaleY(1)}
-  .crrav-siglegend{display:flex;flex-wrap:wrap;align-items:center;gap:7px;margin:0 0 13px}
+  .crrav-siglegend{display:flex;flex-wrap:wrap;align-items:center;gap:7px;margin:14px 0 13px}
   .crrav-siglegend-chip{display:inline-flex;align-items:center;gap:6px;white-space:nowrap;
     font:600 11.5px/1 system-ui;color:#d3d4da;padding:6px 11px 6px 9px;border-radius:9px;
     background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.07);
@@ -8326,7 +8554,13 @@
       html += warnFold('⚠ AniList — récupération momentanément indisponible', STATE.anilistWarning,
         'rgba(224,87,74,.12)', 'rgba(224,87,74,.4)', '#ff9a8f');
     }
-    if (STATE.quotaWarning) html += warn(STATE.quotaWarning, 'rgba(244,181,60,.12)', 'rgba(244,181,60,.4)', '#f4b53c');
+    if (STATE.quotaWarning) {
+      // Effaçable : le nettoyage est déjà fait, ce n'est qu'un message d'information — on
+      // laisse donc l'utilisateur le fermer. Il pourra réapparaître si le cache regonfle.
+      html += `<p class="crrav-warn crrav-warn-keep crrav-warn-dismiss" style="background:rgba(244,181,60,.12);border-color:rgba(244,181,60,.4);color:#f4b53c">`
+        + `<span>${escapeHtml(STATE.quotaWarning)}</span>`
+        + `<button class="crrav-warn-x" data-act="dismiss-quota" title="Masquer ce message" aria-label="Masquer">✕</button></p>`;
+    }
     if (STATE.warning) html += `<p class="crrav-warn crrav-warn-keep">${escapeHtml(STATE.warning)}</p>`;
     return html;
   }
@@ -9015,6 +9249,14 @@
         if (act.dataset.act === 'more-discover') refreshMoreDiscover();
         if (act.dataset.act === 'relaunch-discover') relaunchDiscover();
         if (act.dataset.act === 'legendary-discover') legendaryHuntDiscover();
+        if (act.dataset.act === 'dismiss-quota') {
+          STATE.quotaWarning = null;
+          // On réarme l'alerte proactive : si le cache regonfle au-delà du seuil plus tard,
+          // le message pourra réapparaître (sinon il resterait muet à vie une fois fermé).
+          quotaWarnedProactively = false;
+          forceRender();
+          return;
+        }
         if (act.dataset.act === 'cancel-discover') {
           // Interruption douce : on lève le drapeau, la boucle de scan sort au prochain
           // point de contrôle (frontière de page/paquet) et affiche l'acquis. Pas de kill
@@ -9381,6 +9623,7 @@
     if (boot.done) return;
     boot.done = true;
     LOG('boot — ajout du bouton');
+    safeCall(migrateSlimPanels, undefined, 'migrateSlimPanels');   // récupère l'espace des vieux panels gonflés
     try { addFab(); } catch (e) { console.error('[reste-à-voir] échec du bouton', e); }
     setInterval(() => safeCall(addFab, undefined, 'addFab:interval'), 2000);
     scheduleAutoRefresh();   // reprogrammable si tu changes le délai dans les réglages
