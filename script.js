@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      2.143.0
+// @version      2.144.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '2.143.0';
+  const SCRIPT_VERSION = '2.144.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -3498,6 +3498,10 @@
               const full = await getSeriesPanel(p.id);
               if (full) categories = extractGenres(full);
             }
+            // (fix) Fusion GRATUITE avec un éventuel cache AniList déjà présent (même
+            // série croisée ailleurs — Suivi, Hors listes, un scan Découverte précédent) :
+            // aucune requête, juste une lecture localStorage (voir mergeGenreLists).
+            categories = mergeGenreLists(categories, readAnilistCached(p.id).genres);
             if (categoriesRejectedByGenre(categories, null, null, STATE.filters.discoverCatsInMode === 'all')) return null;
 
             // 3. note : 1 requête, seulement pour les survivants (candidats jamais vus ⇒
@@ -3539,6 +3543,25 @@
               // prudence, cohérent avec « jamais proposer ce qui est déjà vu ».
               console.warn('[reste-à-voir] vérif. impossible pour', p.id, '— exclue par prudence', e);
               return null;
+            }
+
+            // 4bis. Mode légendaire UNIQUEMENT : le score de goût (tasteScore) exige des
+            // genres — sans eux, un candidat plafonne mécaniquement à « notable » et ne
+            // peut JAMAIS devenir légendaire (le goût pèse jusqu'à 2.5 points sur un seuil
+            // de 2.5 ; note+popularité ne montent qu'à 1.5), même s'il correspond en
+            // réalité parfaitement à ton profil — juste parce que Crunchyroll n'a pas
+            // donné de genre. On interroge alors AniList en dernier recours, mais UNIQUEMENT
+            // sur les survivants arrivés jusqu'ici (déjà filtrés par saisons/genre CR/note/
+            // progression — un sous-ensemble restreint, pas les milliers de candidats bruts
+            // scannés). Résultat mis en cache 7 j comme tout appel AniList du script :
+            // réutilisable ensuite pour Suivi ou un futur scan Découverte sans requête en plus.
+            if (legendary && categories.length < 2 && anilistNeedsFetch(p.id)) {
+              try {
+                const miniS = { id: p.id, title: p.title, airing: isAiring(maxAir),
+                  lastAired: maxAir ? { air: maxAir } : null };
+                const ani = await fetchAnilistSchedule(miniS);
+                if (ani.genres && ani.genres.length) categories = mergeGenreLists(categories, ani.genres);
+              } catch (_) { /* best-effort : jugé sur ses seuls genres CR si AniList échoue */ }
             }
 
             const candidate = {
@@ -8678,10 +8701,19 @@
     if (anyBusy && progressMsg) {
       // Certains messages embarquent un ou plusieurs comptes « i/total » — le préfixe
       // « Étape n/total » qu'ajoute stepLabel EN est un lui-même, potentiellement suivi
-      // d'un compteur plus précis (ex. « Étape 4/4 · Analyse des épisodes… 8/29 »). On
-      // prend le DERNIER trouvé : c'est toujours le plus fin (le compteur d'étape sert
-      // de repli tant qu'aucun sous-compteur n'est encore apparu).
-      const all = [...progressMsg.matchAll(/(\d+)\s*\/\s*(\d+)/g)];
+      // d'un compteur plus précis (ex. « Étape 4/4 · Analyse des épisodes… 8/29 »).
+      // (fix) En mode Découverte légendaire, le message porte AUSSI « page N/maxPages »
+      // ET « K/target légendaires » — avant, on prenait bêtement le DERNIER couple trouvé,
+      // qui tombait sur « K/target » (rythme de découverte de pépites, erratique : 2
+      // trouvées en 10 s ne veut pas dire 13 de plus en 50 s) au lieu de « page N/maxPages »
+      // (le vrai indicateur d'avancement, linéaire). D'où des ETA « quelques secondes »
+      // pendant que le scan tournait encore sur des dizaines de pages. On préfère donc
+      // explicitement le compteur de PAGE quand il est présent — c'est toujours lui le
+      // reflet fidèle du travail restant — et on ne retombe sur le dernier couple générique
+      // que si aucune page n'est mentionnée (cas des étapes sans scan par page, ex. « Analyse
+      // des épisodes… 8/29 »).
+      const pageMatches = [...progressMsg.matchAll(/page\s+(\d+)\s*\/\s*(\d+)/gi)];
+      const all = pageMatches.length ? pageMatches : [...progressMsg.matchAll(/(\d+)\s*\/\s*(\d+)/g)];
       const last = all[all.length - 1];
       const done = last ? +last[1] : null, total = last ? +last[2] : null;
       items.push({
