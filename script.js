@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      2.144.0
+// @version      2.146.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '2.144.0';
+  const SCRIPT_VERSION = '2.146.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -1128,11 +1128,18 @@
     }
   }
 
-  async function pool(items, worker, limit = paceLimit(), onTick) {
+  // (fix) `shouldStop` optionnel : prédicat vérifié avant de prendre un nouvel item dans
+  // la file — permet à un appelant annulable (Découverte, voir D.cancelRequested) de
+  // stopper l'attribution de NOUVEAUX candidats aux couloirs libres dès l'annulation,
+  // sans attendre que TOUTE la tranche en cours (jusqu'à `limit` items) se termine. Les
+  // items déjà en vol ne sont pas interrompus (pas d'AbortController jusque dans les
+  // requêtes réseau), mais on arrête d'en enfiler de nouveaux immédiatement.
+  async function pool(items, worker, limit = paceLimit(), onTick, shouldStop) {
     const out = new Array(items.length);
     let i = 0, done = 0;
     async function run() {
       while (i < items.length) {
+        if (shouldStop && shouldStop()) return;
         const idx = i++;
         try { out[idx] = await worker(items[idx], idx); }
         catch (e) { out[idx] = null; console.warn('[reste-à-voir]', e); }
@@ -3482,10 +3489,19 @@
           if (D.cancelRequested) break;
           const slice = candidates.slice(c, c + 8);
           const got = await pool(slice, async (p) => {
+            // (fix) Points de sortie précoce : avant, une annulation ne prenait effet
+            // qu'ENTRE deux tranches de 8 candidats — mais chaque candidat en vol devait
+            // quand même dérouler tout son pipeline (saisons → genre → note → épisodes →
+            // playheads) avant que la tranche se termine, d'où un « Arrêt en cours… » qui
+            // semblait ne jamais aboutir. On vérifie maintenant D.cancelRequested à CHAQUE
+            // étape (pas seulement au tout début, sinon un candidat déjà lancé filait quand
+            // même jusqu'au bout) : un candidat en cours s'arrête net à la prochaine étape.
+            if (D.cancelRequested) return null;
             // 1. saisons : gratuit si le panel le donne, sinon 1 requête
             let seasons = panelSeasons(p);
             if (seasons == null) seasons = await getSeasonCount(p.id);
             if (seasons == null || seasons > CFG.discoverMaxSeasons) return null;
+            if (D.cancelRequested) return null;
 
             // 2. genres FIABLES : le panel browse ne porte pas toujours tenant_categories,
             // d'où des cartes sans genre (aucune puce de filtre) et un filtre par genre
@@ -3503,12 +3519,14 @@
             // aucune requête, juste une lecture localStorage (voir mergeGenreLists).
             categories = mergeGenreLists(categories, readAnilistCached(p.id).genres);
             if (categoriesRejectedByGenre(categories, null, null, STATE.filters.discoverCatsInMode === 'all')) return null;
+            if (D.cancelRequested) return null;
 
             // 3. note : 1 requête, seulement pour les survivants (candidats jamais vus ⇒
             // jamais en cache : contrairement à Suivi/Hors listes, on ne peut pas se
             // contenter du cache ici, sous peine de rejeter systématiquement tout le monde).
             const rating = await getRating(p.id);
             if (rating == null || rating < CFG.discoverMinRating) return null;
+            if (D.cancelRequested) return null;
 
             // 4. épisodes + progression : le plus cher, réservé au dernier carré
             let episodes = 0;
@@ -3544,46 +3562,73 @@
               console.warn('[reste-à-voir] vérif. impossible pour', p.id, '— exclue par prudence', e);
               return null;
             }
+            if (D.cancelRequested) return null;
 
-            // 4bis. Mode légendaire UNIQUEMENT : le score de goût (tasteScore) exige des
-            // genres — sans eux, un candidat plafonne mécaniquement à « notable » et ne
-            // peut JAMAIS devenir légendaire (le goût pèse jusqu'à 2.5 points sur un seuil
-            // de 2.5 ; note+popularité ne montent qu'à 1.5), même s'il correspond en
-            // réalité parfaitement à ton profil — juste parce que Crunchyroll n'a pas
-            // donné de genre. On interroge alors AniList en dernier recours, mais UNIQUEMENT
-            // sur les survivants arrivés jusqu'ici (déjà filtrés par saisons/genre CR/note/
-            // progression — un sous-ensemble restreint, pas les milliers de candidats bruts
-            // scannés). Résultat mis en cache 7 j comme tout appel AniList du script :
-            // réutilisable ensuite pour Suivi ou un futur scan Découverte sans requête en plus.
-            if (legendary && categories.length < 2 && anilistNeedsFetch(p.id)) {
+            // Retourne un candidat INTERMÉDIAIRE (categories pas encore complétées par
+            // AniList en mode légendaire — voir juste après le pool()). p est repris pour
+            // les étapes suivantes (titre, id, popRank…).
+            return { p, seasons, categories, rating, episodes, secTotal, maxAir };
+          }, CFG.concurrency, undefined, () => D.cancelRequested);
+
+          const survivors = got.filter(Boolean);
+
+          // (fix) 4bis. Mode légendaire UNIQUEMENT : le score de goût (tasteScore) exige
+          // des genres — sans eux, un candidat plafonne mécaniquement à « notable » et ne
+          // peut JAMAIS devenir légendaire (le goût pèse jusqu'à 2.5 points sur un seuil de
+          // 2.5 ; note+popularité ne montent qu'à 1.5), même s'il correspond en réalité
+          // parfaitement à ton profil — juste parce que Crunchyroll n'a pas donné de genre.
+          // AVANT : un appel AniList (fetchAnilistSchedule) était lancé PAR CANDIDAT dans le
+          // pool ci-dessus — jusqu'à 8 requêtes HTTP séquentielles-par-couloir en parallèle,
+          // chacune avec ses propres retries (jusqu'à 3 tentatives, 12-16 s de timeout
+          // chacune) : c'est ce qui rendait le parcours d'une page très long dès que
+          // plusieurs candidats de la tranche manquaient de genre — un cas fréquent d'après
+          // toi. MAINTENANT : UN SEUL appel groupé (anilistSearchBatch, même mécanisme que
+          // l'enrichissement en tâche de fond) pour TOUTE la tranche de survivants sans
+          // genre exploitable — 1 requête HTTP au lieu de jusqu'à 8. Résultat mis en cache
+          // 7 j (comme tout appel AniList du script), donc jamais refait pour cette série.
+          if (legendary && !D.cancelRequested && anilistCooldownRemainingMs() <= 0) {
+            const needAni = survivors.filter((x) => x.categories.length < 2 && anilistNeedsFetch(x.p.id));
+            if (needAni.length) {
               try {
-                const miniS = { id: p.id, title: p.title, airing: isAiring(maxAir),
-                  lastAired: maxAir ? { air: maxAir } : null };
-                const ani = await fetchAnilistSchedule(miniS);
-                if (ani.genres && ani.genres.length) categories = mergeGenreLists(categories, ani.genres);
-              } catch (_) { /* best-effort : jugé sur ses seuls genres CR si AniList échoue */ }
+                const map = await anilistSearchBatch(needAni.map((x) => ({ key: x.p.id, title: x.p.title })));
+                for (const x of needAni) {
+                  const r = map.get(x.p.id);
+                  const sLike = { id: x.p.id, title: x.p.title, airing: isAiring(x.maxAir),
+                    lastAired: x.maxAir ? { air: x.maxAir } : null };
+                  const best = r ? aniPickMatch(r.media, sLike) : null;
+                  const result = { matched: false, ...EMPTY_ANI, aniId: null, aniTitle: '', av: ANILIST_CACHE_VER };
+                  if (best) Object.assign(result, computeAniSchedule(best, sLike),
+                    { matched: true, aniId: best.id, aniTitle: aniPrimaryTitle(best) });
+                  cacheSet('anilist:' + x.p.id, result);
+                  if (result.genres && result.genres.length) x.categories = mergeGenreLists(x.categories, result.genres);
+                }
+              } catch (_) { /* best-effort : les survivants gardent leurs seuls genres CR */ }
             }
+          }
 
+          const finalResults = [];
+          for (const x of survivors) {
+            if (D.cancelRequested) break;
             const candidate = {
-              id: p.id,
-              title: p.title,
-              slug: p.slug_title,
-              poster: posterOf(p),
-              synopsis: p.description || '',
-              rating, seasons,
-              categories,
-              episodes, secTotal, maxAir,
+              id: x.p.id,
+              title: x.p.title,
+              slug: x.p.slug_title,
+              poster: posterOf(x.p),
+              synopsis: x.p.description || '',
+              rating: x.rating, seasons: x.seasons,
+              categories: x.categories,
+              episodes: x.episodes, secTotal: x.secTotal, maxAir: x.maxAir,
               order: seenCandidate.size,
-              popRank: p.__popRank,      // rang popularité réel (voir plus haut) → signal 🔥
+              popRank: x.p.__popRank,      // rang popularité réel (voir plus haut) → signal 🔥
             };
             // 🎲 5. dernier filtre, coûteux nulle part (calcul local) : en mode légendaire,
             // seules les pépites à 3 signaux ou plus comptent dans le quota. Une candidate
             // qui a passé tous les filtres précédents mais n'est « que » notable/pref est
             // rejetée ici — c'est ELLE qui fait que le scan va chercher plus loin.
-            if (legendary && !discoverSignals(candidate, tasteProfile).legendary) return null;
-            return candidate;
-          }, CFG.concurrency);
-          results.push(...got.filter(Boolean));
+            if (legendary && !discoverSignals(candidate, tasteProfile).legendary) continue;
+            finalResults.push(candidate);
+          }
+          results.push(...finalResults);
           onProgress(stepLabel(3, 3, `Séries populaires… page ${page + 1}/${maxPages} · ${matches.length + results.length}/${target} ${progressWord}`));
         }
 
