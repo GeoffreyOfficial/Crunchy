@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      2.147.0
+// @version      2.148.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '2.147.0';
+  const SCRIPT_VERSION = '2.148.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -5818,7 +5818,15 @@
   /* Bloc d'actions des réglages : action principale en tête, puis cartes étiquetées.
      Chaque carte est empilée proprement — titre, explication, puis boutons pleine
      largeur — plutôt que des boutons collés à droite du titre qui débordent sur mobile. */
-  .crrav-sactions-primary{margin-top:16px}
+  /* (fix) Toujours visible : collée en bas du panneau (position:sticky sur le conteneur
+     à défilement .crrav-settings), même sur desktop/souris où la sheet plein écran mobile
+     (.crrav-sheetfoot) ne s'applique pas. Avant, ce bouton vivait en fin de contenu et
+     disparaissait sous la liste dès que les groupes de réglages dépassaient la hauteur du
+     panneau (max-height:60vh) — il fallait scroller dedans pour le retrouver. */
+  .crrav-sactions-primary{position:sticky;bottom:-18px;margin:16px -18px -18px;z-index:5;
+    padding:10px 18px calc(10px + env(safe-area-inset-bottom,0px));
+    background:linear-gradient(180deg,rgba(19,19,24,0) 0,#131318 16px,#131318 100%);
+    border-top:1px solid rgba(255,255,255,.08)}
   .crrav-sactions-primary>.crrav-btn{flex:1 1 auto;min-width:0}
   .crrav-sactions-primary>[data-act="settings-save"]{flex:2 1 0}
   .crrav-setcard{margin-top:12px;padding:13px 14px;border-radius:12px;
