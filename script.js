@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      2.148.0
+// @version      2.149.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '2.148.0';
+  const SCRIPT_VERSION = '2.149.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -5703,6 +5703,13 @@
   @media (prefers-reduced-motion:reduce){.crrav-settingssheet{animation:none}}
   .crrav-sheethead{display:none}
   .crrav-sheetbody{display:block}
+  /* (30) Barre d'actions collante en bas de la sheet plein écran (mobile uniquement).
+     (fix) DOIT rester déclarée ICI, avant la media query ci-dessous : à spécificité égale
+     (une seule classe des deux côtés), c'est la règle la plus tardive dans le fichier qui
+     l'emporte, media query vraie ou non — cette règle vivait plus bas dans la feuille et
+     écrasait donc systématiquement le display:flex du mode plein écran, y compris sur
+     mobile/tactile (Z Fold compris, déplié ou non) : le bouton n'était alors JAMAIS visible. */
+  .crrav-sheetfoot{display:none}
 
   /* Petits écrans tactiles : panneau plein écran avec son PROPRE défilement.
      Empiler deux zones scrollables (overlay + panneau) rendait le scroll imprévisible.
@@ -5855,8 +5862,6 @@
     background:rgba(255,255,255,.1);color:#cfcfd6;font-size:11px;line-height:1;transition:background .15s ease}
   .crrav-setsearch-clear:hover{background:rgba(255,255,255,.2)}
   .crrav-setsearch-empty{padding:22px 6px;text-align:center;color:#8a8a94;font:500 12.5px/1.5 system-ui}
-  /* (30) Barre d'actions collante en bas de la sheet plein écran (mobile uniquement) */
-  .crrav-sheetfoot{display:none}
 
   /* Diagnostic sonde (affichage écran pour mobile) */
   .crrav-probe{margin-top:16px;padding:14px;border-radius:12px;background:#0f0f14;
