@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      2.142.0
+// @version      2.143.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '2.136.1';
+  const SCRIPT_VERSION = '2.143.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -63,6 +63,23 @@
     // désormais stables quel que soit le réglage du filtre d'entrée.
     discoverWellRatedThreshold: 4.6,
     discoverSuperRatedThreshold: 4.8,
+    // Fenêtre « très populaire » (🔥, voir discoverSignals) : rang < ce seuil dans le
+    // classement popularité ABSOLU (toutes pages confondues). Calée sur ~10 % du scan le
+    // plus profond (legendaryMaxPages × discoverPageSize) : avant, un seuil fixe (rang<60)
+    // représentait ~10 % d'un scan normal (12 pages ≈ 600 candidats) mais ~3 % d'un scan
+    // légendaire (40 pages ≈ 2000 candidats) — 🔥 devenait quasi impossible à obtenir passé
+    // les 2 premières pages du dé légendaire, ce qui bloquait aussi le score « légendaire »
+    // (qui compte 🔥 comme bonus). Le seuil est désormais un vrai pourcentage, stable quel
+    // que soit le mode de scan.
+    discoverVeryPopularRank: 200,
+    // Seuils du score « pépite » (voir discoverSignals : légendaire ≥ ce seuil, notable ≥
+    // l'autre). Avant, légendaire ≥3/notable ≥2 exigeaient quasi systématiquement un goût
+    // proche du match parfait CUMULÉ avec 2 à 3 bonus (note + popularité) — combinaison rare
+    // en pratique (zéro légendaire trouvée sur 20 pages de scan rapporté). Abaissés pour
+    // qu'un très bon goût seul (score de goût proche de 1, cf. tasteScore) puisse suffire,
+    // ou qu'un bon goût + quelques bonus y arrive, sans exiger la totalité des signaux à la fois.
+    discoverLegendaryScore: 2.5,
+    discoverNotableScore: 1.5,
     discoverMaxSeasons: 3,     // 3 saisons ou moins accepté (fix : c'était < 3 avant)
     discoverExcludeCategories: ['romance', 'hentai'], // genres exclus par défaut de Découverte
                                // ET du Calendrier — bloc Nouveautés (slugs Crunchyroll en
@@ -3064,10 +3081,13 @@
       poster: posterOf(panel),
       rating,
       synopsis: panel.description || '',
-      // Genres de la série : DÉJÀ présents dans le panel /cms/series (en cache), on ne
-      // les exploitait simplement pas ici — d'où des genres vides hors Découverte.
-      // Aucune requête ajoutée.
-      categories: extractGenres(panel),
+      // Genres de la série : panel Crunchyroll d'abord, complétés par le cache AniList
+      // s'il existe déjà (ani.genres) — sinon, tant que le cache AniList reste frais
+      // (anilistNeedsFetch = false), enrichAnilistSchedule ne repasse pas dessus et la
+      // fusion faite lors d'un précédent chargement (voir mergeGenreLists plus bas dans
+      // enrichAnilistSchedule) était perdue à chaque reconstruction de STATE.series :
+      // les tops genres des Stats retombaient aux seuls genres CR. Aucune requête ajoutée.
+      categories: mergeGenreLists(extractGenres(panel), ani.genres),
       episodes: marked,
       total, seen,
       inProgress: marked.filter((e) => e.started).length,
@@ -4777,8 +4797,8 @@
   // les genres que tu aimes rapportent, ceux que tu ne regardes jamais RETIRENT des points.
   // C'est ce qui empêche une série majoritairement hors de tes goûts (ex. sport + drame)
   // de décrocher « légendaire » juste parce qu'elle est AUSSI une comédie. La note et la
-  // popularité restent des bonus. « Légendaire » exige donc un vrai bon match global ET une
-  // excellente note (ou un match quasi parfait doublé d'une popularité de tête).
+  // popularité restent des bonus. Seuils réglables : CFG.discoverLegendaryScore /
+  // discoverNotableScore.
   function discoverSignals(s, profile) {
     const cats = s.categories || [];
     const isPref = !!(profile && profile.top.some((g) => cats.includes(g)));
@@ -4787,10 +4807,11 @@
     const wellRated = s.rating != null && s.rating >= CFG.discoverWellRatedThreshold;
     const superRated = s.rating != null && s.rating >= CFG.discoverSuperRatedThreshold;
     // s.popRank = rang RÉEL dans le classement popularité (posé pendant le scan), en repli
-    // sur s.order pour les anciennes cartes en cache. Fenêtre élargie (top 60) : au-delà de
-    // la 1ʳᵉ page, « très populaire » gardait tout son sens sans être inatteignable.
+    // sur s.order pour les anciennes cartes en cache. Fenêtre élargie et proportionnelle au
+    // scan le plus profond (voir CFG.discoverVeryPopularRank) : au-delà de la 1ʳᵉ page,
+    // « très populaire » garde son sens sans devenir inatteignable en scan légendaire.
     const rank = s.popRank != null ? s.popRank : s.order;
-    const veryPopular = rank != null && rank < 60;
+    const veryPopular = rank != null && rank < CFG.discoverVeryPopularRank;
 
     const badges = [];
     // 🎯 reste informatif (« contient un de tes genres préférés »), mais seulement si le
@@ -4804,15 +4825,17 @@
     // Score « pépite ». Le goût NET pèse le plus, et il peut être NÉGATIF : un genre jamais
     // regardé fait baisser le score, pas seulement « ne l'augmente pas ». Un genre aimé ne
     // suffit donc plus si le reste te correspond peu. La note (2 paliers) et la popularité
-    // ajoutent des bonus. « Légendaire » ≥ 3, « notable » ≥ 2.
-    let score = Math.max(-2, Math.min(2, taste * 2.5));   // goût : gros poids, positif ET négatif
+    // ajoutent des bonus. Seuils : voir CFG.discoverLegendaryScore / discoverNotableScore.
+    let score = Math.max(-2.5, Math.min(2.5, taste * 2.5));   // goût : gros poids, positif ET négatif
+    // (clamp aligné sur le multiplicateur ×2.5 — avant, borné à ±2, un goût quasi parfait
+    // [taste > 0.8] perdait sa résolution et plafonnait comme un goût seulement « bon ».)
     if (wellRated) score += 0.5;
     if (superRated) score += 0.5;
     if (veryPopular) score += 0.5;
 
     const lead = (isPref && taste > 0) ? 'pref' : goodTaste ? 'aff' : wellRated ? 'rated' : veryPopular ? 'pop' : '';
-    const legendary = score >= 3;
-    const notable = !legendary && score >= 2;
+    const legendary = score >= CFG.discoverLegendaryScore;
+    const notable = !legendary && score >= CFG.discoverNotableScore;
     return { badges, lead, legendary, notable, score };
   }
 
@@ -5246,12 +5269,19 @@
     box-shadow:0 0 6px rgba(255,196,92,.7)}
   /* 🎲 Dé légendaire : même dégradé doré que le ruban « Légendaire », pour que le bouton
      se distingue d'un coup d'œil du 🎲 « autres pépites » (celui-là reste neutre) et du
-     🔄 « Actualiser » — trois icônes, trois sens, aucune confusion possible. */
-  .crrav-dice-gold{display:inline-flex;align-items:center;justify-content:center;
-    background:linear-gradient(135deg,#ffe08a,#f4a521);border-radius:7px;
-    padding:1px 5px;margin-right:2px;box-shadow:0 0 8px rgba(244,165,33,.55);
-    filter:saturate(1.15)}
-  .crrav-icobtn .crrav-dice-gold{margin-right:0}
+     🔄 « Actualiser » — trois icônes, trois sens, aucune confusion possible.
+     Le dégradé/glow est porté par le BOUTON entier (.crrav-legendary-btn), pas par un chip
+     interne : avant, .crrav-dice-gold habillait juste l'emoji dans un petit rectangle à
+     coins arrondis (7px) flottant dans le bouton carré (10px, 36×36) — le décalage des deux
+     rayons de courbure laissait dépasser les coins sombres du bouton autour du badge doré,
+     d'où l'effet « badge collé » peu soigné. Un seul rectangle doré, plein, aux mêmes
+     dimensions/coins que les autres boutons d'icône : plus net, cohérent avec le reste du
+     header. */
+  .crrav-legendary-btn{background:linear-gradient(135deg,#ffe08a,#f4a521)!important;
+    border-color:transparent!important;box-shadow:0 0 10px rgba(244,165,33,.55);
+    filter:saturate(1.1);color:#241a04!important}
+  .crrav-legendary-btn:hover{filter:saturate(1.25) brightness(1.04)}
+  .crrav-dice-gold{display:inline-flex}
   @media (prefers-reduced-motion:reduce){
     .crrav-card.crrav-legendary,.crrav-lrow-discover.crrav-legendary{animation:none;
       box-shadow:0 0 0 1.5px rgba(255,196,92,.7),0 0 18px 3px rgba(255,196,92,.4)}
@@ -7251,14 +7281,11 @@
 
     let body;
     if (D.loading) {
+      // Statut + bouton Interrompre affichés dans la barre d'activité (renderActivityBar,
+      // sticky en haut) plutôt qu'ici : en pied de grille, sous 12 squelettes de cartes,
+      // il fallait défiler pour les voir.
       body = `<div class="crrav-grid">${Array.from({ length: 12 },
-        () => '<div class="crrav-skel"><div></div></div>').join('')}</div>
-        <div class="crrav-foot">
-          <span>${escapeHtml(progressMsg)}</span>
-          ${D.cancelRequested
-            ? '<span class="crrav-cancelling">Arrêt en cours…</span>'
-            : '<button class="crrav-cancel-btn" data-act="cancel-discover" title="Arrêter la recherche et afficher ce qui a déjà été trouvé">✕ Interrompre</button>'}
-        </div>`;
+        () => '<div class="crrav-skel"><div></div></div>').join('')}</div>`;
     } else if (D.error) {
       body = `<div class="crrav-msg"><h3>Ça n'a pas marché</h3><p>${escapeHtml(D.error)}</p>
         <button data-act="retry">Réessayer</button></div>`;
@@ -8663,6 +8690,12 @@
         pct: total ? Math.round((done / total) * 100) : null,
         eta: total ? estimateEta('main', done, total, activityStartedAt) : null,
         done: false,
+        // Interrompre : uniquement pour un scan Découverte (seule opération qui sait
+        // s'arrêter proprement, voir loadDiscover/D.cancelRequested). Placé ici plutôt
+        // qu'en pied de grille : ce bandeau est dans .crrav-top (sticky), donc visible
+        // sans avoir à défiler passé les squelettes de cartes pour l'atteindre.
+        cancellable: STATE.discover.loading,
+        cancelling: STATE.discover.cancelRequested,
       });
     }
 
@@ -8726,6 +8759,9 @@
         ${!it.done && it.count ? `<div class="crrav-activity-subrow">${it.count}${
           it.pct != null ? ` · ${it.pct}%` : ''}${it.eta ? ` · ⏱ ${it.eta} restantes` : ''}</div>` : ''}
       </div>
+      ${it.cancellable ? (it.cancelling
+        ? '<span class="crrav-cancelling">Arrêt en cours…</span>'
+        : '<button class="crrav-cancel-btn" data-act="cancel-discover" title="Arrêter la recherche et afficher ce qui a déjà été trouvé">✕ Interrompre</button>') : ''}
     </div>`).join('');
 
     return `<div class="crrav-activitybar">${rows}</div>`;
@@ -8808,7 +8844,7 @@
     // précis pour l'utilisateur une fois qu'il l'a repérée dans le bouton complet de l'onglet.
     const legendaryDiscoverBtn = STATE.tab === 'decouverte' && !STATE.discover.loading
       && !STATE.filters.showIgnoredDiscover
-      ? `<button class="crrav-sync crrav-icobtn" data-act="legendary-discover"
+      ? `<button class="crrav-sync crrav-icobtn crrav-legendary-btn" data-act="legendary-discover"
           title="Dé légendaire : scan profond pour dénicher des pépites légendaires"><span class="crrav-dice-gold">🎲</span><span class="crrav-btn-label">${
           STATE.discover.legendaryHunt ? 'Encore des légendaires' : 'Dé légendaire'}</span></button>`
       : '';
