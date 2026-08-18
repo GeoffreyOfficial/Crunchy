@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      2.163.0
+// @version      2.165.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '2.163.0';
+  const SCRIPT_VERSION = '2.165.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -505,7 +505,7 @@
       help: 'Points ajoutés directement au score quand la série contient un de tes 3 tags/genres les plus représentés ET que le goût global reste positif. 0 = 🎯 reste un badge purement informatif, sans effet sur le score.',
       impact: 'discover', sub: 'discoverScoringTaste' },
     { key: 'discoverCompletionWeight', label: 'Poids de la complétion dans le profil', type: 'float', min: 0, max: 1, step: 0.05,
-      help: 'Dans le calcul de ton profil de goût : 0 = seul le nombre d’épisodes vus compte (comme avant), 1 = seul le taux de complétion compte (finir une série pèse plus que la survoler). Une série de 100 épisodes vue à 20 % vs une série de 12 épisodes terminée — ce curseur arbitre entre les deux.',
+      help: 'Dans le calcul de ton PROFIL de goût (pas dans le score d’une série directement) : 0 = seul le nombre d’épisodes vus compte (comme avant), 1 = seul le taux de complétion compte (finir une série pèse plus que la survoler). Une série de 100 épisodes vue à 20 % vs une série de 12 épisodes terminée — ce curseur arbitre entre les deux. Il ne s’ajoute jamais au score : il change seulement à QUOI chaque candidate est comparée (le goût net = similarité avec ce profil).',
       impact: 'discover', sub: 'discoverScoringTaste' },
     { key: 'discoverWellRatedThreshold', label: 'Note requise 🏆', type: 'float', min: 3, max: 5, step: 0.1,
       help: 'Note AniList à partir de laquelle le badge 🏆 s’affiche et le bonus ci-dessous s’applique.',
@@ -3578,7 +3578,7 @@
   }
 
   function buildDiscoverShortfallReport(ctx) {
-    const { target, foundCount, legendary, pagesScanned, maxPages, candidatesSeenTotal, rej, scoreSamples } = ctx;
+    const { target, foundCount, legendary, pagesScanned, maxPages, candidatesSeenTotal, rej, scoreSamples, stopReason } = ctx;
     const scoreStats = legendary ? scoreDistributionStats(scoreSamples) : null;
     const f = STATE.filters;
     const REASON_LABELS = {
@@ -3624,12 +3624,39 @@
     const mainAdvice = topReason ? ADVICE[topReason] : "Élargis un des filtres ci-dessous, ou relance plus tard : le classement popularité change en continu.";
     const extraAdvice = [];
     if (!legendary && maxPages <= CFG.discoverMaxPages) extraAdvice.push("Le scan s'arrête après un nombre de pages limité (garde-fou anti-attente) — relance ou essaie « 🎲 Dé légendaire » qui scanne beaucoup plus profond.");
-    if (target > 0 && foundCount === 0) extraAdvice.push("Zéro résultat : commence par assouplir le filtre le plus haut dans le tableau ci-dessus, c'est lui qui coûte le plus de candidats.");
+    if (target > 0 && foundCount === 0) extraAdvice.push("Zéro résultat : commence par assouplir le filtre le plus haut dans le tableau ci-dessous, c'est lui qui coûte le plus de candidats.");
+
+    // (fix) VERDICT en tête : répond aux deux questions qui manquaient — POURQUOI le scan
+    // s'est arrêté (ex. « seulement 10 mais pas 60 pages ? » = classement épuisé, pas un
+    // plafond de pages), et QUEL réglage précis changer en priorité (le frein n°1 chiffré).
+    const STOP = {
+      exhausted: `le classement popularité a été <b>entièrement parcouru</b> (${pagesScanned} page${pagesScanned > 1 ? 's' : ''} — l'API Crunchyroll n'en sert pas davantage). Le frein n'est donc PAS le nombre de pages : monter « Profondeur de scan » n'y changerait rien.`,
+      maxPages: `le scan a atteint son <b>plafond de ${maxPages} pages</b> sans épuiser le classement — monter « Profondeur de scan » (Réglages → Découverte) peut permettre d'en trouver plus.`,
+      cancelled: `tu as <b>interrompu</b> le scan avant la fin.`,
+      target: '',
+    };
+    const PARAM_FIX = {
+      known: 'aucun réglage à toucher — ce sont des séries que tu connais déjà ; utilise « 🔄 30 autres pépites » ou « 🎲 Dé légendaire » pour puiser plus loin',
+      genrePreBrowse: '« Genres exclus par défaut » (Réglages → Découverte) ou les chips de genre sous les résultats',
+      seasonsPreBrowse: `« Saisons maximum » — actuellement ${CFG.discoverMaxSeasons} (Réglages → Découverte)`,
+      seasons: `« Saisons maximum » — actuellement ${CFG.discoverMaxSeasons} (Réglages → Découverte)`,
+      genre: 'les filtres de genre (Réglages → Découverte, ou les chips sous les résultats)',
+      rating: `« Note minimale » — actuellement ${CFG.discoverMinRating}★ (Réglages → Découverte)`,
+      progressPlayhead: 'aucun réglage — séries déjà commencées d’après ta progression réelle',
+      legendaryScore: `« Score minimum — légendaire » à BAISSER (actuellement ${CFG.discoverLegendaryScore}) — ou « Poids du goût dans le score final » à monter (Réglages → Découverte)`,
+    };
+    const stopTxt = STOP[stopReason] || '';
+    const verdictHtml = (stopTxt || topReason) ? `
+      <div style="background:rgba(244,117,33,.12);border:1px solid rgba(244,117,33,.5);border-radius:10px;padding:11px 13px;margin:0 0 14px">
+        ${stopTxt ? `<p style="margin:0 0 ${topReason ? '7px' : '0'}"><b>⚡ En bref :</b> ${stopTxt}</p>` : ''}
+        ${topReason ? `<p style="margin:0"><b>Frein n°1 :</b> ${escapeHtml(REASON_LABELS[topReason] || topReason)} — <b>${pct(rows[0][1])}%</b> des candidats écartés pour ça.<br><b>→ À changer en priorité :</b> ${PARAM_FIX[topReason]}.</p>` : ''}
+      </div>` : '';
 
     return `
       <div class="crrav-msg crrav-shortfall" style="text-align:left;background:rgba(244,117,33,.06);border:1px solid rgba(244,117,33,.35);border-radius:12px;padding:16px 18px;margin-top:14px">
         <h3 style="margin:0 0 6px">🔎✨ Pourquoi seulement ${foundCount}/${target} pépite${target > 1 ? 's' : ''} ${legendary ? 'légendaire' + (target > 1 ? 's' : '') : ''} ?</h3>
         <p style="margin:0 0 10px;opacity:.85">Détail complet du scan, des filtres et du scoring — pour ajuster tes réglages en connaissance de cause plutôt qu'à tâtons.</p>
+        ${verdictHtml}
 
         <p style="margin:10px 0 4px"><b>1. Ce qui a été scanné</b></p>
         <ul style="margin:0 0 10px;padding-left:20px">
@@ -3786,11 +3813,18 @@
       const maxPages = legendary ? CFG.legendaryMaxPages : CFG.discoverMaxPages;
       const target = legendary ? CFG.legendaryTarget : CFG.discoverTarget;
       const progressWord = legendary ? 'légendaires' : 'trouvées';
+      // Raison d'arrêt du scan — sert au rapport « Pourquoi seulement X » à expliquer POURQUOI
+      // le scan s'est arrêté (le point qui te manquait : « seulement 10 trouvées mais pas 60
+      // pages parcourues ? »). 'exhausted' = le classement popularité n'a plus rien à servir
+      // (le vrai cas ici — inutile d'augmenter la profondeur) ; 'maxPages' = plafond atteint
+      // sans tout épuiser (là, monter la profondeur peut aider) ; 'target' = cible atteinte ;
+      // 'cancelled' = interruption manuelle.
+      let stopReason;
 
       // Interruption : on sort proprement dès que l'utilisateur demande d'arrêter, en
       // gardant ce qui a déjà été trouvé.
       for (let page = 0; page < maxPages && matches.length < target; page++) {
-        if (D.cancelRequested) break;
+        if (D.cancelRequested) { stopReason = 'cancelled'; break; }
         // Progression du scan en état STRUCTURÉ plutôt qu'en chaîne à re-parser : le bandeau
         // (voir renderActivityBar) affiche alors le NOMBRE de pépites trouvées en titre et
         // garde la progression par page (barre + %  + ETA) pour la sous-ligne — plus de
@@ -3804,7 +3838,7 @@
           locale: CFG.locale, type: 'series',
         });
         const data = r.data || [];
-        if (!data.length) break;
+        if (!data.length) { stopReason = 'exhausted'; break; }
         start += data.length;
 
         pagesScanned = page + 1;
@@ -3997,6 +4031,9 @@
 
         matches.push(...results.filter(Boolean));
       }
+      // Si la boucle n'a pas été coupée en cours (cancel/exhausted), c'est soit la cible
+      // atteinte, soit le plafond de pages.
+      if (stopReason === undefined) stopReason = matches.length >= target ? 'target' : 'maxPages';
 
       const found = matches.slice(0, target);
       found.forEach((s) => D.excludedIds.add(s.id));
@@ -4006,7 +4043,7 @@
       // sec, ou simplement pas assez de survivants), on l'affiche sous les résultats.
       const shortfallCtx = {
         target, foundCount: found.length, legendary,
-        pagesScanned, maxPages, candidatesSeenTotal, rej: REJ, scoreSamples,
+        pagesScanned, maxPages, candidatesSeenTotal, rej: REJ, scoreSamples, stopReason,
       };
 
       if (D.cancelRequested) {
@@ -5304,7 +5341,7 @@
     }).join('');
     return `<details class="crrav-tasteprofile">
       <summary>👤 Voir mon profil de goût actuel (${profile.size} tag${profile.size > 1 ? 's' : ''}/genre${profile.size > 1 ? 's' : ''} détecté${profile.size > 1 ? 's' : ''})</summary>
-      <p class="crrav-tasteprofile-note">Calculé à partir des séries que tu as commencées dans « Reste à voir » — priorité aux tags AniList 🏷️ (pondérés par leur pertinence pour chaque série), repli sur les genres pour les séries pas encore enrichies. Pondéré par un mix de volume vu et de taux de complétion (réglable). Le pourcentage est relatif à ton tag/genre le plus représenté (= 100 %). <b>🎯</b> = tes 3 tags/genres les plus représentés.</p>
+      <p class="crrav-tasteprofile-note">Calculé à partir des séries que tu as commencées dans « Reste à voir » — priorité aux tags AniList 🏷️ (pondérés par leur pertinence pour chaque série), repli sur les genres pour les séries pas encore enrichies. Le pourcentage est relatif à ton tag/genre le plus représenté (= 100 %). <b>🎯</b> = tes 3 tags/genres les plus représentés.<br><br>⚙️ Le <b>« poids de la complétion »</b> agit <b>ici, sur ce profil</b> — pas directement sur le score d'une série. À 0, chaque série vue pèse selon son <b>nombre d'épisodes vus</b>. À 1, elle pèse selon son <b>taux de complétion</b> (une série finie compte plus qu'une survolée), le volume étant ignoré. Entre les deux, un mélange. Il change donc <b>à quoi</b> chaque candidate est comparée (via le goût net), sans jamais s'ajouter au score.</p>
       <ul class="crrav-tasteprofile-list">${rows}</ul>
     </details>`;
   }
@@ -6684,6 +6721,13 @@
     border-top:1px solid rgba(255,255,255,.08)}
   .crrav-sactions-primary>.crrav-btn{flex:1 1 auto;min-width:0}
   .crrav-sactions-primary>[data-act="settings-save"]{flex:2 1 0}
+  /* Garde-fou libellés : les boutons d'action des Réglages (barre collante « Enregistrer /
+     Valeurs par défaut » ET pied de feuille mobile) doivent TOUJOURS afficher leur texte.
+     La règle globale .crrav-btn-label{display:none} est réservée aux icônes de la barre du
+     haut ; on la neutralise ici pour ces boutons, et on force une taille de police lisible,
+     au cas où un cache CSS obsolète ou un style tiers hériterait d'un font-size:0. */
+  .crrav-sactions .crrav-btn,.crrav-sheetfoot .crrav-btn{font-size:13px;line-height:1.15;text-indent:0}
+  .crrav-sactions .crrav-btn .crrav-btn-label,.crrav-sheetfoot .crrav-btn .crrav-btn-label{display:inline}
   .crrav-setcard{margin-top:12px;padding:13px 14px;border-radius:12px;
     background:rgba(255,255,255,.035);border:1px solid rgba(255,255,255,.09)}
   .crrav-setcard.danger{background:rgba(224,87,74,.06);border-color:rgba(224,87,74,.28)}
