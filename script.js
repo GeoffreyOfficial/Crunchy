@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      2.149.0
+// @version      2.151.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '2.149.0';
+  const SCRIPT_VERSION = '2.151.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -61,25 +61,16 @@
     // (ex. ≥4.9) alors que superRated restait fixé à 4.7 et devenait trivialement vrai pour
     // toute carte affichée (déjà filtrée par discoverMinRating). Les deux seuils sont
     // désormais stables quel que soit le réglage du filtre d'entrée.
-    discoverWellRatedThreshold: 4.6,
-    discoverSuperRatedThreshold: 4.8,
-    // Fenêtre « très populaire » (🔥, voir discoverSignals) : rang < ce seuil dans le
-    // classement popularité ABSOLU (toutes pages confondues). Calée sur ~10 % du scan le
-    // plus profond (legendaryMaxPages × discoverPageSize) : avant, un seuil fixe (rang<60)
-    // représentait ~10 % d'un scan normal (12 pages ≈ 600 candidats) mais ~3 % d'un scan
-    // légendaire (40 pages ≈ 2000 candidats) — 🔥 devenait quasi impossible à obtenir passé
-    // les 2 premières pages du dé légendaire, ce qui bloquait aussi le score « légendaire »
-    // (qui compte 🔥 comme bonus). Le seuil est désormais un vrai pourcentage, stable quel
-    // que soit le mode de scan.
-    discoverVeryPopularRank: 200,
+    discoverWellRatedThreshold: 4.5,
+    discoverSuperRatedThreshold: 4.7,
     // Seuils du score « pépite » (voir discoverSignals : légendaire ≥ ce seuil, notable ≥
     // l'autre). Avant, légendaire ≥3/notable ≥2 exigeaient quasi systématiquement un goût
     // proche du match parfait CUMULÉ avec 2 à 3 bonus (note + popularité) — combinaison rare
     // en pratique (zéro légendaire trouvée sur 20 pages de scan rapporté). Abaissés pour
     // qu'un très bon goût seul (score de goût proche de 1, cf. tasteScore) puisse suffire,
     // ou qu'un bon goût + quelques bonus y arrive, sans exiger la totalité des signaux à la fois.
-    discoverLegendaryScore: 2.5,
-    discoverNotableScore: 1.5,
+    discoverLegendaryScore: 2.2,
+    discoverNotableScore: 1.3,
     // Score de goût (voir tasteScore) : points retirés par genre jamais regardé, ET
     // nombre MAX de genres jamais regardés réellement comptés contre une série. Sans ce
     // plafond, une série à beaucoup de genres (ex. 6) accumule les malus un par un et son
@@ -88,8 +79,8 @@
     // que c'est souvent juste le signe d'un synopsis riche (ex. « Action, Aventure, Fantasy,
     // Drame, Surnaturel, Comédie »). Au-delà de ce plafond, les genres jamais regardés
     // supplémentaires sont neutres (ni bonus, ni malus) plutôt que punitifs.
-    discoverMissPenalty: 0.5,
-    discoverMaxPenalizedGenres: 2,
+    discoverMissPenalty: 0.3,
+    discoverMaxPenalizedGenres: 4,
     discoverMaxSeasons: 3,     // 3 saisons ou moins accepté (fix : c'était < 3 avant)
     discoverExcludeCategories: ['romance', 'hentai'], // genres exclus par défaut de Découverte
                                // ET du Calendrier — bloc Nouveautés (slugs Crunchyroll en
@@ -430,7 +421,7 @@
       help: 'Combien de suggestions viser dans l’onglet Découverte.',
       impact: 'discover' },
     { key: 'legendaryTarget', label: '🎲 Dé légendaire — nombre visé', type: 'int', min: 3, max: 50,
-      help: 'Combien de pépites LÉGENDAIRES (3 signaux ou plus) viser quand tu lances le dé légendaire.',
+      help: 'Combien de pépites LÉGENDAIRES (score ≥ CFG.discoverLegendaryScore, réglable ci-dessous) viser quand tu lances le dé légendaire.',
       impact: 'discover' },
     { key: 'legendaryMaxPages', label: '🎲 Dé légendaire — profondeur de scan', type: 'int', min: 12, max: 100, unit: 'pages',
       help: 'Jusqu’où le dé légendaire scanne le classement popularité pour dénicher ses pépites. Plus haut = plus long, mais plus de chances de trouver assez de légendaires.',
@@ -452,9 +443,6 @@
       impact: 'discover' },
     { key: 'discoverSuperRatedThreshold', label: 'Note « exceptionnelle » (bonus supplémentaire)', type: 'float', min: 3, max: 5, step: 0.1,
       help: 'Note AniList à partir de laquelle un second bonus de +0.5 s’ajoute au score pépite (cumulable avec le bonus « très bien notée » ci-dessus).',
-      impact: 'discover' },
-    { key: 'discoverVeryPopularRank', label: '🔥 Rang « très populaire »', type: 'int', min: 10, max: 2000, unit: 'rang',
-      help: 'Une série classée avant ce rang dans le classement popularité (toutes pages scannées confondues) décroche le badge 🔥 et un bonus de +0.5 au score pépite.',
       impact: 'discover' },
     { key: 'discoverExcludeCategories', label: 'Genres exclus (Découverte & Nouveautés)',
       type: 'list',
@@ -3476,12 +3464,8 @@
       const target = legendary ? CFG.legendaryTarget : CFG.discoverTarget;
       const progressWord = legendary ? 'légendaires' : 'trouvées';
 
-      // Rang de popularité ABSOLU : le browse est trié par popularité, donc la position
-      // cumulée dans le flux (séries exclues comprises) est le vrai classement. On le pose
-      // sur chaque candidat pour que le signal 🔥 reflète la popularité réelle, pas la
-      // position courante du scan (qui gonflait sans fin). Interruption : on sort proprement
-      // dès que l'utilisateur demande d'arrêter, en gardant ce qui a déjà été trouvé.
-      let popRank = 0;
+      // Interruption : on sort proprement dès que l'utilisateur demande d'arrêter, en
+      // gardant ce qui a déjà été trouvé.
       for (let page = 0; page < maxPages && matches.length < target; page++) {
         if (D.cancelRequested) break;
         onProgress(stepLabel(3, 3, `Séries populaires… page ${page + 1}/${maxPages} · ${matches.length}/${target} ${progressWord}`));
@@ -3495,7 +3479,6 @@
 
         const candidates = data
           .map((p) => p.panel || p)
-          .map((p) => { if (p) p.__popRank = popRank++; return p; })
           .filter((p) => {
             if (!p || !p.id) return false;
             if (excluded.has(p.id) || seenCandidate.has(p.id)) return false;
@@ -3650,12 +3633,12 @@
               categories: x.categories,
               episodes: x.episodes, secTotal: x.secTotal, maxAir: x.maxAir,
               order: seenCandidate.size,
-              popRank: x.p.__popRank,      // rang popularité réel (voir plus haut) → signal 🔥
             };
             // 🎲 5. dernier filtre, coûteux nulle part (calcul local) : en mode légendaire,
-            // seules les pépites à 3 signaux ou plus comptent dans le quota. Une candidate
-            // qui a passé tous les filtres précédents mais n'est « que » notable/pref est
-            // rejetée ici — c'est ELLE qui fait que le scan va chercher plus loin.
+            // seules les pépites au score ≥ CFG.discoverLegendaryScore comptent dans le
+            // quota. Une candidate qui a passé tous les filtres précédents mais n'est
+            // « que » notable/pref est rejetée ici — c'est ELLE qui fait que le scan va
+            // chercher plus loin.
             if (legendary && !discoverSignals(candidate, tasteProfile).legendary) continue;
             finalResults.push(candidate);
           }
@@ -4901,14 +4884,20 @@
   }
 
   // Signaux d'une carte Découverte : icônes parlantes + couleur du liseré dominant.
-  // 🎯 genre préféré (top 3) · 💚 dans tes goûts · 🏆 très bien notée · 🔥 très populaire
+  // 🎯 genre préféré (top 3) · 💚 dans tes goûts · 🏆 très bien notée
   //
   // « Légendaire » repose sur un SCORE dont le cœur est le GOÛT NET (voir tasteScore) :
   // les genres que tu aimes rapportent, ceux que tu ne regardes jamais RETIRENT des points.
   // C'est ce qui empêche une série majoritairement hors de tes goûts (ex. sport + drame)
-  // de décrocher « légendaire » juste parce qu'elle est AUSSI une comédie. La note et la
-  // popularité restent des bonus. Seuils réglables : CFG.discoverLegendaryScore /
-  // discoverNotableScore.
+  // de décrocher « légendaire » juste parce qu'elle est AUSSI une comédie. La note reste un
+  // bonus. Seuils réglables : CFG.discoverLegendaryScore / discoverNotableScore.
+  //
+  // (fix) Signal 🔥 « très populaire » RETIRÉ du scoring : il se basait sur le rang dans le
+  // classement popularité au moment du scan (s.popRank/s.order), une notion qui varie trop
+  // selon la profondeur et le point de départ du scan pour être un signe fiable de qualité —
+  // il faussait le score « pépite » (une candidate pouvait devenir notable/légendaire sur ce
+  // seul critère, sans rapport avec le goût ou la note). Seuls le goût et la note comptent
+  // désormais.
   function discoverSignals(s, profile) {
     const cats = s.categories || [];
     const isPref = !!(profile && profile.top.some((g) => cats.includes(g)));
@@ -4916,12 +4905,6 @@
     const goodTaste = taste >= 0.4;               // globalement bien dans tes goûts
     const wellRated = s.rating != null && s.rating >= CFG.discoverWellRatedThreshold;
     const superRated = s.rating != null && s.rating >= CFG.discoverSuperRatedThreshold;
-    // s.popRank = rang RÉEL dans le classement popularité (posé pendant le scan), en repli
-    // sur s.order pour les anciennes cartes en cache. Fenêtre élargie et proportionnelle au
-    // scan le plus profond (voir CFG.discoverVeryPopularRank) : au-delà de la 1ʳᵉ page,
-    // « très populaire » garde son sens sans devenir inatteignable en scan légendaire.
-    const rank = s.popRank != null ? s.popRank : s.order;
-    const veryPopular = rank != null && rank < CFG.discoverVeryPopularRank;
 
     const badges = [];
     // 🎯 reste informatif (« contient un de tes genres préférés »), mais seulement si le
@@ -4930,20 +4913,18 @@
     if (isPref && taste > 0) badges.push(['🎯', 'Un de tes genres préférés']);
     if (goodTaste) badges.push(['💚', 'Dans tes goûts']);
     if (wellRated) badges.push(['🏆', 'Très bien notée']);
-    if (veryPopular) badges.push(['🔥', 'Tout en haut du classement']);
 
     // Score « pépite ». Le goût NET pèse le plus, et il peut être NÉGATIF : un genre jamais
     // regardé fait baisser le score, pas seulement « ne l'augmente pas ». Un genre aimé ne
-    // suffit donc plus si le reste te correspond peu. La note (2 paliers) et la popularité
-    // ajoutent des bonus. Seuils : voir CFG.discoverLegendaryScore / discoverNotableScore.
+    // suffit donc plus si le reste te correspond peu. La note (2 paliers) ajoute un bonus.
+    // Seuils : voir CFG.discoverLegendaryScore / discoverNotableScore.
     let score = Math.max(-2.5, Math.min(2.5, taste * 2.5));   // goût : gros poids, positif ET négatif
     // (clamp aligné sur le multiplicateur ×2.5 — avant, borné à ±2, un goût quasi parfait
     // [taste > 0.8] perdait sa résolution et plafonnait comme un goût seulement « bon ».)
     if (wellRated) score += 0.5;
     if (superRated) score += 0.5;
-    if (veryPopular) score += 0.5;
 
-    const lead = (isPref && taste > 0) ? 'pref' : goodTaste ? 'aff' : wellRated ? 'rated' : veryPopular ? 'pop' : '';
+    const lead = (isPref && taste > 0) ? 'pref' : goodTaste ? 'aff' : wellRated ? 'rated' : '';
     const legendary = score >= CFG.discoverLegendaryScore;
     const notable = !legendary && score >= CFG.discoverNotableScore;
     return { badges, lead, legendary, notable, score };
@@ -4954,6 +4935,16 @@
       ? `<div class="crrav-sigs">${sig.badges.map(([ic, lbl]) =>
           `<span class="crrav-sig-dot" title="${lbl}">${ic}</span>`).join('')}</div>`
       : '';
+  }
+
+  // Note « obtenue » = score pépite calculé par discoverSignals (goût net + bonus note),
+  // le même nombre qui décide légendaire/notable. Affiché tel quel pour que les seuils
+  // réglables dans Réglages → Découverte (discoverLegendaryScore/discoverNotableScore)
+  // soient vérifiables série par série, pas seulement devinés depuis les badges.
+  function scoreChip(sig) {
+    const cls = sig.legendary ? ' legendary' : sig.notable ? ' notable' : '';
+    const signed = (sig.score >= 0 ? '+' : '') + sig.score.toFixed(1);
+    return `<span class="crrav-scorechip${cls}" title="Score pépite obtenu — légendaire ≥ ${CFG.discoverLegendaryScore}, notable ≥ ${CFG.discoverNotableScore} (réglable dans Réglages → Découverte)">${signed}</span>`;
   }
 
   function discoverCard(s, profile) {
@@ -4970,7 +4961,7 @@
         <a class="crrav-cover" href="${seriesUrl}">
           ${s.poster ? `<img loading="lazy" crossorigin="anonymous" src="${s.poster}" alt="" onerror="this.removeAttribute(&quot;crossorigin&quot;);this.src=this.src">` : ''}
         </a>
-        ${sig.legendary ? `<span class="crrav-legribbon" title="3 signaux ou plus : une pépite en or">✨ Légendaire</span>` : ''}
+        ${sig.legendary ? `<span class="crrav-legribbon" title="Score pépite élevé (voir Réglages → Découverte) : une pépite en or">✨ Légendaire</span>` : ''}
         <span class="crrav-rating">★ ${s.rating.toFixed(1)}</span>
         ${ignoreBtn(s, 'discover')}
         ${addListBtn(s)}
@@ -4979,7 +4970,7 @@
       <div class="crrav-body">
         <a class="crrav-title" href="${seriesUrl}">${escapeHtml(s.title)}</a>
         <div class="crrav-sigs">${sig.badges.map(([ic, lbl]) =>
-          `<span class="crrav-sig-dot" title="${lbl}">${ic}</span>`).join('')}</div>
+          `<span class="crrav-sig-dot" title="${lbl}">${ic}</span>`).join('')}${scoreChip(sig)}</div>
         <div class="crrav-meta"><span>${info}</span></div>
         ${(s.categories || []).length
           ? `<div class="crrav-cats" title="${escapeHtml((s.categories || []).join(', '))}"
@@ -5005,13 +4996,13 @@
     return `<article class="crrav-lrow crrav-lrow-discover${sig.lead ? ' crrav-sig crrav-sig-' + sig.lead : ''}${sig.legendary ? ' crrav-legendary' : sig.notable ? ' crrav-notable' : ''}">
       <a class="crrav-lthumb" href="${seriesUrl}">
         ${s.poster ? `<img loading="lazy" crossorigin="anonymous" src="${s.poster}" alt="" onerror="this.removeAttribute(&quot;crossorigin&quot;);this.src=this.src">` : ''}
-        ${sig.legendary ? `<span class="crrav-legribbon crrav-legribbon-sm" title="3 signaux ou plus : une pépite en or">✨</span>` : ''}
+        ${sig.legendary ? `<span class="crrav-legribbon crrav-legribbon-sm" title="Score pépite élevé (voir Réglages → Découverte) : une pépite en or">✨</span>` : ''}
       </a>
       <div class="crrav-lmain">
         <div class="crrav-lhead">
           <a class="crrav-ltitle" href="${seriesUrl}">${escapeHtml(s.title)}</a>
           <span class="crrav-lrating">★ ${s.rating.toFixed(1)}</span>
-          ${sigMarkup(sig)}
+          ${sigMarkup(sig)}${scoreChip(sig)}
           ${s.synopsis ? `<button class="crrav-info" aria-expanded="false" aria-label="Lire le synopsis en entier">i</button>
              <div class="crrav-syn"><p>${escapeHtml(s.synopsis)}</p></div>` : ''}
         </div>
@@ -5349,7 +5340,13 @@
   .crrav-sig-pref{--sig:#b98bff}
   .crrav-sig-aff{--sig:#4ade80}
   .crrav-sig-rated{--sig:#ffd166}
-  .crrav-sig-pop{--sig:#5db4ff}
+  /* Note « obtenue » = score pépite (voir scoreChip) : neutre par défaut, doré si légendaire,
+     argenté si notable — cohérent avec le liseré/halo des cartes elles-mêmes. */
+  .crrav-scorechip{display:inline-flex;align-items:center;flex:0 0 auto;padding:2px 7px;
+    border-radius:999px;font:800 11px/1.3 system-ui;font-variant-numeric:tabular-nums;
+    background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.14);color:#c9c9d2;cursor:default}
+  .crrav-scorechip.notable{background:rgba(230,230,236,.14);border-color:rgba(230,230,236,.35);color:#eceef2}
+  .crrav-scorechip.legendary{background:rgba(255,179,71,.18);border-color:rgba(255,179,71,.55);color:#ffd48a}
   .crrav-card.crrav-sig::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;z-index:3;background:var(--sig)}
   .crrav-lrow-discover.crrav-sig::before{background:var(--sig);transform:scaleY(1)}
   .crrav-siglegend{display:flex;flex-wrap:wrap;align-items:center;gap:7px;margin:14px 0 13px}
@@ -5360,7 +5357,7 @@
   .crrav-siglegend-chip:hover{background:rgba(255,255,255,.09);transform:translateY(-1px)}
   .crrav-siglegend-chip::after{content:'';width:6px;height:6px;border-radius:50%;
     background:var(--sig);box-shadow:0 0 7px var(--sig);flex:none;margin-left:1px}
-  /* Carte « légendaire » (3 signaux ou plus) : halo doré qui respire autour de la carte,
+  /* Carte « légendaire » (score pépite ≥ CFG.discoverLegendaryScore) : halo doré qui respire autour de la carte,
      plus un ruban en coin. Le liseré coloré (--sig) reste en place dessous, le halo
      doré prend le dessus visuellement pour que « légendaire » soit non-ambigu. */
   @keyframes crrav-legpulse{
@@ -7445,7 +7442,6 @@
           ${profile.size ? `<span class="crrav-siglegend-chip crrav-sig-pref" title="Un de tes 3 genres les plus regardés">🎯 genre préféré</span>
           <span class="crrav-siglegend-chip crrav-sig-aff" title="Colle à tes genres les plus regardés">💚 dans tes goûts</span>` : ''}
           <span class="crrav-siglegend-chip crrav-sig-rated" title="Note bien au-dessus du minimum">🏆 très bien notée</span>
-          <span class="crrav-siglegend-chip crrav-sig-pop" title="Tout en haut du classement popularité">🔥 très populaire</span>
         </div>` : ''}
         ${D.warning ? `<p class="crrav-warn">${escapeHtml(D.warning)}</p>` : ''}
         <div class="crrav-stats">
@@ -7472,7 +7468,7 @@
             : ''}
           ${!D.loading && !f.showIgnoredDiscover
             ? `<button class="crrav-sync" data-act="legendary-discover"
-                 title="Scanne beaucoup plus profond dans le classement popularité pour dénicher spécifiquement des pépites légendaires (3 signaux ou plus)"><span class="crrav-dice-gold">🎲</span> ${
+                 title="Scanne beaucoup plus profond dans le classement popularité pour dénicher spécifiquement des pépites légendaires (score élevé)"><span class="crrav-dice-gold">🎲</span> ${
                 D.legendaryHunt ? 'Encore des légendaires' : 'Dé légendaire'}</button>`
             : ''}
           <div class="crrav-chips">
