@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      2.151.0
+// @version      2.153.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '2.151.0';
+  const SCRIPT_VERSION = '2.153.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -364,6 +364,17 @@
   //  'discover'→ vide les résultats Découverte + relance la recherche
   //  'history' → invalide l'historique (rescanné au besoin)
   //  'display' → simple ré-affichage, AUCUNE requête
+  // (31) Sous-groupes internes à un groupe de Réglages : purement pour l'affichage — un
+  // champ ayant `sub: 'clé'` est rendu sous un petit en-tête plutôt que dans la grille plate
+  // du groupe. Facultatif : un champ sans `sub` reste rendu comme avant. Défini une fois ici,
+  // référencé par sa clé pour éviter de dupliquer icône/label sur chaque champ.
+  const SETTINGS_SUBGROUPS = {
+    discoverFilters: { icon: '🔍', label: 'Filtres de suggestions', hue: '244,117,33' },
+    discoverDice: { icon: '🎲', label: 'Dé légendaire — profondeur & quantité', hue: '255,209,102' },
+    discoverScoring: { icon: '✨', label: 'Score légendaire & notable', hue: '255,179,71' },
+    discoverLists: { icon: '➕', label: 'Ajout aux listes', hue: '77,222,128' },
+  };
+
   const SETTINGS_SCHEMA = [
     { key: 'watchedRatio', label: 'Épisode compté comme vu à partir de', type: 'percent',
       min: 50, max: 100, step: 1, help: 'Crunchyroll ne marque pas toujours la fin d’un épisode.',
@@ -413,48 +424,48 @@
       impact: 'display' },
     { key: 'discoverMinRating', label: 'Note minimale', type: 'float', min: 0, max: 5, step: 0.5,
       help: 'Écarte les séries en dessous de cette note. 0 = aucun filtre de note.',
-      impact: 'discover' },
+      impact: 'discover', sub: 'discoverFilters' },
     { key: 'discoverMaxSeasons', label: 'Saisons maximum', type: 'int', min: 1, max: 20, unit: 'saisons',
       help: 'Écarte les séries trop longues à rattraper.',
-      impact: 'discover' },
+      impact: 'discover', sub: 'discoverFilters' },
     { key: 'discoverTarget', label: 'Nombre de pépites visées', type: 'int', min: 5, max: 100,
       help: 'Combien de suggestions viser dans l’onglet Découverte.',
-      impact: 'discover' },
-    { key: 'legendaryTarget', label: '🎲 Dé légendaire — nombre visé', type: 'int', min: 3, max: 50,
-      help: 'Combien de pépites LÉGENDAIRES (score ≥ CFG.discoverLegendaryScore, réglable ci-dessous) viser quand tu lances le dé légendaire.',
-      impact: 'discover' },
-    { key: 'legendaryMaxPages', label: '🎲 Dé légendaire — profondeur de scan', type: 'int', min: 12, max: 100, unit: 'pages',
-      help: 'Jusqu’où le dé légendaire scanne le classement popularité pour dénicher ses pépites. Plus haut = plus long, mais plus de chances de trouver assez de légendaires.',
-      impact: 'discover' },
-    { key: 'discoverMissPenalty', label: '✨ Légendaire — malus par genre jamais regardé', type: 'float', min: 0, max: 1, step: 0.05,
-      help: 'Points retirés du score de goût pour chaque genre d’une série que tu ne regardes jamais. Plus bas = plus tolérant, plus facile d’obtenir « légendaire ». 0 = les genres jamais regardés n’handicapent plus du tout.',
-      impact: 'discover' },
-    { key: 'discoverMaxPenalizedGenres', label: '✨ Légendaire — genres jamais regardés max pénalisés', type: 'int', min: 0, max: 10,
-      help: 'Au-delà de ce nombre, les genres jamais regardés d’une série ne comptent plus contre elle. Évite qu’une série à beaucoup de genres (ex. 6) soit écrasée juste parce qu’elle en liste beaucoup, même si 2-3 correspondent parfaitement à tes goûts. Monte-le pour redevenir plus strict, baisse-le (voire 0) pour être très tolérant.',
-      impact: 'discover' },
-    { key: 'discoverLegendaryScore', label: '✨ Légendaire — score minimum requis', type: 'float', min: 0.5, max: 5, step: 0.1,
-      help: 'Score « pépite » à atteindre pour décrocher le ruban ✨ Légendaire. Composé du goût (jusqu’à ±2.5) + bonus note/popularité (jusqu’à +1.5). Baisse-le pour en trouver plus souvent.',
-      impact: 'discover' },
-    { key: 'discoverNotableScore', label: 'Notable — score minimum requis', type: 'float', min: 0.5, max: 5, step: 0.1,
-      help: 'Score « pépite » à partir duquel une série est marquée « notable » (un cran sous légendaire). Doit rester inférieur au score légendaire ci-dessus.',
-      impact: 'discover' },
-    { key: 'discoverWellRatedThreshold', label: '🏆 Note « très bien notée »', type: 'float', min: 3, max: 5, step: 0.1,
-      help: 'Note AniList à partir de laquelle le badge 🏆 s’affiche, et qui donne un bonus de +0.5 au score pépite.',
-      impact: 'discover' },
-    { key: 'discoverSuperRatedThreshold', label: 'Note « exceptionnelle » (bonus supplémentaire)', type: 'float', min: 3, max: 5, step: 0.1,
-      help: 'Note AniList à partir de laquelle un second bonus de +0.5 s’ajoute au score pépite (cumulable avec le bonus « très bien notée » ci-dessus).',
-      impact: 'discover' },
+      impact: 'discover', sub: 'discoverFilters' },
     { key: 'discoverExcludeCategories', label: 'Genres exclus (Découverte & Nouveautés)',
       type: 'list',
       help: 'Séparés par des virgules. S’applique à Découverte (relance une recherche) et au bloc Nouveautés du Calendrier (relance au prochain rafraîchissement). « hentai » y est exclu par défaut.',
-      impact: 'discover' },
+      impact: 'discover', sub: 'discoverFilters' },
+    { key: 'legendaryTarget', label: 'Nombre visé', type: 'int', min: 3, max: 50,
+      help: 'Combien de pépites LÉGENDAIRES (score ≥ CFG.discoverLegendaryScore, réglable ci-dessous) viser quand tu lances le dé légendaire.',
+      impact: 'discover', sub: 'discoverDice' },
+    { key: 'legendaryMaxPages', label: 'Profondeur de scan', type: 'int', min: 12, max: 100, unit: 'pages',
+      help: 'Jusqu’où le dé légendaire scanne le classement popularité pour dénicher ses pépites. Plus haut = plus long, mais plus de chances de trouver assez de légendaires.',
+      impact: 'discover', sub: 'discoverDice' },
+    { key: 'discoverMissPenalty', label: 'Malus par genre jamais regardé', type: 'float', min: 0, max: 1, step: 0.05,
+      help: 'Points retirés du score de goût pour chaque genre d’une série que tu ne regardes jamais. Plus bas = plus tolérant, plus facile d’obtenir « légendaire ». 0 = les genres jamais regardés n’handicapent plus du tout.',
+      impact: 'discover', sub: 'discoverScoring' },
+    { key: 'discoverMaxPenalizedGenres', label: 'Genres jamais regardés max pénalisés', type: 'int', min: 0, max: 10,
+      help: 'Au-delà de ce nombre, les genres jamais regardés d’une série ne comptent plus contre elle. Évite qu’une série à beaucoup de genres (ex. 6) soit écrasée juste parce qu’elle en liste beaucoup, même si 2-3 correspondent parfaitement à tes goûts. Monte-le pour redevenir plus strict, baisse-le (voire 0) pour être très tolérant.',
+      impact: 'discover', sub: 'discoverScoring' },
+    { key: 'discoverLegendaryScore', label: 'Score minimum — légendaire', type: 'float', min: 0.5, max: 5, step: 0.1,
+      help: 'Score « pépite » à atteindre pour décrocher le ruban ✨ Légendaire. Composé du goût (jusqu’à ±2.5) + bonus note (jusqu’à +1). Baisse-le pour en trouver plus souvent.',
+      impact: 'discover', sub: 'discoverScoring' },
+    { key: 'discoverNotableScore', label: 'Score minimum — notable', type: 'float', min: 0.5, max: 5, step: 0.1,
+      help: 'Score « pépite » à partir duquel une série est marquée « notable » (un cran sous légendaire). Doit rester inférieur au score légendaire ci-dessus.',
+      impact: 'discover', sub: 'discoverScoring' },
+    { key: 'discoverWellRatedThreshold', label: 'Note « très bien notée » 🏆', type: 'float', min: 3, max: 5, step: 0.1,
+      help: 'Note AniList à partir de laquelle le badge 🏆 s’affiche, et qui donne un bonus de +0.5 au score pépite.',
+      impact: 'discover', sub: 'discoverScoring' },
+    { key: 'discoverSuperRatedThreshold', label: 'Note « exceptionnelle » (bonus supplémentaire)', type: 'float', min: 3, max: 5, step: 0.1,
+      help: 'Note AniList à partir de laquelle un second bonus de +0.5 s’ajoute au score pépite (cumulable avec le bonus « très bien notée » ci-dessus).',
+      impact: 'discover', sub: 'discoverScoring' },
     { key: 'defaultListId', label: 'Liste de destination par défaut (bouton + dans Découverte)',
       type: 'listselect',
       help: 'Tes Crunchylists sont détectées automatiquement (watchlist exclue). Sans choix ici, la première liste détectée est utilisée.',
-      impact: 'discover' },
+      impact: 'discover', sub: 'discoverLists' },
     { key: 'askListEachTime', label: 'Demander la liste à chaque ajout depuis Découverte', type: 'bool',
       help: 'Désactivé : le bouton + ajoute directement à la liste par défaut ci-dessus. Activé : un choix de liste est proposé à chaque ajout.',
-      impact: 'discover' },
+      impact: 'discover', sub: 'discoverLists' },
     { key: 'discoverNewPremieres', label: 'Calendrier — bloc « Nouveautés » (épisode 1 tout juste sorti)',
       type: 'bool',
       help: 'Repère, via AniList, les séries dont l’épisode 1 vient de sortir et l’épisode 2 pas encore — une façon de découvrir les nouveaux simulcasts. Les cartes renvoient vers une recherche Crunchyroll (pas de fiche précise : AniList ne connaît pas les identifiants Crunchyroll). Si tu ne l’ajoutes pas à une liste, une série disparaît d’elle-même du bloc dès que l’épisode 2 sort.',
@@ -4930,6 +4941,38 @@
     return { badges, lead, legendary, notable, score };
   }
 
+  // (32) Schéma horizontal du calcul du score « pépite », affiché en haut du sous-groupe
+  // ✨ Score légendaire & notable. Reflète les valeurs RÉELLEMENT configurées (bornes,
+  // seuils) plutôt qu'un exemple générique — sert de repère visuel immédiat pendant qu'on
+  // ajuste les curseurs juste en dessous.
+  // Composition (voir discoverSignals) : goût net (borné ±2.5, peut être négatif) puis
+  // deux bonus de note cumulables (+0.5 chacun) → intervalle total [-2.5 ; +3.5].
+  function scoreFormulaSchema() {
+    const min = -2.5, max = 3.5, span = max - min;
+    const pct = (v) => Math.max(0, Math.min(100, ((v - min) / span) * 100));
+    const notablePos = pct(CFG.discoverNotableScore);
+    const legendaryPos = pct(CFG.discoverLegendaryScore);
+    const zeroPos = pct(0);
+    return `<div class="crrav-scoreschema">
+      <div class="crrav-scoreschema-track">
+        <div class="crrav-scoreschema-seg taste" style="left:${pct(-2.5)}%;width:${pct(2.5) - pct(-2.5)}%" title="Goût (genres) : de -2.5 à +2.5 selon ce que tu regardes"></div>
+        <div class="crrav-scoreschema-seg bonus1" style="left:${pct(2.5)}%;width:${pct(3) - pct(2.5)}%" title="🏆 très bien notée : +0.5"></div>
+        <div class="crrav-scoreschema-seg bonus2" style="left:${pct(3)}%;width:${pct(3.5) - pct(3)}%" title="✨ note exceptionnelle : +0.5 (cumulable)"></div>
+        <div class="crrav-scoreschema-zero" style="left:${zeroPos}%" title="Goût neutre (0)"></div>
+        <div class="crrav-scoreschema-pin notable" style="left:${notablePos}%">
+          <span class="crrav-scoreschema-pinlab">Notable<b>${CFG.discoverNotableScore.toFixed(1)}</b></span></div>
+        <div class="crrav-scoreschema-pin legendary" style="left:${legendaryPos}%">
+          <span class="crrav-scoreschema-pinlab">Légendaire<b>${CFG.discoverLegendaryScore.toFixed(1)}</b></span></div>
+      </div>
+      <div class="crrav-scoreschema-formula">
+        <span><i class="crrav-scoreschema-dot taste"></i>Goût (genres aimés − genres jamais regardés)</span>
+        <span>+</span><span><i class="crrav-scoreschema-dot bonus1"></i>🏆 bien notée</span>
+        <span>+</span><span><i class="crrav-scoreschema-dot bonus2"></i>✨ exceptionnelle</span>
+        <span>=</span><span><b>Score pépite</b></span>
+      </div>
+    </div>`;
+  }
+
   function sigMarkup(sig) {
     return sig && sig.badges.length
       ? `<div class="crrav-sigs">${sig.badges.map(([ic, lbl]) =>
@@ -5349,8 +5392,14 @@
   .crrav-scorechip.legendary{background:rgba(255,179,71,.18);border-color:rgba(255,179,71,.55);color:#ffd48a}
   .crrav-card.crrav-sig::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;z-index:3;background:var(--sig)}
   .crrav-lrow-discover.crrav-sig::before{background:var(--sig);transform:scaleY(1)}
-  .crrav-siglegend{display:flex;flex-wrap:wrap;align-items:center;gap:7px;margin:14px 0 13px}
-  .crrav-siglegend-chip{display:inline-flex;align-items:center;gap:6px;white-space:nowrap;
+  /* (fix) Une seule ligne, même sur écran étroit (Z Fold plié…) : plutôt que de laisser les
+     chips passer à la ligne (illisible, ça sautait sur 2 lignes dès 3 chips), la rangée
+     défile horizontalement au doigt. Barre de défilement masquée pour rester discret. */
+  .crrav-siglegend{display:flex;flex-wrap:nowrap;align-items:center;gap:7px;margin:14px 0 13px;
+    overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;
+    scrollbar-width:none;-ms-overflow-style:none}
+  .crrav-siglegend::-webkit-scrollbar{display:none}
+  .crrav-siglegend-chip{display:inline-flex;align-items:center;gap:6px;white-space:nowrap;flex:0 0 auto;
     font:600 11.5px/1 system-ui;color:#d3d4da;padding:6px 11px 6px 9px;border-radius:9px;
     background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.07);
     border-left:3px solid var(--sig);transition:background .15s,transform .15s}
@@ -5752,6 +5801,52 @@
   .crrav-settings h3::before{content:'';flex:0 0 auto;width:4px;height:19px;border-radius:3px;
     background:linear-gradient(#ffb347,#f47521);box-shadow:0 0 10px rgba(244,117,33,.55)}
   .crrav-sgrid{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(205px,1fr))}
+  /* (31) Sous-groupes thématiques à l'intérieur d'un groupe de Réglages (ex. Découverte,
+     éclatée en Filtres / Dé légendaire / Score / Listes) — en-tête coloré par thème
+     (--subhue posé inline par settingsPanel) pour repérer le bloc d'un coup d'œil, séparé
+     du précédent par un fin liseré plutôt qu'un cadre complet (reste léger visuellement
+     même avec plusieurs blocs à la suite). */
+  .crrav-subgroup{padding-top:16px;margin-top:16px;border-top:1px solid rgba(255,255,255,.07)}
+  .crrav-subgroup:first-child{padding-top:0;margin-top:0;border-top:0}
+  .crrav-subhead{display:flex;align-items:center;gap:8px;margin:0 0 12px;
+    font:800 12.5px/1.2 system-ui;letter-spacing:.01em;color:#e6e7ea}
+  .crrav-subhead-ico{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;
+    width:24px;height:24px;border-radius:8px;font-size:13px;
+    background:rgba(var(--subhue,244,117,33),.16);box-shadow:inset 0 0 0 1px rgba(var(--subhue,244,117,33),.4)}
+  /* (32) Schéma du calcul du score pépite (voir scoreFormulaSchema) : une piste horizontale
+     avec un segment dégradé rouge→vert pour le goût (peut être négatif) puis deux petits
+     segments dorés pour les bonus de note, et deux « drapeaux » positionnés aux seuils
+     notable/légendaire réellement configurés — pour voir d'un coup d'œil où ils tombent
+     dans l'intervalle possible, pas juste lire un nombre isolé. */
+  .crrav-scoreschema{margin:0 0 18px;padding:34px 10px 12px;background:rgba(255,255,255,.03);
+    border:1px solid rgba(255,255,255,.07);border-radius:12px}
+  .crrav-scoreschema-track{position:relative;height:9px;border-radius:999px;
+    background:rgba(255,255,255,.08);margin:0 4px 10px}
+  .crrav-scoreschema-seg{position:absolute;top:0;bottom:0;border-radius:999px}
+  .crrav-scoreschema-seg.taste{background:linear-gradient(90deg,#f2545b,#8a8a94 50%,#4ade80)}
+  .crrav-scoreschema-seg.bonus1{background:#ffd166}
+  .crrav-scoreschema-seg.bonus2{background:#ffb347}
+  .crrav-scoreschema-zero{position:absolute;top:-3px;bottom:-3px;width:2px;
+    background:rgba(255,255,255,.45);transform:translateX(-1px)}
+  .crrav-scoreschema-pin{position:absolute;bottom:100%;transform:translateX(-50%);
+    display:flex;flex-direction:column;align-items:center}
+  .crrav-scoreschema-pin::after{content:'';width:2px;height:12px;margin-top:3px;
+    background:var(--pincolor,#c9c9d2)}
+  .crrav-scoreschema-pin.notable{--pincolor:#c9c9d2}
+  .crrav-scoreschema-pin.legendary{--pincolor:#ffb347}
+  .crrav-scoreschema-pinlab{display:flex;flex-direction:column;align-items:center;
+    font:700 9.5px/1.15 system-ui;color:#c9c9d2;white-space:nowrap}
+  .crrav-scoreschema-pinlab b{font:800 11px/1.2 system-ui;color:#fff}
+  .crrav-scoreschema-pin.legendary .crrav-scoreschema-pinlab{color:#ffd48a}
+  .crrav-scoreschema-pin.legendary .crrav-scoreschema-pinlab b{color:#ffb347}
+  .crrav-scoreschema-formula{display:flex;flex-wrap:wrap;align-items:center;gap:6px;
+    font:600 11px/1.3 system-ui;color:#a9a9b4}
+  .crrav-scoreschema-formula b{color:#fff}
+  .crrav-scoreschema-dot{display:inline-block;width:8px;height:8px;border-radius:50%;
+    margin-right:5px;vertical-align:middle}
+  .crrav-scoreschema-dot.taste{background:linear-gradient(90deg,#f2545b,#4ade80)}
+  .crrav-scoreschema-dot.bonus1{background:#ffd166}
+  .crrav-scoreschema-dot.bonus2{background:#ffb347}
   .crrav-field{display:flex;flex-direction:column;gap:5px}
   .crrav-field label{font:600 11.5px/1.3 system-ui;color:#c9c9d2}
   .crrav-field small{font:400 10.5px/1.4 system-ui;color:#8a8a94}
@@ -7703,6 +7798,12 @@
           fld.style.display = show ? '' : 'none';
           if (show) vis++;
         });
+        // (31) Un sous-groupe (bloc thématique) se masque dès qu'aucun de ses champs n'est
+        // visible — sinon son en-tête restait affiché seul, orphelin, pendant une recherche.
+        g.querySelectorAll(':scope .crrav-subgroup').forEach((sub) => {
+          const subVis = Array.from(sub.querySelectorAll('.crrav-field')).some((fld) => fld.style.display !== 'none');
+          sub.style.display = subVis ? '' : 'none';
+        });
         g.style.display = vis > 0 ? '' : 'none';
         if (vis > 0) anyVisible = true;
         if (active) g.open = true;
@@ -7740,6 +7841,28 @@
       if (!fs.length) return '';
       const id = 'set-' + g.key;
       const open = !compact || statsAccordionOpen.has(id);
+      // (31) Sous-groupes : si au moins un champ du groupe porte `sub`, on éclate la grille
+      // plate en petits blocs thématiques (en-tête icône + libellé, liseré de couleur assorti
+      // au thème). Les champs sans `sub` (aucun ici pour Découverte, mais on reste générique
+      // pour les autres groupes) restent tout en haut, hors bloc.
+      const subIds = [];
+      fs.forEach((f) => { if (f.sub && !subIds.includes(f.sub)) subIds.push(f.sub); });
+      let body;
+      if (subIds.length) {
+        const noSub = fs.filter((f) => !f.sub);
+        body = (noSub.length ? `<div class="crrav-sgrid">${noSub.map(settingsFieldHtml).join('')}</div>` : '')
+          + subIds.map((subId) => {
+            const meta = SETTINGS_SUBGROUPS[subId] || { icon: '', label: subId, hue: '244,117,33' };
+            const subFs = fs.filter((f) => f.sub === subId);
+            return `<div class="crrav-subgroup" data-sub="${subId}" style="--subhue:${meta.hue}">
+              <div class="crrav-subhead"><span class="crrav-subhead-ico">${meta.icon}</span><span class="crrav-subhead-lab">${meta.label}</span></div>
+              ${subId === 'discoverScoring' ? scoreFormulaSchema() : ''}
+              <div class="crrav-sgrid">${subFs.map(settingsFieldHtml).join('')}</div>
+            </div>`;
+          }).join('');
+      } else {
+        body = `<div class="crrav-sgrid">${fs.map(settingsFieldHtml).join('')}</div>`;
+      }
       return `<details class="crrav-accordion crrav-setgroup" data-acc="${id}" ${open ? 'open' : ''}>
         <summary>
           <span class="crrav-sg-ico">${g.icon}</span>
@@ -7747,7 +7870,7 @@
           <span class="crrav-sg-n">${fs.length}</span>
         </summary>
         <div class="crrav-accordion-body">
-          <div class="crrav-sgrid">${fs.map(settingsFieldHtml).join('')}</div>
+          ${body}
         </div>
       </details>`;
     }).join('');
