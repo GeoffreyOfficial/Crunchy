@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      2.158.0
+// @version      2.159.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '2.158.0';
+  const SCRIPT_VERSION = '2.159.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -2430,11 +2430,14 @@
   }
 
   // Fragment commun des champs Media qu'on lit (réutilisé par la recherche groupée).
-  // tags(sort: RANK_DESC) : les 300+ tags AniList (ex. « Isekai », « Time Skip », « Ensemble
-  // Cast »), triés par pertinence décroissante — bien plus fins que les ~20 genres génériques
-  // (Action, Comédie…) pour distinguer deux séries d'un même genre. rank = 0-100, % de
-  // pertinence de CE tag pour CETTE série (voir tasteScore, qui pondère chaque tag par son
-  // rank plutôt que de tous les compter à poids égal).
+  // tags : les 300+ tags AniList (ex. « Isekai », « Time Skip », « Ensemble Cast »), bien
+  // plus fins que les ~20 genres génériques (Action, Comédie…) pour distinguer deux séries
+  // d'un même genre. rank = 0-100, % de pertinence de CE tag pour CETTE série (voir
+  // tasteScore, qui pondère chaque tag par son rank plutôt que de tous les compter à poids
+  // égal). Pas d'argument `sort` ici : contrairement à d'autres champs listes d'AniList,
+  // Media.tags n'en accepte aucun (un `sort: RANK_DESC` fait échouer toute la requête avec
+  // une 400 « Unknown argument "sort" ») — on trie par rank décroissant côté client, voir
+  // cleanAniTags.
   const ANILIST_FRAGMENT = `fragment F on Media {
     id
     title { romaji english native }
@@ -2443,7 +2446,7 @@
     status
     episodes
     genres
-    tags(sort: RANK_DESC) { name rank isMediaSpoiler }
+    tags { name rank isMediaSpoiler }
     startDate { year }
     nextAiringEpisode { episode airingAt }
     airingSchedule(perPage: 60) { nodes { episode airingAt } }
@@ -2521,7 +2524,7 @@
     status
     episodes
     genres
-    tags(sort: RANK_DESC) { name rank isMediaSpoiler }
+    tags { name rank isMediaSpoiler }
     startDate { year }
     nextAiringEpisode { episode airingAt }
   }`;
@@ -2641,12 +2644,14 @@
     return out;
   }
   // Nettoie les tags bruts AniList : on écarte les spoilers (isMediaSpoiler) et les tags à
-  // rank nul/absent (non pertinents pour cette série), et on garde { name, rank } seulement
-  // — le reste (id, description AniList…) ne sert jamais dans ce script.
+  // rank nul/absent (non pertinents pour cette série), on garde { name, rank } seulement
+  // — le reste (id, description AniList…) ne sert jamais dans ce script — et on trie par
+  // rank décroissant côté client (l'API n'accepte pas d'argument `sort` sur ce champ).
   function cleanAniTags(list) {
     return (Array.isArray(list) ? list : [])
       .filter((t) => t && t.name && !t.isMediaSpoiler && Number.isFinite(t.rank) && t.rank > 0)
-      .map((t) => ({ name: t.name, rank: t.rank }));
+      .map((t) => ({ name: t.name, rank: t.rank }))
+      .sort((a, b) => b.rank - a.rank);
   }
   // Fusionne deux listes de tags { name, rank } sans doublon (comparaison via aniNorm) —
   // à la différence des genres (simples chaînes), on garde le rank le PLUS HAUT vu pour un
