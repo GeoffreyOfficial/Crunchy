@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      2.155.0
+// @version      2.157.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '2.155.0';
+  const SCRIPT_VERSION = '2.157.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -5032,6 +5032,41 @@
     };
   }
 
+  // (34) Détail concret, replié par défaut, du profil de goût utilisé par le score « pépite »
+  // (voir scoreFormulaSchema / tasteScore) : sans lui, « ton goût net » restait une notion
+  // abstraite — impossible de savoir CONCRÈTEMENT quels genres comptent pour toi et à quel
+  // poids, sans ouvrir la console. Classé du genre le plus regardé (100 %) au moins regardé ;
+  // 🎯 marque les 3 qui donnent aussi le bonus « genre préféré ». Un genre ABSENT de cette
+  // liste est un genre qui RETIRE des points à une candidate qui le porte (voir la note du
+  // schéma juste au-dessus) — la liste complète est donc aussi la liste de ce qui NE pénalise
+  // PAS une série.
+  function tasteProfileDetailHtml() {
+    const profile = buildTasteProfile();
+    if (!profile.size) {
+      return `<details class="crrav-tasteprofile">
+        <summary>👤 Voir mon profil de goût actuel</summary>
+        <p class="crrav-tasteprofile-empty">Pas encore assez de séries commencées dans « Reste à voir » pour calculer un profil de goût — regarde quelques épisodes, il apparaîtra ici.</p>
+      </details>`;
+    }
+    const entries = Object.entries(profile.weights).sort((a, b) => b[1] - a[1]);
+    const max = profile.max || 1;
+    const rows = entries.map(([genre, w], i) => {
+      const pct = Math.round((w / max) * 100);
+      const isTop = profile.top.includes(genre);
+      return `<li class="${isTop ? 'top' : ''}">
+        <span class="crrav-tasteprofile-rank">${i + 1}</span>
+        <span class="crrav-tasteprofile-name">${escapeHtml(genre)}${isTop ? ' <span class="crrav-tasteprofile-badge" title="Un de tes 3 genres les plus regardés — donne aussi le bonus 🎯">🎯</span>' : ''}</span>
+        <div class="crrav-tasteprofile-bar"><div style="width:${pct}%"></div></div>
+        <span class="crrav-tasteprofile-val">${pct}%</span>
+      </li>`;
+    }).join('');
+    return `<details class="crrav-tasteprofile">
+      <summary>👤 Voir mon profil de goût actuel (${profile.size} genre${profile.size > 1 ? 's' : ''} détecté${profile.size > 1 ? 's' : ''})</summary>
+      <p class="crrav-tasteprofile-note">Calculé à partir des séries que tu as commencées dans « Reste à voir », pondérées par le nombre d'épisodes vus dans chaque genre : plus tu en regardes, plus il pèse. Le pourcentage est relatif à ton genre le plus regardé (= 100 %). <b>🎯</b> = tes 3 genres les plus regardés. Un genre qui n'apparaît PAS dans cette liste retire des points à toute série candidate qui le porte.</p>
+      <ul class="crrav-tasteprofile-list">${rows}</ul>
+    </details>`;
+  }
+
   // Score de goût NET d'une candidate, borné dans [-1, +1]. Différence clé avec l'ancien
   // affinityScore, qui IGNORAIT les genres jamais regardés : ici on les PÉNALISE. Sans ça,
   // une série sport/comédie/drame décrochait « dans tes goûts » (voire « légendaire ») juste
@@ -5127,50 +5162,76 @@
 
   // (32) Schéma horizontal du calcul du score « pépite », affiché en haut du sous-groupe
   // ✨ Score légendaire & notable. Entièrement dynamique : chaque segment, chaque borne et
-  // chaque bulle « Notable »/« Légendaire » reflète les valeurs RÉELLEMENT configurées dans
-  // CFG — pas un exemple générique. Composition (voir discoverSignals) :
+  // chaque bulle « Notable »/« Légendaire » reflète les valeurs RÉELLEMENT configurées —
+  // pas un exemple générique. Composition (voir discoverSignals) :
   //   goût net (-1..1) × discoverTasteWeight   →   segment « taste », peut être négatif
   //   + discoverPrefGenreBonus  (si 🎯 genre préféré)
   //   + discoverWellRatedBonus  (si 🏆 très bien notée)
   //   + discoverSuperRatedBonus (si ✨ note exceptionnelle, cumulable avec 🏆)
   // Une note en bas rappelle aussi que le goût net lui-même dépend de discoverMatchBonus /
   // discoverMissPenalty / discoverMaxPenalizedGenres — les leviers du bloc 💚 juste après.
-  function scoreFormulaSchema() {
-    const tw = CFG.discoverTasteWeight;
-    const prefBonus = CFG.discoverPrefGenreBonus;
-    const rated1 = CFG.discoverWellRatedBonus;
-    const rated2 = CFG.discoverSuperRatedBonus;
+  //
+  // (33) `override` : objet partiel de réglages à utiliser À LA PLACE de CFG, sans jamais
+  // toucher CFG lui-même. Sert à l'aperçu EN DIRECT (voir wireScoreSchemaLive) — pendant
+  // que tu déplaces un curseur dans Réglages, le graphique doit refléter la valeur que tu
+  // es en train de saisir, PAS celle encore enregistrée, et ce SANS attendre « Enregistrer
+  // et actualiser ». id="crrav-scoreschema-live" : point d'ancrage stable pour remplacer
+  // ce bloc en place (outerHTML) à chaque frappe, sans reconstruire tout le panneau.
+  function scoreFormulaSchema(override, opts) {
+    const live = !!(opts && opts.live);
+    const C = override ? { ...CFG, ...override } : CFG;
+    const tw = C.discoverTasteWeight;
+    const prefBonus = C.discoverPrefGenreBonus;
+    const rated1 = C.discoverWellRatedBonus;
+    const rated2 = C.discoverSuperRatedBonus;
     const min = -tw, max = tw + prefBonus + rated1 + rated2;
     const span = (max - min) || 1;
     const pct = (v) => Math.max(0, Math.min(100, ((v - min) / span) * 100));
-    const notablePos = pct(CFG.discoverNotableScore);
-    const legendaryPos = pct(CFG.discoverLegendaryScore);
+    const notablePos = pct(C.discoverNotableScore);
+    const legendaryPos = pct(C.discoverLegendaryScore);
     const zeroPos = pct(0);
     const b0 = min, b1 = tw, b2 = tw + prefBonus, b3 = tw + prefBonus + rated1, b4 = max;
     const fmt1 = (v) => (v >= 0 ? '+' : '') + v.toFixed(1);
-    const matchBonus = CFG.discoverMatchBonus ?? 1;
-    const maxPen = CFG.discoverMaxPenalizedGenres;
-    return `<div class="crrav-scoreschema">
+    const matchBonus = C.discoverMatchBonus ?? 1;
+    const maxPen = C.discoverMaxPenalizedGenres;
+    const rated1Thr = C.discoverWellRatedThreshold;
+    const rated2Thr = C.discoverSuperRatedThreshold;
+    return `<div class="crrav-scoreschema"${live ? ' id="crrav-scoreschema-live"' : ''}>
+      <div class="crrav-scoreschema-head">
+        <span class="crrav-scoreschema-title">📐 De quoi le score « pépite » est fait</span>
+        <span class="crrav-scoreschema-sub">Chaque tronçon coloré ci-dessous s'ADDITIONNE au précédent, de gauche à droite. Le total obtenu place la série sur cette échelle — et détermine si elle franchit un des deux repères « Notable » / « Légendaire ».</span>
+      </div>
       <div class="crrav-scoreschema-track">
-        <div class="crrav-scoreschema-seg taste" style="left:${pct(b0)}%;width:${pct(b1) - pct(b0)}%" title="Goût net (genres) × ${tw.toFixed(1)} : de ${min.toFixed(1)} à +${tw.toFixed(1)}"></div>
-        ${prefBonus > 0 ? `<div class="crrav-scoreschema-seg pref" style="left:${pct(b1)}%;width:${pct(b2) - pct(b1)}%" title="🎯 genre préféré : ${fmt1(prefBonus)}"></div>` : ''}
-        ${rated1 > 0 ? `<div class="crrav-scoreschema-seg bonus1" style="left:${pct(b2)}%;width:${pct(b3) - pct(b2)}%" title="🏆 très bien notée : ${fmt1(rated1)}"></div>` : ''}
-        ${rated2 > 0 ? `<div class="crrav-scoreschema-seg bonus2" style="left:${pct(b3)}%;width:${pct(b4) - pct(b3)}%" title="✨ note exceptionnelle : ${fmt1(rated2)} (cumulable)"></div>` : ''}
+        <div class="crrav-scoreschema-seg taste" style="left:${pct(b0)}%;width:${pct(b1) - pct(b0)}%" title="① Goût net (genres) × ${tw.toFixed(1)} : de ${min.toFixed(1)} à +${tw.toFixed(1)}"></div>
+        ${prefBonus > 0 ? `<div class="crrav-scoreschema-seg pref" style="left:${pct(b1)}%;width:${pct(b2) - pct(b1)}%" title="② 🎯 genre préféré : ${fmt1(prefBonus)}"></div>` : ''}
+        ${rated1 > 0 ? `<div class="crrav-scoreschema-seg bonus1" style="left:${pct(b2)}%;width:${pct(b3) - pct(b2)}%" title="③ 🏆 très bien notée : ${fmt1(rated1)}"></div>` : ''}
+        ${rated2 > 0 ? `<div class="crrav-scoreschema-seg bonus2" style="left:${pct(b3)}%;width:${pct(b4) - pct(b3)}%" title="④ ✨ note exceptionnelle : ${fmt1(rated2)} (cumulable)"></div>` : ''}
         <div class="crrav-scoreschema-zero" style="left:${zeroPos}%" title="Goût neutre (0)"></div>
         <div class="crrav-scoreschema-pin notable" style="left:${notablePos}%">
-          <span class="crrav-scoreschema-pinlab">Notable<b>${CFG.discoverNotableScore.toFixed(1)}</b></span></div>
+          <span class="crrav-scoreschema-pinlab">Notable<b>${C.discoverNotableScore.toFixed(1)}</b></span></div>
         <div class="crrav-scoreschema-pin legendary" style="left:${legendaryPos}%">
-          <span class="crrav-scoreschema-pinlab">Légendaire<b>${CFG.discoverLegendaryScore.toFixed(1)}</b></span></div>
+          <span class="crrav-scoreschema-pinlab">Légendaire<b>${C.discoverLegendaryScore.toFixed(1)}</b></span></div>
       </div>
-      <div class="crrav-scoreschema-bounds"><span>${min.toFixed(1)}</span><span>${max.toFixed(1)}</span></div>
-      <div class="crrav-scoreschema-formula">
-        <span><i class="crrav-scoreschema-dot taste"></i>Goût net × ${tw.toFixed(1)}</span>
-        <span>+</span><span><i class="crrav-scoreschema-dot pref"></i>🎯 préféré ${fmt1(prefBonus)}</span>
-        <span>+</span><span><i class="crrav-scoreschema-dot bonus1"></i>🏆 bien notée ${fmt1(rated1)}</span>
-        <span>+</span><span><i class="crrav-scoreschema-dot bonus2"></i>✨ except. ${fmt1(rated2)}</span>
-        <span>=</span><span><b>Score pépite</b></span>
-      </div>
-      <p class="crrav-scoreschema-note">Le goût net vient de la moyenne des genres de la série : chaque genre aimé compte pour <b>×${matchBonus.toFixed(1)}</b> (ta part d'écoute de ce genre), chaque genre jamais regardé retire <b>${CFG.discoverMissPenalty.toFixed(2)}</b> point — plafonné à <b>${maxPen}</b> genre${maxPen > 1 ? 's' : ''} pénalisé${maxPen > 1 ? 's' : ''} par série (réglages 💚 ci-dessous).</p>
+      <div class="crrav-scoreschema-bounds"><span>${min.toFixed(1)} · pire des cas</span><span>${max.toFixed(1)} · meilleur des cas</span></div>
+
+      <ul class="crrav-scoreschema-legend">
+        <li><span class="crrav-scoreschema-legnum">①</span><i class="crrav-scoreschema-dot taste"></i>
+          <span class="crrav-scoreschema-legtxt"><b>Goût net</b> — genres de la série comparés à ce que tu regardes vraiment</span>
+          <span class="crrav-scoreschema-legval">× ${tw.toFixed(1)}</span></li>
+        <li><span class="crrav-scoreschema-legnum">②</span><i class="crrav-scoreschema-dot pref"></i>
+          <span class="crrav-scoreschema-legtxt"><b>🎯 Genre préféré</b> — contient un de tes 3 genres les plus regardés</span>
+          <span class="crrav-scoreschema-legval">${fmt1(prefBonus)}</span></li>
+        <li><span class="crrav-scoreschema-legnum">③</span><i class="crrav-scoreschema-dot bonus1"></i>
+          <span class="crrav-scoreschema-legtxt"><b>🏆 Très bien notée</b> — note ≥ ${rated1Thr.toFixed(1)}★</span>
+          <span class="crrav-scoreschema-legval">${fmt1(rated1)}</span></li>
+        <li><span class="crrav-scoreschema-legnum">④</span><i class="crrav-scoreschema-dot bonus2"></i>
+          <span class="crrav-scoreschema-legtxt"><b>✨ Note exceptionnelle</b> — note ≥ ${rated2Thr.toFixed(1)}★ (cumulable avec 🏆)</span>
+          <span class="crrav-scoreschema-legval">${fmt1(rated2)}</span></li>
+      </ul>
+
+      <p class="crrav-scoreschema-note">① Le goût net vient de la moyenne des genres de la série : chaque genre aimé compte pour <b>×${matchBonus.toFixed(1)}</b> (ta part d'écoute de ce genre), chaque genre jamais regardé retire <b>${C.discoverMissPenalty.toFixed(2)}</b> point — plafonné à <b>${maxPen}</b> genre${maxPen > 1 ? 's' : ''} pénalisé${maxPen > 1 ? 's' : ''} par série (réglages 💚 ci-dessous).</p>
+      ${tasteProfileDetailHtml()}
+      ${live ? `<p class="crrav-scoreschema-live-hint">👁️ Aperçu en direct : bouge les curseurs ci-dessous, ce schéma se redessine aussitôt. Rien n'est appliqué à Découverte tant que tu n'as pas cliqué « Enregistrer et actualiser ».</p>` : ''}
     </div>`;
   }
 
@@ -6019,9 +6080,13 @@
      pour le bonus « genre préféré », deux segments dorés pour les bonus de note, et deux
      « drapeaux » positionnés aux seuils notable/légendaire réellement configurés — pour voir
      d'un coup d'œil où ils tombent dans l'intervalle possible, pas juste lire un nombre isolé.
-     Entièrement dynamique (bornes, largeurs, drapeaux) : se redessine avec les curseurs. */
-  .crrav-scoreschema{margin:0 0 18px;padding:34px 10px 12px;background:rgba(255,255,255,.03);
+     (33) Entièrement dynamique ET EN DIRECT : se redessine à chaque frappe/glissement d'un
+     curseur concerné (voir wireScoreSchemaLive), sans attendre l'enregistrement. */
+  .crrav-scoreschema{margin:0 0 18px;padding:16px 14px 14px;background:rgba(255,255,255,.03);
     border:1px solid rgba(255,255,255,.07);border-radius:12px}
+  .crrav-scoreschema-head{display:flex;flex-direction:column;gap:4px;margin:0 0 22px}
+  .crrav-scoreschema-title{font:800 13px/1.3 system-ui;color:#fff}
+  .crrav-scoreschema-sub{font:500 11px/1.5 system-ui;color:#8a8a94}
   .crrav-scoreschema-track{position:relative;height:9px;border-radius:999px;
     background:rgba(255,255,255,.08);margin:0 4px 6px}
   .crrav-scoreschema-seg{position:absolute;top:0;bottom:0;border-radius:999px}
@@ -6042,13 +6107,20 @@
   .crrav-scoreschema-pinlab b{font:800 11px/1.2 system-ui;color:#fff}
   .crrav-scoreschema-pin.legendary .crrav-scoreschema-pinlab{color:#ffd48a}
   .crrav-scoreschema-pin.legendary .crrav-scoreschema-pinlab b{color:#ffb347}
-  .crrav-scoreschema-bounds{display:flex;justify-content:space-between;margin:0 4px 12px;
+  .crrav-scoreschema-bounds{display:flex;justify-content:space-between;margin:0 4px 14px;
     font:700 10px/1 system-ui;color:#6f6f7a}
-  .crrav-scoreschema-formula{display:flex;flex-wrap:wrap;align-items:center;gap:6px;
-    font:600 11px/1.3 system-ui;color:#a9a9b4}
-  .crrav-scoreschema-formula b{color:#fff}
-  .crrav-scoreschema-dot{display:inline-block;width:8px;height:8px;border-radius:50%;
-    margin-right:5px;vertical-align:middle}
+  .crrav-scoreschema-legend{list-style:none;margin:0;padding:10px 0 0;display:flex;
+    flex-direction:column;gap:9px;border-top:1px solid rgba(255,255,255,.07)}
+  .crrav-scoreschema-legend li{display:flex;align-items:baseline;gap:8px}
+  .crrav-scoreschema-legnum{flex:0 0 auto;font:800 10px/1 system-ui;color:#6f6f7a;
+    min-width:12px}
+  .crrav-scoreschema-legend .crrav-scoreschema-dot{flex:0 0 auto;margin-top:3px}
+  .crrav-scoreschema-legtxt{flex:1 1 auto;font:600 11.5px/1.4 system-ui;color:#c9c9d2}
+  .crrav-scoreschema-legtxt b{color:#fff}
+  .crrav-scoreschema-legval{flex:0 0 auto;font:800 12px/1.3 system-ui;color:#fff;
+    background:rgba(255,255,255,.08);border-radius:6px;padding:2px 7px;white-space:nowrap}
+  .crrav-scoreschema-dot{display:inline-block;width:9px;height:9px;border-radius:50%;
+    margin-right:2px;vertical-align:middle}
   .crrav-scoreschema-dot.taste{background:linear-gradient(90deg,#f2545b,#4ade80)}
   .crrav-scoreschema-dot.pref{background:#b98bff}
   .crrav-scoreschema-dot.bonus1{background:#ffd166}
@@ -6056,6 +6128,38 @@
   .crrav-scoreschema-note{margin:10px 0 0;padding-top:10px;border-top:1px solid rgba(255,255,255,.07);
     font:500 11px/1.5 system-ui;color:#8a8a94}
   .crrav-scoreschema-note b{color:#c9c9d2;font-weight:800}
+  .crrav-scoreschema-live-hint{margin:10px 0 0;padding:8px 10px;border-radius:8px;
+    background:rgba(159,214,255,.08);border:1px solid rgba(159,214,255,.25);
+    font:600 10.5px/1.5 system-ui;color:#9fd6ff}
+  /* (34) Détail « mon profil de goût » : <details> replié par défaut, imbriqué dans le
+     schéma du score. Barres horizontales, une par genre connu, triées du plus regardé au
+     moins regardé — même logique visuelle que la piste du score juste au-dessus. */
+  .crrav-tasteprofile{margin:12px 0 0;padding-top:10px;border-top:1px solid rgba(255,255,255,.07)}
+  .crrav-tasteprofile summary{cursor:pointer;font:700 11.5px/1.3 system-ui;color:#e6e7ea;
+    list-style:none;display:flex;align-items:center;gap:6px;padding:2px 0}
+  .crrav-tasteprofile summary::-webkit-details-marker{display:none}
+  .crrav-tasteprofile summary::before{content:'▸';display:inline-block;font-size:10px;
+    color:#6f6f7a;transition:transform .15s}
+  .crrav-tasteprofile[open] summary::before{transform:rotate(90deg)}
+  .crrav-tasteprofile-empty{margin:8px 0 0;font:500 11px/1.5 system-ui;color:#8a8a94}
+  .crrav-tasteprofile-note{margin:8px 0 10px;font:500 11px/1.5 system-ui;color:#8a8a94}
+  .crrav-tasteprofile-note b{color:#c9c9d2;font-weight:800}
+  .crrav-tasteprofile-list{list-style:none;margin:0;padding:0;display:flex;
+    flex-direction:column;gap:5px;max-height:260px;overflow-y:auto}
+  .crrav-tasteprofile-list li{display:flex;align-items:center;gap:8px}
+  .crrav-tasteprofile-list li.top .crrav-tasteprofile-name{color:#fff}
+  .crrav-tasteprofile-rank{flex:0 0 auto;min-width:14px;text-align:right;
+    font:800 10px/1 system-ui;color:#6f6f7a}
+  .crrav-tasteprofile-name{flex:0 0 auto;width:120px;overflow:hidden;text-overflow:ellipsis;
+    white-space:nowrap;font:600 11.5px/1.3 system-ui;color:#c9c9d2}
+  .crrav-tasteprofile-badge{font-size:10px}
+  .crrav-tasteprofile-bar{flex:1 1 auto;height:7px;border-radius:999px;
+    background:rgba(255,255,255,.08);overflow:hidden}
+  .crrav-tasteprofile-bar div{height:100%;border-radius:999px;
+    background:linear-gradient(90deg,#4ade80,#77de80)}
+  .crrav-tasteprofile-list li.top .crrav-tasteprofile-bar div{background:linear-gradient(90deg,#b98bff,#ffb347)}
+  .crrav-tasteprofile-val{flex:0 0 auto;min-width:34px;text-align:right;
+    font:800 11px/1.3 system-ui;color:#fff}
   .crrav-field{display:flex;flex-direction:column;gap:5px}
   .crrav-field label{font:600 11.5px/1.3 system-ui;color:#c9c9d2}
   .crrav-field small{font:400 10.5px/1.4 system-ui;color:#8a8a94}
@@ -8067,7 +8171,7 @@
             // (32) Le schéma récapitulatif (scoreFormulaSchema) est un bandeau UNIQUE, posé
             // juste au-dessus du premier des 3 blocs du calcul de score (Goût/Note/Seuils) —
             // il en montre la synthèse globale, pas le contenu d'un seul bloc.
-            const schemaBanner = subId === 'discoverScoringTaste' ? scoreFormulaSchema() : '';
+            const schemaBanner = subId === 'discoverScoringTaste' ? scoreFormulaSchema(undefined, { live: true }) : '';
             return `${schemaBanner}<div class="crrav-subgroup" data-sub="${subId}" style="--subhue:${meta.hue}">
               <div class="crrav-subhead"><span class="crrav-subhead-ico">${meta.icon}</span><span class="crrav-subhead-lab">${meta.label}</span></div>
               <div class="crrav-sgrid">${subFs.map(settingsFieldHtml).join('')}</div>
@@ -9450,6 +9554,44 @@
       };
       rg.addEventListener('input', upd); upd();
     });
+
+    // (33) Schéma du score « pépite » (voir scoreFormulaSchema) : recalculé EN DIRECT à
+    // chaque frappe/clic sur un curseur qui le compose, sans attendre « Enregistrer et
+    // actualiser » — avant, il fallait sauvegarder pour voir l'effet d'un réglage, ce qui
+    // rendait le réglage fin (« est-ce que ce seuil est trop haut ? ») laborieux. On ne
+    // touche jamais CFG ici : uniquement un aperçu (voir l'override de scoreFormulaSchema).
+    const SCORE_LIVE_KEYS = ['discoverTasteWeight', 'discoverPrefGenreBonus', 'discoverWellRatedBonus',
+      'discoverSuperRatedBonus', 'discoverLegendaryScore', 'discoverNotableScore',
+      'discoverMatchBonus', 'discoverMissPenalty', 'discoverMaxPenalizedGenres',
+      'discoverWellRatedThreshold', 'discoverSuperRatedThreshold'];
+    if (content.querySelector('#crrav-scoreschema-live')) {
+      const updateScoreSchemaLive = () => {
+        const override = {};
+        for (const k of SCORE_LIVE_KEYS) {
+          const el = content.querySelector(`[data-set="${k}"]`);
+          if (!el) continue;
+          let v = parseFloat(String(el.value).replace(',', '.'));
+          if (!Number.isFinite(v)) continue;   // champ vidé pendant la frappe : ignore, garde l'ancien aperçu
+          if (k === 'discoverMaxPenalizedGenres') v = Math.round(v);
+          override[k] = v;
+        }
+        const host = content.querySelector('#crrav-scoreschema-live');
+        if (!host) return;
+        // Le détail « mon profil de goût » (tasteProfileDetailHtml) est un <details> replié
+        // par défaut à l'intérieur du schéma qu'on regénère à chaque frappe : sans ceci,
+        // ouvrir ce détail puis toucher un curseur le refermerait aussitôt.
+        const wasOpen = !!host.querySelector('.crrav-tasteprofile[open]');
+        host.outerHTML = scoreFormulaSchema(override, { live: true });
+        if (wasOpen) {
+          const det = content.querySelector('#crrav-scoreschema-live .crrav-tasteprofile');
+          if (det) det.open = true;
+        }
+      };
+      SCORE_LIVE_KEYS.forEach((k) => {
+        const el = content.querySelector(`[data-set="${k}"]`);
+        if (el) el.addEventListener('input', updateScoreSchemaLive);
+      });
+    }
 
     // (31) Genres exclus : cases à cocher → met à jour l'<input caché> lu par collectSettings.
     content.querySelectorAll('.crrav-genrefield').forEach((field) => {
