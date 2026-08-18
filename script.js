@@ -1393,7 +1393,12 @@
   // à mesure que le cache grossit. On purge les entrées les plus vieilles.
   // (eps3: n'est plus une clé individuelle mais le blob consolidé ci-dessus,
   // purgé en premier — c'est généralement le plus gros contributeur.)
-  const EVICTABLE = ['rating:', 'series:', 'series-en:', 'seasoncount:', 'snapshot', 'crmatch:'];
+  // (fix) 'watchedids:' ajouté : c'est l'entrée la plus volumineuse du cache (historique de
+  // visionnage complet + détail par série, dont la liste des clés d'épisodes — voir
+  // serializeDetail) et elle nourrit directement Découverte. Avant, elle était épargnée par
+  // la purge quota alors que des entrées bien plus légères (rating:, series-en:...) étaient
+  // sacrifiées en premier — la purge tapait donc sur les mauvaises entrées.
+  const EVICTABLE = ['rating:', 'series:', 'series-en:', 'seasoncount:', 'snapshot', 'crmatch:', 'watchedids:'];
   function evictOldest(fraction) {
     let evicted = eps3EvictOldest(fraction);
     const entries = [];
@@ -5680,7 +5685,8 @@
         <a class="crrav-cover" href="${seriesUrl}">
           ${s.poster ? `<img loading="lazy" crossorigin="anonymous" src="${s.poster}" alt="" onerror="this.removeAttribute(&quot;crossorigin&quot;);this.src=this.src">` : ''}
         </a>
-        ${sig.legendary ? `<span class="crrav-legribbon" title="Score pépite élevé (voir Réglages → Découverte) : une pépite en or">✨ Légendaire</span>` : ''}
+        ${sig.legendary ? `<span class="crrav-legribbon" title="Score pépite élevé (voir Réglages → Découverte) : une pépite en or">✨ Légendaire</span>`
+          : sig.notable ? `<span class="crrav-notaribbon" title="Score pépite au-dessus du seuil « notable » (voir Réglages → Découverte)">◆ Notable</span>` : ''}
         <span class="crrav-rating">★ ${s.rating.toFixed(1)}</span>
         ${ignoreBtn(s, 'discover')}
         ${addListBtn(s)}
@@ -5715,7 +5721,8 @@
     return `<article class="crrav-lrow crrav-lrow-discover${sig.lead ? ' crrav-sig crrav-sig-' + sig.lead : ''}${sig.legendary ? ' crrav-legendary' : sig.notable ? ' crrav-notable' : ''}">
       <a class="crrav-lthumb" href="${seriesUrl}">
         ${s.poster ? `<img loading="lazy" crossorigin="anonymous" src="${s.poster}" alt="" onerror="this.removeAttribute(&quot;crossorigin&quot;);this.src=this.src">` : ''}
-        ${sig.legendary ? `<span class="crrav-legribbon crrav-legribbon-sm" title="Score pépite élevé (voir Réglages → Découverte) : une pépite en or">✨</span>` : ''}
+        ${sig.legendary ? `<span class="crrav-legribbon crrav-legribbon-sm" title="Score pépite élevé (voir Réglages → Découverte) : une pépite en or">✨</span>`
+          : sig.notable ? `<span class="crrav-notaribbon-sm" title="Score pépite au-dessus du seuil « notable » (voir Réglages → Découverte)">◆</span>` : ''}
       </a>
       <div class="crrav-lmain">
         <div class="crrav-lhead">
@@ -6068,7 +6075,9 @@
   .crrav-scorechip{display:inline-flex;align-items:center;flex:0 0 auto;padding:2px 7px;
     border-radius:999px;font:800 11px/1.3 system-ui;font-variant-numeric:tabular-nums;
     background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.14);color:#c9c9d2;cursor:default}
-  .crrav-scorechip.notable{background:rgba(230,230,236,.14);border-color:rgba(230,230,236,.35);color:#eceef2}
+  /* (fix) Bleu — même couleur que "notable" dans le schéma de score (voir .crrav-ss-flag.notable
+     plus bas) — au lieu d'un gris quasi neutre qui se distinguait à peine du chip par défaut. */
+  .crrav-scorechip.notable{background:rgba(159,214,255,.16);border-color:rgba(159,214,255,.5);color:#9fd6ff}
   .crrav-scorechip.legendary{background:rgba(255,179,71,.18);border-color:rgba(255,179,71,.55);color:#ffd48a}
   .crrav-card.crrav-sig::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;z-index:3;background:var(--sig)}
   .crrav-lrow-discover.crrav-sig::before{background:var(--sig);transform:scaleY(1)}
@@ -6132,11 +6141,19 @@
       box-shadow:0 0 0 1.5px rgba(255,196,92,.7),0 0 18px 3px rgba(255,196,92,.4)}
   }
   /* Carte « notable » (exactement 2 signaux) : un cran en dessous du légendaire, pas
-     d'animation, pas de ruban — juste un liseré un peu plus marqué et un glow léger,
-     fixe, pour ne pas concurrencer visuellement le halo doré des vraies légendaires. */
-  .crrav-card.crrav-notable{box-shadow:0 0 0 1px rgba(255,213,143,.35),0 0 10px 0 rgba(255,196,92,.18)}
-  .crrav-card.crrav-notable::before{width:3.5px}
-  .crrav-lrow-discover.crrav-notable{box-shadow:0 0 0 1px rgba(255,213,143,.3),0 0 8px 0 rgba(255,196,92,.15)}
+     d'animation — mais un ruban et une couleur à elle (bleu, cf. .crrav-scorechip.notable
+     et le schéma de score) plutôt qu'un ambre atténué qui se lisait comme un simple
+     survol de la carte légendaire plutôt que comme sa propre catégorie. */
+  .crrav-card.crrav-notable{box-shadow:0 0 0 1px rgba(159,214,255,.4),0 0 10px 0 rgba(159,214,255,.22)}
+  .crrav-card.crrav-notable::before{width:3.5px;background:linear-gradient(180deg,#c7e8ff,#5fa8e0)!important}
+  .crrav-lrow-discover.crrav-notable{box-shadow:0 0 0 1px rgba(159,214,255,.35),0 0 8px 0 rgba(159,214,255,.18)}
+  .crrav-notaribbon{position:absolute;top:8px;right:8px;z-index:2;
+    background:linear-gradient(135deg,#c7e8ff,#5fa8e0);color:#0b2436;
+    font:800 10px/1 system-ui;letter-spacing:.02em;border-radius:6px;padding:4px 7px;
+    box-shadow:0 2px 8px rgba(95,168,224,.5);white-space:nowrap}
+  .crrav-notaribbon-sm{position:absolute;top:2px;right:2px;font-size:11px;line-height:1;
+    background:rgba(10,10,12,.75);border-radius:4px;padding:1px 2px;
+    box-shadow:0 0 6px rgba(159,214,255,.7)}
   .crrav-simbar{display:flex;align-items:center;gap:10px;margin:0 0 10px;padding:9px 12px;border-radius:10px;
     background:rgba(244,117,33,.1);border:1px solid rgba(244,117,33,.3)}
   .crrav-simbar-txt{flex:1;min-width:0;font-size:13px;color:#ffcfa6;line-height:1.35}
@@ -7430,11 +7447,20 @@
   }
 
   function mountStyles() {
-    if (document.getElementById('crrav-css')) return;
-    const st = document.createElement('style');
-    st.id = 'crrav-css';
-    st.textContent = CSS;
-    (document.head || document.documentElement).appendChild(st);
+    // (fix) Ne JAMAIS se contenter de vérifier l'existence du noeud : sur un SPA comme
+    // Crunchyroll, un <style id="crrav-css"> d'une exécution précédente (bfcache, navigation
+    // interne sans rechargement complet) peut survivre dans le DOM avec un CSS obsolète.
+    // Avant, ce cas faisait un early-return et gelait le CSS périmé pour toute la session —
+    // symptôme observé : libellés de boutons (Réglages) absents malgré le garde-fou CSS,
+    // car ce garde-fou n'était simplement jamais injecté. On resynchronise toujours le
+    // contenu, en réutilisant le noeud existant s'il y en a un (évite un flash de FOUC).
+    let st = document.getElementById('crrav-css');
+    if (!st) {
+      st = document.createElement('style');
+      st.id = 'crrav-css';
+      (document.head || document.documentElement).appendChild(st);
+    }
+    if (st.textContent !== CSS) st.textContent = CSS;
   }
 
   // Agrège les statistiques à partir des séries DÉJÀ en mémoire — aucune requête.
