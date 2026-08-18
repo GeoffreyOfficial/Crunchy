@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      2.157.0
+// @version      2.158.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -15,7 +15,7 @@
 // @connect      graphql.anilist.co
 // @updateURL    https://raw.githubusercontent.com/GeoffreyOfficial/Crunchy/refs/heads/main/script.js
 // @downloadURL  https://raw.githubusercontent.com/GeoffreyOfficial/Crunchy/refs/heads/main/script.js
-// @supportURL   https://gist.github.com/GeoffreyOfficial/7a01fea8605a49a32a0a2537dfeb1ed1
+// @supportURL   https://github.com/GeoffreyOfficial/Crunchy/issues
 // ==/UserScript==
 
 (function () {
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '2.157.0';
+  const SCRIPT_VERSION = '2.158.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -79,31 +79,20 @@
     // Poids du GOÛT NET (tasteScore, -1..1) dans le score final : score du goût = taste ×
     // ce multiplicateur. Avant, ×2.5 fixe et invisible dans le code.
     discoverTasteWeight: 2.5,
-    // Poids d'un genre AIMÉ dans la moyenne du goût (voir tasteScore) — multiplie la
-    // contribution positive de chaque genre matché, AVANT moyenne avec les malus. Avant,
-    // fixé à 1 (contribution brute = ta part d'écoute de ce genre, 0 à 1) et invisible dans
-    // le code : impossible de faire peser davantage les genres que tu regardes vraiment
-    // beaucoup par rapport aux malus des genres jamais regardés. C'est le pendant « positif »
-    // de discoverMissPenalty ci-dessous.
-    discoverMatchBonus: 1,
     // Seuil de goût net (tasteScore, -1..1) à partir duquel le badge 💚 « dans tes goûts »
     // s'affiche. Avant, fixé à 0.4 et invisible dans le code.
     discoverGoodTasteThreshold: 0.4,
-    // Bonus de score ajouté quand la série contient un de tes 3 genres les plus regardés
-    // (badge 🎯) ET que le goût global reste positif. Avant, 🎯 était un badge PUREMENT
-    // informatif, sans aucun effet sur le score « pépite » — impossible de faire peser un
-    // genre préféré dans le calcul, même en poussant discoverMatchBonus au maximum.
+    // Bonus de score ajouté quand la série contient un de tes 3 tags/genres les plus
+    // représentés (badge 🎯) ET que le goût global reste positif. Avant, 🎯 était un badge
+    // PUREMENT informatif, sans aucun effet sur le score « pépite ».
     discoverPrefGenreBonus: 0.3,
-    // Score de goût (voir tasteScore) : points retirés par genre jamais regardé, ET
-    // nombre MAX de genres jamais regardés réellement comptés contre une série. Sans ce
-    // plafond, une série à beaucoup de genres (ex. 6) accumule les malus un par un et son
-    // goût moyen plonge même si 2-3 genres matchent parfaitement — il devient alors quasi
-    // impossible d'atteindre « légendaire » dès qu'une série a beaucoup de genres, alors
-    // que c'est souvent juste le signe d'un synopsis riche (ex. « Action, Aventure, Fantasy,
-    // Drame, Surnaturel, Comédie »). Au-delà de ce plafond, les genres jamais regardés
-    // supplémentaires sont neutres (ni bonus, ni malus) plutôt que punitifs.
-    discoverMissPenalty: 0.3,
-    discoverMaxPenalizedGenres: 4,
+    // Pondération du profil de goût (voir buildTasteProfile) entre volume d'écoute brut
+    // (nombre d'épisodes vus, 0 = comportement historique) et taux de complétion (part de
+    // la série effectivement finie, 1 = seule l'adhésion compte). Une série de 100 épisodes
+    // vue à 20 % en dit moins sur ton goût réel que 12 épisodes menés à terme — sans pour
+    // autant ignorer complètement le volume (une série longue très suivie reste un signal
+    // fort). 0.6 = mix penchant vers la complétion.
+    discoverCompletionWeight: 0.6,
     discoverMaxSeasons: 3,     // 3 saisons ou moins accepté (fix : c'était < 3 avant)
     discoverExcludeCategories: ['romance', 'hentai'], // genres exclus par défaut de Découverte
                                // ET du Calendrier — bloc Nouveautés (slugs Crunchyroll en
@@ -466,23 +455,17 @@
     { key: 'legendaryMaxPages', label: 'Profondeur de scan', type: 'int', min: 12, max: 100, unit: 'pages',
       help: 'Jusqu’où le dé légendaire scanne le classement popularité pour dénicher ses pépites. Plus haut = plus long, mais plus de chances de trouver assez de légendaires.',
       impact: 'discover', sub: 'discoverDice' },
-    { key: 'discoverMatchBonus', label: 'Poids d’un genre aimé', type: 'float', min: 0, max: 3, step: 0.1,
-      help: 'Multiplie la contribution positive de chaque genre que tu regardes vraiment (ta part d’écoute de ce genre). Monte-le pour faire peser davantage tes genres aimés face aux malus ci-dessous. 1 = neutre (pas de sur-poids).',
-      impact: 'discover', sub: 'discoverScoringTaste' },
-    { key: 'discoverMissPenalty', label: 'Malus par genre jamais regardé', type: 'float', min: 0, max: 1, step: 0.05,
-      help: 'Points retirés du score de goût pour chaque genre d’une série que tu ne regardes jamais. Plus bas = plus tolérant, plus facile d’obtenir « légendaire ». 0 = les genres jamais regardés n’handicapent plus du tout.',
-      impact: 'discover', sub: 'discoverScoringTaste' },
-    { key: 'discoverMaxPenalizedGenres', label: 'Genres jamais regardés max pénalisés', type: 'int', min: 0, max: 10,
-      help: 'Au-delà de ce nombre, les genres jamais regardés d’une série ne comptent plus contre elle. Évite qu’une série à beaucoup de genres (ex. 6) soit écrasée juste parce qu’elle en liste beaucoup, même si 2-3 correspondent parfaitement à tes goûts. Monte-le pour redevenir plus strict, baisse-le (voire 0) pour être très tolérant.',
-      impact: 'discover', sub: 'discoverScoringTaste' },
     { key: 'discoverTasteWeight', label: 'Poids du goût dans le score final', type: 'float', min: 0.5, max: 5, step: 0.1,
-      help: 'Multiplie le goût net (-1 à +1, résultat des deux réglages ci-dessus) pour obtenir sa part dans le score pépite. Plus haut = le goût domine largement le score ; plus bas = les bonus de note pèsent relativement plus.',
+      help: 'Multiplie le goût net (-1 à +1, similarité cosinus entre tes tags/genres et ceux de la candidate) pour obtenir sa part dans le score pépite. Plus haut = le goût domine largement le score ; plus bas = les bonus de note pèsent relativement plus.',
       impact: 'discover', sub: 'discoverScoringTaste' },
     { key: 'discoverGoodTasteThreshold', label: 'Seuil du badge 💚 « dans tes goûts »', type: 'float', min: -1, max: 1, step: 0.05,
       help: 'Goût net (-1 à +1) à partir duquel le badge 💚 s’affiche. N’affecte que le badge, pas le score lui-même.',
       impact: 'discover', sub: 'discoverScoringTaste' },
     { key: 'discoverPrefGenreBonus', label: 'Bonus « genre préféré » 🎯', type: 'float', min: 0, max: 2, step: 0.1,
-      help: 'Points ajoutés directement au score quand la série contient un de tes 3 genres les plus regardés ET que le goût global reste positif. 0 = 🎯 reste un badge purement informatif, sans effet sur le score.',
+      help: 'Points ajoutés directement au score quand la série contient un de tes 3 tags/genres les plus représentés ET que le goût global reste positif. 0 = 🎯 reste un badge purement informatif, sans effet sur le score.',
+      impact: 'discover', sub: 'discoverScoringTaste' },
+    { key: 'discoverCompletionWeight', label: 'Poids de la complétion dans le profil', type: 'float', min: 0, max: 1, step: 0.05,
+      help: 'Dans le calcul de ton profil de goût : 0 = seul le nombre d’épisodes vus compte (comme avant), 1 = seul le taux de complétion compte (finir une série pèse plus que la survoler). Une série de 100 épisodes vue à 20 % vs une série de 12 épisodes terminée — ce curseur arbitre entre les deux.',
       impact: 'discover', sub: 'discoverScoringTaste' },
     { key: 'discoverWellRatedThreshold', label: 'Note requise 🏆', type: 'float', min: 3, max: 5, step: 0.1,
       help: 'Note AniList à partir de laquelle le badge 🏆 s’affiche et le bonus ci-dessous s’applique.',
@@ -2303,11 +2286,12 @@
       }
     }
   }`;
-  const EMPTY_ANI = { plannedTotal: null, seasonEndTs: null, plannedApprox: false, anilistStatus: null, nextEpTs: null, nextEpNum: null, genres: [] };
+  const EMPTY_ANI = { plannedTotal: null, seasonEndTs: null, plannedApprox: false, anilistStatus: null, nextEpTs: null, nextEpNum: null, genres: [], tags: [] };
   // Version du FORMAT du cache AniList : à incrémenter quand la logique de calcul change,
   // pour re-questionner AniList sans vider tout le reste du cache (pas de rescan complet).
-  const ANILIST_CACHE_VER = 5;   // 4 : ajout du repli titre anglais CR (voir fetchAnilistSchedule)
+  const ANILIST_CACHE_VER = 6;   // 4 : ajout du repli titre anglais CR (voir fetchAnilistSchedule)
                                   // 5 : ajout des genres AniList (voir translateAniGenres)
+                                  // 6 : ajout des tags AniList pondérés par rank (voir tasteScore)
                                   // → force un nouvel essai des séries jusque-là non matchées.
 
   // Traduit un corps de réponse d'erreur AniList en raison lisible. Un 403 sur
@@ -2446,6 +2430,11 @@
   }
 
   // Fragment commun des champs Media qu'on lit (réutilisé par la recherche groupée).
+  // tags(sort: RANK_DESC) : les 300+ tags AniList (ex. « Isekai », « Time Skip », « Ensemble
+  // Cast »), triés par pertinence décroissante — bien plus fins que les ~20 genres génériques
+  // (Action, Comédie…) pour distinguer deux séries d'un même genre. rank = 0-100, % de
+  // pertinence de CE tag pour CETTE série (voir tasteScore, qui pondère chaque tag par son
+  // rank plutôt que de tous les compter à poids égal).
   const ANILIST_FRAGMENT = `fragment F on Media {
     id
     title { romaji english native }
@@ -2454,6 +2443,7 @@
     status
     episodes
     genres
+    tags(sort: RANK_DESC) { name rank isMediaSpoiler }
     startDate { year }
     nextAiringEpisode { episode airingAt }
     airingSchedule(perPage: 60) { nodes { episode airingAt } }
@@ -2531,6 +2521,7 @@
     status
     episodes
     genres
+    tags(sort: RANK_DESC) { name rank isMediaSpoiler }
     startDate { year }
     nextAiringEpisode { episode airingAt }
   }`;
@@ -2649,6 +2640,31 @@
     }
     return out;
   }
+  // Nettoie les tags bruts AniList : on écarte les spoilers (isMediaSpoiler) et les tags à
+  // rank nul/absent (non pertinents pour cette série), et on garde { name, rank } seulement
+  // — le reste (id, description AniList…) ne sert jamais dans ce script.
+  function cleanAniTags(list) {
+    return (Array.isArray(list) ? list : [])
+      .filter((t) => t && t.name && !t.isMediaSpoiler && Number.isFinite(t.rank) && t.rank > 0)
+      .map((t) => ({ name: t.name, rank: t.rank }));
+  }
+  // Fusionne deux listes de tags { name, rank } sans doublon (comparaison via aniNorm) —
+  // à la différence des genres (simples chaînes), on garde le rank le PLUS HAUT vu pour un
+  // même tag entre les deux listes plutôt que d'ignorer le doublon, un rank plus précis
+  // pouvant arriver d'une repasse ultérieure (ex. fiche AniList mieux appariée).
+  function mergeTagLists(base, extra) {
+    const out = Array.isArray(base) ? base.map((t) => ({ ...t })) : [];
+    const idx = new Map(out.map((t, i) => [aniNorm(t.name), i]));
+    for (const t of (extra || [])) {
+      if (!t || !t.name) continue;
+      const norm = aniNorm(t.name);
+      if (!norm) continue;
+      const i = idx.get(norm);
+      if (i == null) { idx.set(norm, out.length); out.push({ name: t.name, rank: t.rank }); }
+      else if ((t.rank || 0) > (out[i].rank || 0)) out[i].rank = t.rank;
+    }
+    return out;
+  }
 
   // Choisit la meilleure fiche AniList pour une série CR, ou null si aucune n'est
   // assez sûre. Score = similarité de titre, bonifiée si la fiche est « en diffusion »
@@ -2721,6 +2737,9 @@
       // Genres AniList, traduits vers le français (voir translateAniGenres) — fusionnés
       // dans s.categories par enrichAnilistSchedule, jamais affichés bruts en anglais.
       genres: translateAniGenres(m.genres || []),
+      // Tags AniList { name, rank } (voir cleanAniTags) — laissés en anglais (jamais
+      // affichés bruts), fusionnés dans s.tags. Cœur du profil de goût (voir tasteScore).
+      tags: cleanAniTags(m.tags || []),
     };
   }
 
@@ -2742,6 +2761,7 @@
       nextEpTs: o.v.nextEpTs ?? null,
       nextEpNum: o.v.nextEpNum ?? null,
       genres: Array.isArray(o.v.genres) ? o.v.genres : [],
+      tags: Array.isArray(o.v.tags) ? o.v.tags : [],
     };
   }
   function anilistNeedsFetch(seriesId) {
@@ -2795,7 +2815,11 @@
   // (0 ou 1 catégorie) : celles-ci profitent le plus d'un passage AniList, même hors
   // diffusion — c'est justement ce qui vidait les tops genres des Stats jusqu'ici.
   function needsAniGenres(s) {
-    return !(s.categories && s.categories.length >= 2);
+    // Genres pauvres OU tags jamais récupérés : les tags ne viennent QUE d'AniList (aucun
+    // équivalent côté Crunchyroll), donc une série peut avoir 2+ genres CR très bien
+    // renseignés et pourtant aucun tag — elle profite quand même d'un passage AniList,
+    // le profil de goût (buildTasteProfile) reposant désormais d'abord sur les tags.
+    return !(s.categories && s.categories.length >= 2) || !(s.tags && s.tags.length);
   }
 
   // Passe d'enrichissement, en tâche de fond, APRÈS le premier affichage. Cible les
@@ -2924,6 +2948,9 @@
         // AniList complète ce qui manque (voir mergeGenreLists). Alimente les tops genres
         // des Stats et le profil de goût de Découverte, qui lisent s.categories.
         if (result.genres && result.genres.length) s.categories = mergeGenreLists(s.categories, result.genres);
+        // Tags AniList (voir mergeTagLists) : alimentent le profil de goût de Découverte
+        // (buildTasteProfile), bien plus fin que les seuls genres — voir tasteScore.
+        if (result.tags && result.tags.length) s.tags = mergeTagLists(s.tags, result.tags);
         if (result.matched && (result.plannedTotal || result.seasonEndTs || result.nextEpTs || result.genres.length)) changed++;
       }
       const errors = targets.length - searched.size;
@@ -2976,7 +3003,7 @@
     if (!s || !s.airing || s.plannedTotal == null || s.targetSeason == null) return '';
     const knownInSeason = s.episodes.filter((e) => e.season === s.targetSeason).length;
     if (s.plannedTotal <= knownInSeason) return '';
-    return ` <span class="crrav-planned-hint" title="Total d'épisodes annoncé par AniList pour la saison en cours">(${s.plannedTotal} prévus)</span>`;
+    return ` <span class="crrav-planned-hint" title="Total d'épisodes annoncé par AniList pour la saison en cours">· ${s.plannedTotal} prévus</span>`;
   }
 
   function plannedInfo(s, compact) {
@@ -3168,6 +3195,9 @@
       // enrichAnilistSchedule) était perdue à chaque reconstruction de STATE.series :
       // les tops genres des Stats retombaient aux seuls genres CR. Aucune requête ajoutée.
       categories: mergeGenreLists(extractGenres(panel), ani.genres),
+      // Tags AniList { name, rank } déjà en cache (best-effort, pas de requête ici) —
+      // cœur du profil de goût de Découverte (voir buildTasteProfile / tasteScore).
+      tags: ani.tags,
       episodes: marked,
       total, seen,
       inProgress: marked.filter((e) => e.started).length,
@@ -3477,7 +3507,7 @@
       genre: "Le filtre de genre (exclusions par défaut ou chips « garder uniquement ») écarte la majorité des candidats. Assouplis-le dans Réglages → Découverte ou dans les chips sous les résultats.",
       rating: `La note minimale (${CFG.discoverMinRating}★) élimine la majorité des candidats. Baisse « Note minimale » dans Réglages → Découverte.`,
       progressPlayhead: "Beaucoup de séries sont déjà entamées d'après ta progression réelle — rien à régler ici, c'est le comportement voulu.",
-      legendaryScore: `Beaucoup de candidats passent les filtres mais restent sous le score légendaire (${CFG.discoverLegendaryScore}). Baisse « Score minimum — légendaire », monte « Poids du goût dans le score final », ou baisse « Malus par genre jamais regardé » dans Réglages → Découverte.`,
+      legendaryScore: `Beaucoup de candidats passent les filtres mais restent sous le score légendaire (${CFG.discoverLegendaryScore}). Baisse « Score minimum — légendaire » ou monte « Poids du goût dans le score final » dans Réglages → Découverte.`,
     };
     const mainAdvice = topReason ? ADVICE[topReason] : "Élargis un des filtres ci-dessous, ou relance plus tard : le classement popularité change en continu.";
     const extraAdvice = [];
@@ -3698,7 +3728,11 @@
             // (fix) Fusion GRATUITE avec un éventuel cache AniList déjà présent (même
             // série croisée ailleurs — Suivi, Hors listes, un scan Découverte précédent) :
             // aucune requête, juste une lecture localStorage (voir mergeGenreLists).
-            categories = mergeGenreLists(categories, readAnilistCached(p.id).genres);
+            const cachedAni = readAnilistCached(p.id);
+            categories = mergeGenreLists(categories, cachedAni.genres);
+            // Tags déjà en cache, sans requête (voir plus bas : complétés en mode légendaire
+            // pour les survivants qui n'en ont toujours pas, via anilistSearchBatch).
+            let tags = cachedAni.tags || [];
             if (categoriesRejectedByGenre(categories, null, null, STATE.filters.discoverCatsInMode === 'all')) { REJ.genre++; return null; }
             if (D.cancelRequested) return null;
 
@@ -3745,10 +3779,10 @@
             }
             if (D.cancelRequested) return null;
 
-            // Retourne un candidat INTERMÉDIAIRE (categories pas encore complétées par
+            // Retourne un candidat INTERMÉDIAIRE (categories/tags pas encore complétés par
             // AniList en mode légendaire — voir juste après le pool()). p est repris pour
             // les étapes suivantes (titre, id, popRank…).
-            return { p, seasons, categories, rating, episodes, secTotal, maxAir };
+            return { p, seasons, categories, tags, rating, episodes, secTotal, maxAir };
           }, CFG.concurrency, undefined, () => D.cancelRequested);
 
           const survivors = got.filter(Boolean);
@@ -3768,7 +3802,11 @@
           // genre exploitable — 1 requête HTTP au lieu de jusqu'à 8. Résultat mis en cache
           // 7 j (comme tout appel AniList du script), donc jamais refait pour cette série.
           if (legendary && !D.cancelRequested && anilistCooldownRemainingMs() <= 0) {
-            const needAni = survivors.filter((x) => x.categories.length < 2 && anilistNeedsFetch(x.p.id));
+            // Genres pauvres OU tags encore inconnus (voir needsAniGenres) : les tags sont
+            // le principal levier du goût désormais (tasteScore), donc un candidat avec de
+            // bons genres CR mais sans tag profite quand même de ce passage groupé.
+            const needAni = survivors.filter((x) =>
+              (x.categories.length < 2 || !x.tags.length) && anilistNeedsFetch(x.p.id));
             if (needAni.length) {
               try {
                 const map = await anilistSearchBatch(needAni.map((x) => ({ key: x.p.id, title: x.p.title })));
@@ -3782,8 +3820,9 @@
                     { matched: true, aniId: best.id, aniTitle: aniPrimaryTitle(best) });
                   cacheSet('anilist:' + x.p.id, result);
                   if (result.genres && result.genres.length) x.categories = mergeGenreLists(x.categories, result.genres);
+                  if (result.tags && result.tags.length) x.tags = mergeTagLists(x.tags, result.tags);
                 }
-              } catch (_) { /* best-effort : les survivants gardent leurs seuls genres CR */ }
+              } catch (_) { /* best-effort : les survivants gardent leurs seuls genres CR (et pas de tags) */ }
             }
           }
 
@@ -3797,7 +3836,7 @@
               poster: posterOf(x.p),
               synopsis: x.p.description || '',
               rating: x.rating, seasons: x.seasons,
-              categories: x.categories,
+              categories: x.categories, tags: x.tags,
               episodes: x.episodes, secTotal: x.secTotal, maxAir: x.maxAir,
               order: seenCandidate.size,
             };
@@ -5012,34 +5051,87 @@
   }
 
   // ---- Profil de goût & coloration Découverte ------------------------------------
-  // Profil dérivé de tes séries commencées (Reste à voir), pondéré par le nombre d'épisodes
-  // réellement vus dans chaque genre : plus tu regardes un genre, plus il pèse. 100 % en
-  // mémoire, aucune requête. Si l'historique n'est pas encore chargé, le profil est vide et
-  // seuls les signaux « note » et « popularité » (indépendants du goût) s'affichent.
+  // Espace vectoriel du profil : chaque dimension est une clé préfixée « tag:Nom » ou
+  // « genre:Nom » (voir tagKey/genreKey) — le préfixe évite toute collision entre un genre
+  // et un tag qui porteraient le même nom, et permet de mélanger les deux familles dans un
+  // seul vecteur pour le calcul de similarité cosinus (voir tasteScore).
+  const tagKey = (name) => 'tag:' + name;
+  const genreKey = (name) => 'genre:' + name;
+
+  // Profil dérivé de tes séries commencées (Reste à voir). Pour CHAQUE série, priorité aux
+  // tags AniList (voir mergeTagLists/s.tags) — beaucoup plus fins que les ~20 genres
+  // génériques (300+ valeurs possibles, ex. « Isekai », « Time Skip », « Ensemble Cast »,
+  // chacune pondérée par son rank = 0-100, sa pertinence pour CETTE série) — et repli sur
+  // les genres CR/AniList (s.categories) UNIQUEMENT pour les séries dont les tags ne sont
+  // pas encore connus (pas de mélange tags+genres sur une même série, pour ne pas compter
+  // deux fois un concept proche sous ses deux formes).
+  //
+  // Poids par série : mix réglable (CFG.discoverCompletionWeight, 0-1) entre le volume brut
+  // (nombre d'épisodes vus — l'ancien comportement) et le taux de complétion (seen/total).
+  // Une série de 100 épisodes vue à 20 % en dit moins sur ton goût réel qu'une série de 12
+  // épisodes menée à terme : la finir est un signal d'adhésion plus fort qu'un simple volume
+  // d'écoute, sans pour autant ignorer complètement ce volume (poids = 0 à discoverCompletionWeight=0).
+  // 100 % en mémoire, aucune requête. Si l'historique n'est pas encore chargé, le profil est
+  // vide et seuls les signaux « note » (indépendants du goût) s'affichent.
   function buildTasteProfile() {
     const w = {};
+    const cw = Math.max(0, Math.min(1, CFG.discoverCompletionWeight ?? 0.6));
     for (const s of STATE.series || []) {
       if (!s || (s.seen || 0) <= 0) continue;
-      const weight = Math.max(1, s.seen || 1);
-      for (const c of s.categories || []) w[c] = (w[c] || 0) + weight;
+      const total = s.total || 0;
+      const completion = total > 0 ? Math.min(1, s.seen / total) : 1;   // pas de total connu → pas de malus de complétion
+      const weight = Math.max(1, s.seen) * (1 - cw + cw * completion);
+      const tags = s.tags && s.tags.length ? s.tags : null;
+      if (tags) {
+        for (const t of tags) {
+          if (!t || !t.name) continue;
+          const rank = Math.max(0, Math.min(100, t.rank ?? 50)) / 100;
+          const key = tagKey(t.name);
+          w[key] = (w[key] || 0) + weight * rank;
+        }
+      } else {
+        for (const c of s.categories || []) {
+          const key = genreKey(c);
+          w[key] = (w[key] || 0) + weight;
+        }
+      }
     }
     const entries = Object.entries(w).sort((a, b) => b[1] - a[1]);
+    // Norme euclidienne du vecteur profil, précalculée une fois pour toutes (voir tasteScore,
+    // appelé une fois par candidate — inutile de la recalculer à chaque appel).
+    const norm = Math.sqrt(entries.reduce((a, [, v]) => a + v * v, 0));
     return {
       weights: w,
+      norm,
       max: entries.length ? entries[0][1] : 0,
-      top: entries.slice(0, 3).map(([g]) => g),   // tes 3 genres les plus regardés
+      top: entries.slice(0, 3).map(([k]) => k),   // tes 3 tags/genres les plus représentés (clés préfixées)
       size: entries.length,
     };
   }
 
+  // Vecteur de poids d'une candidate, dans le MÊME espace (tag:/genre:) que buildTasteProfile
+  // — tags si connus (rank/100), repli genres sinon. Utilisé par tasteScore (similarité
+  // cosinus) et par le badge 🎯 (isPref, voir discoverSignals).
+  function candidateTasteVector(s) {
+    const tags = s.tags && s.tags.length ? s.tags : null;
+    const v = {};
+    if (tags) {
+      for (const t of tags) {
+        if (!t || !t.name) continue;
+        v[tagKey(t.name)] = Math.max(0, Math.min(100, t.rank ?? 50)) / 100;
+      }
+    } else {
+      for (const c of s.categories || []) v[genreKey(c)] = 1;
+    }
+    return v;
+  }
+
   // (34) Détail concret, replié par défaut, du profil de goût utilisé par le score « pépite »
   // (voir scoreFormulaSchema / tasteScore) : sans lui, « ton goût net » restait une notion
-  // abstraite — impossible de savoir CONCRÈTEMENT quels genres comptent pour toi et à quel
-  // poids, sans ouvrir la console. Classé du genre le plus regardé (100 %) au moins regardé ;
-  // 🎯 marque les 3 qui donnent aussi le bonus « genre préféré ». Un genre ABSENT de cette
-  // liste est un genre qui RETIRE des points à une candidate qui le porte (voir la note du
-  // schéma juste au-dessus) — la liste complète est donc aussi la liste de ce qui NE pénalise
-  // PAS une série.
+  // abstraite. Classé du tag/genre le plus représenté (100 %) au moins représenté ; 🎯 marque
+  // les 3 qui donnent aussi le bonus « genre préféré ». Les entrées « tag: » (préfixe retiré
+  // à l'affichage) viennent d'AniList, les « genre: » sont le repli pour les séries dont les
+  // tags ne sont pas encore connus.
   function tasteProfileDetailHtml() {
     const profile = buildTasteProfile();
     if (!profile.size) {
@@ -5050,68 +5142,64 @@
     }
     const entries = Object.entries(profile.weights).sort((a, b) => b[1] - a[1]);
     const max = profile.max || 1;
-    const rows = entries.map(([genre, w], i) => {
+    const rows = entries.map(([key, w], i) => {
+      const isTag = key.startsWith('tag:');
+      const name = key.slice(key.indexOf(':') + 1);
       const pct = Math.round((w / max) * 100);
-      const isTop = profile.top.includes(genre);
+      const isTop = profile.top.includes(key);
       return `<li class="${isTop ? 'top' : ''}">
         <span class="crrav-tasteprofile-rank">${i + 1}</span>
-        <span class="crrav-tasteprofile-name">${escapeHtml(genre)}${isTop ? ' <span class="crrav-tasteprofile-badge" title="Un de tes 3 genres les plus regardés — donne aussi le bonus 🎯">🎯</span>' : ''}</span>
+        <span class="crrav-tasteprofile-name">${escapeHtml(name)}${isTag ? ' <span class="crrav-tasteprofile-tagmark" title="Tag AniList">🏷️</span>' : ''}${isTop ? ' <span class="crrav-tasteprofile-badge" title="Un de tes 3 tags/genres les plus représentés — donne aussi le bonus 🎯">🎯</span>' : ''}</span>
         <div class="crrav-tasteprofile-bar"><div style="width:${pct}%"></div></div>
         <span class="crrav-tasteprofile-val">${pct}%</span>
       </li>`;
     }).join('');
     return `<details class="crrav-tasteprofile">
-      <summary>👤 Voir mon profil de goût actuel (${profile.size} genre${profile.size > 1 ? 's' : ''} détecté${profile.size > 1 ? 's' : ''})</summary>
-      <p class="crrav-tasteprofile-note">Calculé à partir des séries que tu as commencées dans « Reste à voir », pondérées par le nombre d'épisodes vus dans chaque genre : plus tu en regardes, plus il pèse. Le pourcentage est relatif à ton genre le plus regardé (= 100 %). <b>🎯</b> = tes 3 genres les plus regardés. Un genre qui n'apparaît PAS dans cette liste retire des points à toute série candidate qui le porte.</p>
+      <summary>👤 Voir mon profil de goût actuel (${profile.size} tag${profile.size > 1 ? 's' : ''}/genre${profile.size > 1 ? 's' : ''} détecté${profile.size > 1 ? 's' : ''})</summary>
+      <p class="crrav-tasteprofile-note">Calculé à partir des séries que tu as commencées dans « Reste à voir » — priorité aux tags AniList 🏷️ (pondérés par leur pertinence pour chaque série), repli sur les genres pour les séries pas encore enrichies. Pondéré par un mix de volume vu et de taux de complétion (réglable). Le pourcentage est relatif à ton tag/genre le plus représenté (= 100 %). <b>🎯</b> = tes 3 tags/genres les plus représentés.</p>
       <ul class="crrav-tasteprofile-list">${rows}</ul>
     </details>`;
   }
 
-  // Score de goût NET d'une candidate, borné dans [-1, +1]. Différence clé avec l'ancien
-  // affinityScore, qui IGNORAIT les genres jamais regardés : ici on les PÉNALISE. Sans ça,
-  // une série sport/comédie/drame décrochait « dans tes goûts » (voire « légendaire ») juste
-  // parce que la comédie te plaît, alors que sport et drame — que tu ne regardes pas — étaient
-  // simplement écartés du calcul. Désormais CHAQUE genre compte :
-  //   • présent dans ton profil → contribution positive (d'autant plus forte que tu le regardes) ;
-  //   • jamais regardé → malus (CFG.discoverMissPenalty).
-  // La moyenne sur les genres comptés fait qu'un seul genre aimé, noyé dans des genres qui
-  // te sont étrangers, donne un solde faible ou négatif — donc pas un bon match global.
+  // Score de goût NET d'une candidate, borné dans [-1, +1] : similarité COSINUS entre le
+  // vecteur de la candidate (candidateTasteVector) et ton profil (buildTasteProfile),
+  // remise à l'échelle (2×cos − 1) pour garder la même plage que le reste du pipeline
+  // (badges, discoverTasteWeight, seuils légendaire/notable…) sans rien casser ailleurs.
+  //   cos = 1  (match parfait, même direction)      → taste = +1
+  //   cos = 0.5 (recouvrement partiel/neutre)        → taste =  0
+  //   cos = 0  (aucun tag/genre en commun)           → taste = -1
   //
-  // (fix) Plafond CFG.discoverMaxPenalizedGenres : au-delà de ce nombre de genres jamais
-  // regardés, les suivants sont IGNORÉS (ni ajoutés au malus, ni au dénominateur) au lieu
-  // de continuer à diluer/plomber la moyenne. Sans ça, une série à beaucoup de genres (ex.
-  // 6) était mécaniquement écrasée par ses genres non regardés même quand 2-3 genres
-  // matchaient parfaitement — « légendaire » devenait quasi inatteignable dès qu'une série
-  // listait beaucoup de genres, ce qui n'a rien à voir avec la qualité du match.
-  //
-  // (fix) CFG.discoverMatchBonus multiplie la contribution POSITIVE de chaque genre matché
-  // (pendant de CFG.discoverMissPenalty côté malus) — avant, ce poids était figé à 1 et
-  // invisible dans le code : impossible de faire peser davantage tes genres réellement
-  // regardés par rapport aux malus des genres jamais vus.
-  function tasteScore(cats, profile) {
-    if (!profile || !profile.max || !cats.length) return 0;
-    const MISS_PENALTY = CFG.discoverMissPenalty;
-    const MATCH_BONUS = CFG.discoverMatchBonus ?? 1;
-    const maxPenalized = Math.max(0, CFG.discoverMaxPenalizedGenres ?? cats.length);
-    let sum = 0, denom = 0, missedCounted = 0;
-    for (const c of cats) {
-      const w = profile.weights[c];
-      if (w) { sum += (w / profile.max) * MATCH_BONUS; denom++; continue; }
-      if (missedCounted >= maxPenalized) continue;   // genre en trop : ignoré, pas pénalisé
-      sum -= MISS_PENALTY; denom++; missedCounted++;
+  // Remplace l'ancienne moyenne malus/bonus plafonnée (CFG.discoverMaxPenalizedGenres) : la
+  // similarité cosinus résout NATIVEMENT le problème qu'elle rustinait — une candidate à
+  // beaucoup de tags/genres n'est plus mécaniquement écrasée, puisque la norme de SON PROPRE
+  // vecteur grandit avec elle (dénominateur du cosinus), diluant proportionnellement les
+  // dimensions qui ne matchent pas ton profil, sans plafond arbitraire à régler à la main.
+  function tasteScore(s, profile) {
+    if (!profile || !profile.norm) return 0;
+    const v = candidateTasteVector(s);
+    const keys = Object.keys(v);
+    if (!keys.length) return 0;
+    let dot = 0, vNormSq = 0;
+    for (const k of keys) {
+      const cv = v[k];
+      vNormSq += cv * cv;
+      const pw = profile.weights[k];
+      if (pw) dot += cv * pw;
     }
-    if (!denom) return 0;   // tous les genres sont « en trop » (cap à 0) : neutre plutôt que 0/0
-    return Math.max(-1, Math.min(1, sum / denom));
+    const vNorm = Math.sqrt(vNormSq);
+    if (!vNorm) return 0;
+    const cos = dot / (vNorm * profile.norm);   // [0, 1] : tous les poids sont ≥ 0
+    return Math.max(-1, Math.min(1, cos * 2 - 1));
   }
 
   // Signaux d'une carte Découverte : icônes parlantes + couleur du liseré dominant.
-  // 🎯 genre préféré (top 3) · 💚 dans tes goûts · 🏆 très bien notée
+  // 🎯 tag/genre préféré (top 3) · 💚 dans tes goûts · 🏆 très bien notée
   //
   // « Légendaire » repose sur un SCORE dont le cœur est le GOÛT NET (voir tasteScore) :
-  // les genres que tu aimes rapportent, ceux que tu ne regardes jamais RETIRENT des points.
-  // C'est ce qui empêche une série majoritairement hors de tes goûts (ex. sport + drame)
-  // de décrocher « légendaire » juste parce qu'elle est AUSSI une comédie. La note reste un
-  // bonus. Seuils réglables : CFG.discoverLegendaryScore / discoverNotableScore.
+  // une similarité cosinus entre les tags/genres de la candidate et ton profil. C'est ce
+  // qui empêche une série majoritairement hors de tes goûts (ex. sport + drame) de décrocher
+  // « légendaire » juste parce qu'elle est AUSSI une comédie. La note reste un bonus. Seuils
+  // réglables : CFG.discoverLegendaryScore / discoverNotableScore.
   //
   // (fix) Signal 🔥 « très populaire » RETIRÉ du scoring : il se basait sur le rang dans le
   // classement popularité au moment du scan (s.popRank/s.order), une notion qui varie trop
@@ -5120,34 +5208,32 @@
   // seul critère, sans rapport avec le goût ou la note). Seuls le goût et la note comptent
   // désormais.
   //
-  // (fix) TOUT le calcul est désormais réglable, positifs compris : avant, 🎯 (genre
-  // préféré) n'affectait le score nulle part (badge purement informatif), et le poids du
-  // goût (×2.5), le seuil 💚 (0.4) et les bonus de note (+0.5/+0.5) étaient des constantes
-  // invisibles dans le code — impossible de savoir « un genre aimé, ça donne combien ? »
-  // sans lire le source. Chaque levier vit maintenant dans CFG (Réglages → Découverte →
+  // TOUT le calcul est réglable : le poids du goût (discoverTasteWeight), le seuil 💚
+  // (discoverGoodTasteThreshold), le bonus 🎯 (discoverPrefGenreBonus) et les bonus de note
+  // (discoverWellRatedBonus/discoverSuperRatedBonus) vivent dans CFG (Réglages → Découverte →
   // ✨ Score légendaire & notable) et le schéma visuel (scoreFormulaSchema) se recalcule
   // en direct dessus.
   function discoverSignals(s, profile) {
-    const cats = s.categories || [];
-    const isPref = !!(profile && profile.top.some((g) => cats.includes(g)));
-    const taste = tasteScore(cats, profile);      // -1..1 : positif si aligné, négatif sinon
+    const vec = candidateTasteVector(s);
+    const isPref = !!(profile && profile.top.some((k) => vec[k]));
+    const taste = tasteScore(s, profile);      // -1..1 : similarité cosinus, positif si aligné
     const goodTaste = taste >= CFG.discoverGoodTasteThreshold;   // globalement bien dans tes goûts
     const wellRated = s.rating != null && s.rating >= CFG.discoverWellRatedThreshold;
     const superRated = s.rating != null && s.rating >= CFG.discoverSuperRatedThreshold;
     const prefBoost = isPref && taste > 0;
 
     const badges = [];
-    // 🎯 reste informatif (« contient un de tes genres préférés »), mais seulement si le
-    // goût global n'est pas franchement négatif : sinon un simple genre aimé, noyé dans des
-    // genres étrangers, arborerait 🎯 à tort (le cas sport/comédie/drame remonté).
-    if (prefBoost) badges.push(['🎯', 'Un de tes genres préférés']);
+    // 🎯 reste informatif (« contient un de tes tags/genres préférés »), mais seulement si
+    // le goût global n'est pas franchement négatif : sinon un simple tag/genre aimé, noyé
+    // dans un ensemble qui t'est étranger, arborerait 🎯 à tort.
+    if (prefBoost) badges.push(['🎯', 'Un de tes tags/genres préférés']);
     if (goodTaste) badges.push(['💚', 'Dans tes goûts']);
     if (wellRated) badges.push(['🏆', 'Très bien notée']);
 
-    // Score « pépite ». Le goût NET pèse le plus, et il peut être NÉGATIF : un genre jamais
-    // regardé fait baisser le score, pas seulement « ne l'augmente pas ». Un genre aimé ne
-    // suffit donc plus si le reste te correspond peu. Genre préféré + note ajoutent des
-    // bonus configurables. Seuils : voir CFG.discoverLegendaryScore / discoverNotableScore.
+    // Score « pépite ». Le goût NET pèse le plus, et il peut être NÉGATIF : un vecteur de
+    // tags/genres qui ne recoupe pas ton profil fait baisser le score, pas seulement « ne
+    // l'augmente pas ». Tag/genre préféré + note ajoutent des bonus configurables.
+    // Seuils : voir CFG.discoverLegendaryScore / discoverNotableScore.
     const tw = CFG.discoverTasteWeight;
     let score = Math.max(-tw, Math.min(tw, taste * tw));   // goût : gros poids, positif ET négatif
     if (prefBoost) score += CFG.discoverPrefGenreBonus;
@@ -5165,11 +5251,12 @@
   // chaque bulle « Notable »/« Légendaire » reflète les valeurs RÉELLEMENT configurées —
   // pas un exemple générique. Composition (voir discoverSignals) :
   //   goût net (-1..1) × discoverTasteWeight   →   segment « taste », peut être négatif
-  //   + discoverPrefGenreBonus  (si 🎯 genre préféré)
+  //   + discoverPrefGenreBonus  (si 🎯 tag/genre préféré)
   //   + discoverWellRatedBonus  (si 🏆 très bien notée)
   //   + discoverSuperRatedBonus (si ✨ note exceptionnelle, cumulable avec 🏆)
-  // Une note en bas rappelle aussi que le goût net lui-même dépend de discoverMatchBonus /
-  // discoverMissPenalty / discoverMaxPenalizedGenres — les leviers du bloc 💚 juste après.
+  // Une note en bas rappelle aussi que le goût net lui-même vient d'une similarité cosinus
+  // entre tes tags/genres et ceux de la candidate (voir tasteScore), pondérée par
+  // discoverCompletionWeight côté profil — le levier du bloc 💚 juste après.
   //
   // (33) `override` : objet partiel de réglages à utiliser À LA PLACE de CFG, sans jamais
   // toucher CFG lui-même. Sert à l'aperçu EN DIRECT (voir wireScoreSchemaLive) — pendant
@@ -5192,8 +5279,6 @@
     const zeroPos = pct(0);
     const b0 = min, b1 = tw, b2 = tw + prefBonus, b3 = tw + prefBonus + rated1, b4 = max;
     const fmt1 = (v) => (v >= 0 ? '+' : '') + v.toFixed(1);
-    const matchBonus = C.discoverMatchBonus ?? 1;
-    const maxPen = C.discoverMaxPenalizedGenres;
     const rated1Thr = C.discoverWellRatedThreshold;
     const rated2Thr = C.discoverSuperRatedThreshold;
     return `<div class="crrav-scoreschema"${live ? ' id="crrav-scoreschema-live"' : ''}>
@@ -5202,8 +5287,8 @@
         <span class="crrav-scoreschema-sub">Chaque tronçon coloré ci-dessous s'ADDITIONNE au précédent, de gauche à droite. Le total obtenu place la série sur cette échelle — et détermine si elle franchit un des deux repères « Notable » / « Légendaire ».</span>
       </div>
       <div class="crrav-scoreschema-track">
-        <div class="crrav-scoreschema-seg taste" style="left:${pct(b0)}%;width:${pct(b1) - pct(b0)}%" title="① Goût net (genres) × ${tw.toFixed(1)} : de ${min.toFixed(1)} à +${tw.toFixed(1)}"></div>
-        ${prefBonus > 0 ? `<div class="crrav-scoreschema-seg pref" style="left:${pct(b1)}%;width:${pct(b2) - pct(b1)}%" title="② 🎯 genre préféré : ${fmt1(prefBonus)}"></div>` : ''}
+        <div class="crrav-scoreschema-seg taste" style="left:${pct(b0)}%;width:${pct(b1) - pct(b0)}%" title="① Goût net (tags/genres, cosinus) × ${tw.toFixed(1)} : de ${min.toFixed(1)} à +${tw.toFixed(1)}"></div>
+        ${prefBonus > 0 ? `<div class="crrav-scoreschema-seg pref" style="left:${pct(b1)}%;width:${pct(b2) - pct(b1)}%" title="② 🎯 tag/genre préféré : ${fmt1(prefBonus)}"></div>` : ''}
         ${rated1 > 0 ? `<div class="crrav-scoreschema-seg bonus1" style="left:${pct(b2)}%;width:${pct(b3) - pct(b2)}%" title="③ 🏆 très bien notée : ${fmt1(rated1)}"></div>` : ''}
         ${rated2 > 0 ? `<div class="crrav-scoreschema-seg bonus2" style="left:${pct(b3)}%;width:${pct(b4) - pct(b3)}%" title="④ ✨ note exceptionnelle : ${fmt1(rated2)} (cumulable)"></div>` : ''}
         <div class="crrav-scoreschema-zero" style="left:${zeroPos}%" title="Goût neutre (0)"></div>
@@ -5216,10 +5301,10 @@
 
       <ul class="crrav-scoreschema-legend">
         <li><span class="crrav-scoreschema-legnum">①</span><i class="crrav-scoreschema-dot taste"></i>
-          <span class="crrav-scoreschema-legtxt"><b>Goût net</b> — genres de la série comparés à ce que tu regardes vraiment</span>
+          <span class="crrav-scoreschema-legtxt"><b>Goût net</b> — similarité cosinus entre les tags/genres de la série et ton profil</span>
           <span class="crrav-scoreschema-legval">× ${tw.toFixed(1)}</span></li>
         <li><span class="crrav-scoreschema-legnum">②</span><i class="crrav-scoreschema-dot pref"></i>
-          <span class="crrav-scoreschema-legtxt"><b>🎯 Genre préféré</b> — contient un de tes 3 genres les plus regardés</span>
+          <span class="crrav-scoreschema-legtxt"><b>🎯 Tag/genre préféré</b> — contient un de tes 3 tags/genres les plus représentés</span>
           <span class="crrav-scoreschema-legval">${fmt1(prefBonus)}</span></li>
         <li><span class="crrav-scoreschema-legnum">③</span><i class="crrav-scoreschema-dot bonus1"></i>
           <span class="crrav-scoreschema-legtxt"><b>🏆 Très bien notée</b> — note ≥ ${rated1Thr.toFixed(1)}★</span>
@@ -5229,7 +5314,7 @@
           <span class="crrav-scoreschema-legval">${fmt1(rated2)}</span></li>
       </ul>
 
-      <p class="crrav-scoreschema-note">① Le goût net vient de la moyenne des genres de la série : chaque genre aimé compte pour <b>×${matchBonus.toFixed(1)}</b> (ta part d'écoute de ce genre), chaque genre jamais regardé retire <b>${C.discoverMissPenalty.toFixed(2)}</b> point — plafonné à <b>${maxPen}</b> genre${maxPen > 1 ? 's' : ''} pénalisé${maxPen > 1 ? 's' : ''} par série (réglages 💚 ci-dessous).</p>
+      <p class="crrav-scoreschema-note">① Le goût net vient d'une similarité cosinus entre le vecteur de tags/genres (pondérés par leur pertinence AniList) de la candidate et ton profil — pas de plafond à régler : une série à beaucoup de tags n'est plus mécaniquement pénalisée, la comparaison se fait sur la DIRECTION du vecteur, pas sa taille. Le profil lui-même mixe volume vu et taux de complétion (réglage ci-dessous).</p>
       ${tasteProfileDetailHtml()}
       ${live ? `<p class="crrav-scoreschema-live-hint">👁️ Aperçu en direct : bouge les curseurs ci-dessous, ce schéma se redessine aussitôt. Rien n'est appliqué à Découverte tant que tu n'as pas cliqué « Enregistrer et actualiser ».</p>` : ''}
     </div>`;
@@ -5893,23 +5978,40 @@
 
   /* (5) vue liste compacte */
   .crrav-grid.crrav-list{grid-template-columns:1fr;gap:8px}
-  .crrav-lrow{display:flex;align-items:center;gap:12px;min-width:0;padding:8px 10px;background:#141419;
+  .crrav-lrow{display:flex;align-items:center;gap:10px;min-width:0;padding:7px 9px;background:#141419;
     border:1px solid rgba(255,255,255,.07);border-radius:12px}
   .crrav-lrow:hover{border-color:var(--prog)}
-  .crrav-lthumb{flex:0 0 40px;width:40px;aspect-ratio:2/3;border-radius:5px;overflow:hidden;background:#1d1d24}
+  .crrav-lthumb{flex:0 0 38px;width:38px;aspect-ratio:2/3;border-radius:5px;overflow:hidden;background:#1d1d24}
   .crrav-lthumb img{width:100%;height:100%;object-fit:cover;display:block}
-  .crrav-lmain{flex:1;min-width:0;display:flex;flex-direction:column;gap:6px}
-  .crrav-lhead{display:flex;align-items:center;gap:7px;flex-wrap:wrap;min-width:0}
-  .crrav-ltitle{font:700 13px/1.2 system-ui;color:#f2f2f4;text-decoration:none;
-    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+  .crrav-lmain{flex:1;min-width:0;display:flex;flex-direction:column;gap:4px}
+  .crrav-lhead{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
+  /* (fix) le titre occupe sa propre ligne pleine largeur (flex-basis:100%) au lieu de se
+     partager la place avec le tag/la note : il a ainsi bien plus de marge avant de couper,
+     et les badges refluent naturellement en dessous. Un clamp 2 lignes sert de filet de
+     sécurité pour les titres vraiment longs, plutôt qu'une simple ellipse sur 1 ligne. */
+  .crrav-ltitle{flex:1 1 100%;font:700 13px/1.25 system-ui;color:#f2f2f4;text-decoration:none;
+    display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;max-width:100%}
   .crrav-ltitle:hover{color:var(--prog)}
   .crrav-lrating{font:700 10.5px/1 system-ui;color:#ffcf55}
   .crrav-ltag{font:700 9.5px/1 system-ui;color:#9fd6ff;border:1px solid rgba(159,214,255,.4);
     border-radius:5px;padding:2px 5px}
   .crrav-lnew{font:800 9.5px/1 system-ui;background:#9fd6ff;color:#08131c;border-radius:5px;padding:2px 5px}
-  .crrav-lactions{display:flex;align-items:center;gap:8px;flex:0 0 auto}
-  .crrav-lactions .crrav-ringwrap{position:static}
+  .crrav-lactions{display:flex;align-items:center;gap:6px;flex:0 0 auto}
+  /* (fix) le wrapper doit rester un repère de positionnement pour son enfant .crrav-ring
+     (position:absolute;inset:0) — passer en position:static le sortait du flux ET privait
+     le SVG de son ancrage, qui remontait alors se caler sur .crrav-lrow (toute la carte,
+     en haut à gauche) pendant que le texte % restait affiché à part, à droite. */
+  .crrav-lactions .crrav-ringwrap{position:relative;top:0;right:0;width:32px;height:32px;flex:0 0 auto}
+  .crrav-lactions .crrav-ring{width:32px;height:32px}
   .crrav-lactions .crrav-ignore{position:static;opacity:1}
+  /* (superposition) les 2 boutons secondaires (séries similaires, ignorer) se chevauchent
+     légèrement — bordure teintée comme le fond de la carte pour bien les détacher l'un de
+     l'autre, comme une pile d'icônes. Celui qui a le focus/survol repasse au-dessus et
+     retrouve sa pleine largeur de clic. */
+  .crrav-lactions .crrav-similar{position:relative;z-index:1;border:2px solid #141419}
+  .crrav-lactions .crrav-ignore{margin-left:-10px;border:2px solid #141419}
+  .crrav-lactions .crrav-similar:hover,.crrav-lactions .crrav-similar:focus-visible,
+  .crrav-lactions .crrav-ignore:hover,.crrav-lactions .crrav-ignore:focus-visible{z-index:2;margin-left:0}
   .crrav-lresume{text-decoration:none;border-radius:8px;padding:7px 10px;white-space:nowrap;
     font:700 11px/1.2 system-ui;color:#12120f;background:var(--prog)}
   @media(max-width:720px){
@@ -5929,17 +6031,22 @@
      restaient à taille desktop et grignotaient toute la largeur dispo pour le titre,
      forçant des ellipses prématurées et un alignement bancal entre les lignes. */
   @media(max-width:600px){
-    .crrav-lrow:not(.crrav-lrow-discover){gap:9px;padding:7px 8px}
-    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lthumb{flex-basis:34px;width:34px}
-    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lhead{gap:6px}
+    .crrav-lrow:not(.crrav-lrow-discover){gap:8px;padding:6px 7px}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lthumb{flex-basis:32px;width:32px}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lmain{gap:3px}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lhead{gap:5px}
     .crrav-lrow:not(.crrav-lrow-discover) .crrav-ltitle{font-size:12.5px}
-    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions{gap:6px}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions{gap:5px}
     .crrav-lrow:not(.crrav-lrow-discover) .crrav-ringwrap,
-    .crrav-lrow:not(.crrav-lrow-discover) .crrav-ring{width:32px;height:32px}
-    .crrav-lrow:not(.crrav-lrow-discover) .crrav-ring-t{font-size:9px}
-    .crrav-lrow:not(.crrav-lrow-discover) .crrav-ring-t.done{font-size:12px}
-    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions .crrav-similar{width:28px;height:28px}
-    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions .crrav-ignore{width:28px;height:28px}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-ring{width:28px;height:28px}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-ring-t{font-size:8.5px}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-ring-t.done{font-size:11px}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions .crrav-similar{width:26px;height:26px}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions .crrav-ignore{width:26px;height:26px;margin-left:-8px}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions .crrav-similar:hover,
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions .crrav-similar:focus-visible,
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions .crrav-ignore:hover,
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions .crrav-ignore:focus-visible{margin-left:0}
   }
   /* Très petit téléphone : la baguette « séries similaires » est la moins essentielle
      des 3 actions (anneau = progression, resume = action principale, ignore = tri) —
@@ -7847,8 +7954,8 @@
         </div>` : ''}
         ${list.length && !f.showIgnoredDiscover ? `
         <div class="crrav-siglegend">
-          ${profile.size ? `<span class="crrav-siglegend-chip crrav-sig-pref" title="Un de tes 3 genres les plus regardés">🎯 genre préféré</span>
-          <span class="crrav-siglegend-chip crrav-sig-aff" title="Colle à tes genres les plus regardés">💚 dans tes goûts</span>` : ''}
+          ${profile.size ? `<span class="crrav-siglegend-chip crrav-sig-pref" title="Un de tes 3 tags/genres les plus représentés">🎯 tag/genre préféré</span>
+          <span class="crrav-siglegend-chip crrav-sig-aff" title="Colle à tes tags/genres les plus représentés">💚 dans tes goûts</span>` : ''}
           <span class="crrav-siglegend-chip crrav-sig-rated" title="Note bien au-dessus du minimum">🏆 très bien notée</span>
         </div>` : ''}
         ${D.warning ? `<p class="crrav-warn">${escapeHtml(D.warning)}</p>` : ''}
@@ -9562,7 +9669,6 @@
     // touche jamais CFG ici : uniquement un aperçu (voir l'override de scoreFormulaSchema).
     const SCORE_LIVE_KEYS = ['discoverTasteWeight', 'discoverPrefGenreBonus', 'discoverWellRatedBonus',
       'discoverSuperRatedBonus', 'discoverLegendaryScore', 'discoverNotableScore',
-      'discoverMatchBonus', 'discoverMissPenalty', 'discoverMaxPenalizedGenres',
       'discoverWellRatedThreshold', 'discoverSuperRatedThreshold'];
     if (content.querySelector('#crrav-scoreschema-live')) {
       const updateScoreSchemaLive = () => {
@@ -9572,7 +9678,6 @@
           if (!el) continue;
           let v = parseFloat(String(el.value).replace(',', '.'));
           if (!Number.isFinite(v)) continue;   // champ vidé pendant la frappe : ignore, garde l'ancien aperçu
-          if (k === 'discoverMaxPenalizedGenres') v = Math.round(v);
           override[k] = v;
         }
         const host = content.querySelector('#crrav-scoreschema-live');
