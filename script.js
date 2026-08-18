@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      2.159.0
+// @version      2.160.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '2.159.0';
+  const SCRIPT_VERSION = '2.160.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -71,17 +71,24 @@
     // Seuils du score « pépite » (voir discoverSignals : légendaire ≥ ce seuil, notable ≥
     // l'autre). Avant, légendaire ≥3/notable ≥2 exigeaient quasi systématiquement un goût
     // proche du match parfait CUMULÉ avec 2 à 3 bonus (note + popularité) — combinaison rare
-    // en pratique (zéro légendaire trouvée sur 20 pages de scan rapporté). Abaissés pour
-    // qu'un très bon goût seul (score de goût proche de 1, cf. tasteScore) puisse suffire,
-    // ou qu'un bon goût + quelques bonus y arrive, sans exiger la totalité des signaux à la fois.
-    discoverLegendaryScore: 2.2,
-    discoverNotableScore: 1.3,
+    // en pratique (zéro légendaire trouvée sur 20 pages de scan rapporté). Abaissés une
+    // première fois pour qu'un très bon goût seul (score de goût proche de 1, cf.
+    // tasteScore) puisse suffire.
+    // (fix) Réabaissés depuis le passage aux tags AniList détaillés (cf. TAG_CAP) : le
+    // cosinus tasteScore vit désormais dans un espace de tags bien plus large et épars que
+    // les ~20 genres d'avant, donc un « très bon goût » plafonne naturellement plus bas
+    // (cosinus rarement > 0.5-0.6 même sur un match solide, contre 0.8-0.9 en genres).
+    discoverLegendaryScore: 1.4,
+    discoverNotableScore: 0.8,
     // Poids du GOÛT NET (tasteScore, -1..1) dans le score final : score du goût = taste ×
     // ce multiplicateur. Avant, ×2.5 fixe et invisible dans le code.
-    discoverTasteWeight: 2.5,
+    // (fix) Remonté à 3 pour redonner du poids au goût net dans la nouvelle échelle, plus
+    // basse, du cosinus sur tags détaillés (voir note ci-dessus).
+    discoverTasteWeight: 3,
     // Seuil de goût net (tasteScore, -1..1) à partir duquel le badge 💚 « dans tes goûts »
     // s'affiche. Avant, fixé à 0.4 et invisible dans le code.
-    discoverGoodTasteThreshold: 0.4,
+    // (fix) Abaissé à 0.25 pour la même raison (échelle de cosinus plus basse sur tags).
+    discoverGoodTasteThreshold: 0.25,
     // Bonus de score ajouté quand la série contient un de tes 3 tags/genres les plus
     // représentés (badge 🎯) ET que le goût global reste positif. Avant, 🎯 était un badge
     // PUREMENT informatif, sans aucun effet sur le score « pépite ».
@@ -1874,7 +1881,7 @@
     if (!targets.length) return;
 
     // Coupe-circuit partagé avec enrichAnilistSchedule : pas la peine de tenter un appel
-    // AniList par cible si l'API a récemment refusé (403/429). Le repli CR seul continue.
+    // AniList si l'API a récemment refusé (403/429). Le repli CR seul continue.
     const aniOk = CFG.anilistSchedule && anilistCooldownRemainingMs() <= 0;
 
     enrichingHistoryGenres = true;
@@ -1882,27 +1889,49 @@
     render();
     try {
       let changed = false;
+      let doneCount = 0;
+      const startedAt = STATE.historyGenreProgress.startedAt;
+      const bump = () => {
+        STATE.historyGenreProgress = { done: doneCount, total: targets.length, startedAt };
+        render();
+      };
+
+      // ── Phase 1 : fiche Crunchyroll (pas d'incidence sur le rate limit AniList) ──
+      // Chaque cible marquée « tentée » dès cette phase, avant même de savoir si AniList
+      // sera sollicité, pour ne jamais la repasser en cas d'échec plus loin.
+      const needAni = [];
       await pool(targets, async (d) => {
-        historyGenreTried.add(d.id);               // tentée : on ne la repassera pas
+        historyGenreTried.add(d.id);
         let g = [];
         try {
           const panel = await getSeriesPanel(d.id);
           g = panel ? extractGenres(panel) : [];
         } catch (_) { /* best-effort */ }
-        if (aniOk && g.length < 2) {
-          try {
-            const { media } = await anilistSearch(d.title);
-            const best = aniPickMatch(media, { title: d.title });
-            if (best && best.genres && best.genres.length) {
-              g = mergeGenreLists(g, translateAniGenres(best.genres));
-            }
-          } catch (_) { /* best-effort, silencieux comme le repli CR */ }
-        }
         if (g.length) { d.genres = g; changed = true; }
-      }, CFG.concurrency, (done, total) => {
-        STATE.historyGenreProgress = { done, total, startedAt: STATE.historyGenreProgress.startedAt };
-        render();
-      });
+        else if (aniOk) needAni.push(d);
+        doneCount++; bump();
+      }, CFG.concurrency);
+
+      // ── Phase 2 : repli AniList, GROUPÉ (voir anilistSearchBatch) — le vrai frein aux
+      // 429 était une requête HTTP par série ; ici comme dans enrichAnilistSchedule, on
+      // regroupe plusieurs séries par requête pour rester sous le radar du rate limit.
+      const ANI_BATCH = 6;
+      for (let i = 0; i < needAni.length; i += ANI_BATCH) {
+        if (anilistCooldownRemainingMs() > 0) break;   // un 429 en cours de route : on s'arrête net
+        const batch = needAni.slice(i, i + ANI_BATCH);
+        let map = null;
+        try {
+          map = await anilistSearchBatch(batch.map((d) => ({ key: d.id, title: d.title })));
+        } catch (_) { /* best-effort, silencieux comme le repli CR */ }
+        if (map) for (const d of batch) {
+          const r = map.get(d.id);
+          const best = r ? aniPickMatch(r.media, { title: d.title }) : null;
+          if (best && best.genres && best.genres.length) {
+            d.genres = mergeGenreLists(d.genres, translateAniGenres(best.genres));
+            changed = true;
+          }
+        }
+      }
 
       if (changed) {
         // On persiste le détail enrichi dans le cache d'historique (même clé), sans toucher
@@ -2643,20 +2672,33 @@
     }
     return out;
   }
+  // (fix) AniList renvoie souvent 20-30 tags par série, dont beaucoup de tags génériques
+  // peu discriminants (« Male Protagonist », « Ensemble Cast »…). Les garder TOUS dilue la
+  // similarité cosinus du score « pépite » (tasteScore) : plus l'espace de tags d'une
+  // candidate contient de dimensions sans rapport avec le profil, plus son vecteur s'étire
+  // sans faire grossir le produit scalaire, et plus le cosinus — donc le score — s'écrase.
+  // On ne garde que les tags les MIEUX classés (les plus représentatifs de la série selon
+  // AniList) pour concentrer le signal, comme le faisait implicitement l'ancien système à
+  // ~20 genres.
+  const TAG_CAP = 12;
   // Nettoie les tags bruts AniList : on écarte les spoilers (isMediaSpoiler) et les tags à
   // rank nul/absent (non pertinents pour cette série), on garde { name, rank } seulement
-  // — le reste (id, description AniList…) ne sert jamais dans ce script — et on trie par
-  // rank décroissant côté client (l'API n'accepte pas d'argument `sort` sur ce champ).
+  // — le reste (id, description AniList…) ne sert jamais dans ce script — on trie par rank
+  // décroissant côté client (l'API n'accepte pas d'argument `sort` sur ce champ) puis on
+  // plafonne à TAG_CAP (voir note ci-dessus).
   function cleanAniTags(list) {
     return (Array.isArray(list) ? list : [])
       .filter((t) => t && t.name && !t.isMediaSpoiler && Number.isFinite(t.rank) && t.rank > 0)
       .map((t) => ({ name: t.name, rank: t.rank }))
-      .sort((a, b) => b.rank - a.rank);
+      .sort((a, b) => b.rank - a.rank)
+      .slice(0, TAG_CAP);
   }
   // Fusionne deux listes de tags { name, rank } sans doublon (comparaison via aniNorm) —
   // à la différence des genres (simples chaînes), on garde le rank le PLUS HAUT vu pour un
   // même tag entre les deux listes plutôt que d'ignorer le doublon, un rank plus précis
-  // pouvant arriver d'une repasse ultérieure (ex. fiche AniList mieux appariée).
+  // pouvant arriver d'une repasse ultérieure (ex. fiche AniList mieux appariée). Replafonné
+  // à TAG_CAP après fusion, sinon deux listes déjà pleines à TAG_CAP pourraient en cumuler
+  // le double.
   function mergeTagLists(base, extra) {
     const out = Array.isArray(base) ? base.map((t) => ({ ...t })) : [];
     const idx = new Map(out.map((t, i) => [aniNorm(t.name), i]));
@@ -2668,7 +2710,7 @@
       if (i == null) { idx.set(norm, out.length); out.push({ name: t.name, rank: t.rank }); }
       else if ((t.rank || 0) > (out[i].rank || 0)) out[i].rank = t.rank;
     }
-    return out;
+    return out.sort((a, b) => (b.rank || 0) - (a.rank || 0)).slice(0, TAG_CAP);
   }
 
   // Choisit la meilleure fiche AniList pour une série CR, ou null si aucune n'est
@@ -5621,6 +5663,10 @@
   @media(min-width:720px){
     .crrav-brand-text{display:inline}
   }
+  /* Sur mobile, la rangée d'icônes est déjà très serrée (recherche, TV, menu, dés,
+     actualiser, réglages, fermer...) : le logo ne sert plus qu'à voler de la place
+     précieuse une fois son texte masqué, donc on le retire complètement sous 720px. */
+  @media(max-width:720px){.crrav-brand{display:none}}
   /* Mode TV (salon, pilotage à distance) : lisible depuis le canapé, donc libellés texte
      toujours visibles à côté des icônes — indépendamment de la largeur d'écran, via la
      classe .crrav-tv plutôt qu'un seuil de viewport (voir plus haut pourquoi un seuil de
@@ -5744,20 +5790,29 @@
   .crrav-scorechip.legendary{background:rgba(255,179,71,.18);border-color:rgba(255,179,71,.55);color:#ffd48a}
   .crrav-card.crrav-sig::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;z-index:3;background:var(--sig)}
   .crrav-lrow-discover.crrav-sig::before{background:var(--sig);transform:scaleY(1)}
-  /* (fix) Une seule ligne, même sur écran étroit (Z Fold plié…) : plutôt que de laisser les
-     chips passer à la ligne (illisible, ça sautait sur 2 lignes dès 3 chips), la rangée
-     défile horizontalement au doigt. Barre de défilement masquée pour rester discret. */
-  .crrav-siglegend{display:flex;flex-wrap:nowrap;align-items:center;gap:7px;margin:14px 0 13px;
+  /* (fix) Une seule ligne, ENTIÈREMENT visible même sur écran étroit (Z Fold plié…) :
+     les chips rétrécissent (flex:1 1 auto + libellés courts) pour tenir toutes ensemble
+     plutôt que de déborder hors-écran ou passer à la ligne. Le overflow-x reste en filet
+     de sécurité pour les très petits écrans, mais n'est plus le mécanisme principal. */
+  .crrav-siglegend{display:flex;flex-wrap:nowrap;align-items:center;gap:5px;margin:14px 0 13px;
     overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;
     scrollbar-width:none;-ms-overflow-style:none}
   .crrav-siglegend::-webkit-scrollbar{display:none}
-  .crrav-siglegend-chip{display:inline-flex;align-items:center;gap:6px;white-space:nowrap;flex:0 0 auto;
-    font:600 11.5px/1 system-ui;color:#d3d4da;padding:6px 11px 6px 9px;border-radius:9px;
+  .crrav-siglegend-chip{display:inline-flex;align-items:center;justify-content:center;gap:5px;
+    white-space:nowrap;flex:1 1 0;min-width:0;overflow:hidden;text-overflow:ellipsis;
+    font:600 11px/1 system-ui;color:#d3d4da;padding:6px 8px;border-radius:9px;
     background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.07);
     border-left:3px solid var(--sig);transition:background .15s,transform .15s}
   .crrav-siglegend-chip:hover{background:rgba(255,255,255,.09);transform:translateY(-1px)}
-  .crrav-siglegend-chip::after{content:'';width:6px;height:6px;border-radius:50%;
-    background:var(--sig);box-shadow:0 0 7px var(--sig);flex:none;margin-left:1px}
+  .crrav-siglegend-chip::after{content:'';width:5px;height:5px;border-radius:50%;
+    background:var(--sig);box-shadow:0 0 6px var(--sig);flex:none;margin-left:1px}
+  /* Sous ~380px (petits téléphones), on resserre encore : police plus petite, padding
+     réduit, pas de puce lumineuse (superflue une fois le liseré coloré déjà présent). */
+  @media(max-width:380px){
+    .crrav-siglegend{gap:4px}
+    .crrav-siglegend-chip{font-size:9.5px;padding:5px 5px 5px 6px;gap:3px}
+    .crrav-siglegend-chip::after{display:none}
+  }
   /* Carte « légendaire » (score pépite ≥ CFG.discoverLegendaryScore) : halo doré qui respire autour de la carte,
      plus un ruban en coin. Le liseré coloré (--sig) reste en place dessous, le halo
      doré prend le dessus visuellement pour que « légendaire » soit non-ambigu. */
@@ -7064,6 +7119,24 @@
     }
     const topGenres = Object.entries(genres).sort((a, b) => b[1] - a[1]).slice(0, 8);
 
+    // Genres détaillés = tags AniList (voir TAG_CAP/enrichAnilistSchedule), bien plus fins
+    // que les ~20 genres larges ci-dessus (ex. « Time Skip », « Tragedy », « Iyashikei »).
+    // Pondérés par leur rank AniList (confiance du tag pour CETTE série, 0-100) plutôt que
+    // comptés à l'unité : un tag à rank 95 sur une série pèse plus qu'un tag à rank 20 sur
+    // une autre, même s'ils apparaissent le même nombre de fois au total.
+    const tagWeights = {};
+    for (const s of all) {
+      if (s.seen === 0) continue;
+      for (const t of s.tags || []) {
+        if (!t || !t.name) continue;
+        tagWeights[t.name] = (tagWeights[t.name] || 0) + Math.max(0, Math.min(100, t.rank ?? 50)) / 100;
+      }
+    }
+    const topTags = Object.entries(tagWeights)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .map(([name, w]) => [name, Math.round(w * 10) / 10]);
+
     const rated = all.filter((s) => s.rating != null);
     const avgRating = rated.length ? rated.reduce((a, s) => a + s.rating, 0) / rated.length : null;
 
@@ -7101,7 +7174,9 @@
       global: g,
       topLists,
       topGenres,
+      topTags,
       genreCount: Object.keys(genres).length,
+      tagCount: Object.keys(tagWeights).length,
       avgRating,
       seriesWithGenres: all.filter((s) => s.seen > 0 && (s.categories || []).length).length,
       highlights: {
@@ -7274,6 +7349,16 @@
         <span class="crrav-gbar-n">${n}</span>
       </div>`).join('');
 
+    // — Genres détaillés (tags AniList), même style de barres, valeurs pondérées (voir
+    // computeStats) plutôt que de simples comptes — affichées à 1 décimale.
+    const maxTag = st.topTags.length ? st.topTags[0][1] : 1;
+    const tagBars = st.topTags.map(([tname, w]) =>
+      `<div class="crrav-gbar">
+        <span class="crrav-gbar-l">${escapeHtml(tname)}</span>
+        <span class="crrav-gbar-t"><i style="width:${Math.round((w / maxTag) * 100)}%"></i></span>
+        <span class="crrav-gbar-n">${w}</span>
+      </div>`).join('');
+
     // Hero d'ouverture : un seul chiffre marquant, tout de suite compris — le détail
     // (listes / hors listes) vient juste dessous plutôt que d'être mélangé avec lui.
     const heroTotal = hDone + beyondH;
@@ -7316,6 +7401,7 @@
     const factCards = [
       factStat('📡', hl.airingCount, 'en diffusion en ce moment'),
       factStat('🎭', st.genreCount, 'genres différents suivis'),
+      factStat('🧬', st.tagCount, 'tags AniList différents'),
       factStat('⏳', fmtDuration(hl.avgEpisodeSec), 'durée moyenne / épisode'),
     ].join('');
     const almostBlock = hl.almostDone.length ? `
@@ -7387,6 +7473,12 @@
               ils apparaissent une fois tes séries analysées.</p>`}
             ${st.avgRating != null
               ? `<p class="crrav-avgnote">Note moyenne de ce que tu suis : <b>★ ${st.avgRating.toFixed(2)}</b></p>` : ''}
+          </section>
+
+          <section class="crrav-statcard">
+            <h3>Genres détaillés (tags AniList)</h3>
+            ${tagBars || `<p class="crrav-schedempty">Tags indisponibles pour le moment —
+              ils apparaissent une fois l'enrichissement AniList passé sur tes séries.</p>`}
           </section>
         </div>`)}
 
@@ -7959,9 +8051,9 @@
         </div>` : ''}
         ${list.length && !f.showIgnoredDiscover ? `
         <div class="crrav-siglegend">
-          ${profile.size ? `<span class="crrav-siglegend-chip crrav-sig-pref" title="Un de tes 3 tags/genres les plus représentés">🎯 tag/genre préféré</span>
+          ${profile.size ? `<span class="crrav-siglegend-chip crrav-sig-pref" title="Un de tes 3 tags/genres les plus représentés">🎯 genre préféré</span>
           <span class="crrav-siglegend-chip crrav-sig-aff" title="Colle à tes tags/genres les plus représentés">💚 dans tes goûts</span>` : ''}
-          <span class="crrav-siglegend-chip crrav-sig-rated" title="Note bien au-dessus du minimum">🏆 très bien notée</span>
+          <span class="crrav-siglegend-chip crrav-sig-rated" title="Note bien au-dessus du minimum">🏆 bien notée</span>
         </div>` : ''}
         ${D.warning ? `<p class="crrav-warn">${escapeHtml(D.warning)}</p>` : ''}
         <div class="crrav-stats">
@@ -9429,9 +9521,7 @@
       <div class="crrav-activity-body">
         <div class="crrav-activity-toprow">
           <span class="crrav-activity-label">${escapeHtml(it.label)}</span>
-          <span class="crrav-activity-eta">${
-            it.done ? 'terminé' : it.eta ? `⏱ ${it.eta} restantes`
-              : it.pct != null ? `${it.pct}%` : ''}</span>
+          <span class="crrav-activity-eta">${it.done ? 'terminé' : ''}</span>
         </div>
         <div class="crrav-activity-bar${it.pct == null && !it.done ? ' indeterminate' : ''}">
           <i style="width:${it.done ? 100 : (it.pct ?? 0)}%"></i>
