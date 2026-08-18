@@ -13,8 +13,8 @@
 // @grant        GM.xmlHttpRequest
 // @connect      anilist.co
 // @connect      graphql.anilist.co
-// @updateURL    https://gist.githubusercontent.com/GeoffreyOfficial/7a01fea8605a49a32a0a2537dfeb1ed1/raw
-// @downloadURL  https://gist.githubusercontent.com/GeoffreyOfficial/7a01fea8605a49a32a0a2537dfeb1ed1/raw
+// @updateURL    https://raw.githubusercontent.com/GeoffreyOfficial/Crunchy/refs/heads/main/script.js
+// @downloadURL  https://raw.githubusercontent.com/GeoffreyOfficial/Crunchy/refs/heads/main/script.js
 // @supportURL   https://gist.github.com/GeoffreyOfficial/7a01fea8605a49a32a0a2537dfeb1ed1
 // ==/UserScript==
 
