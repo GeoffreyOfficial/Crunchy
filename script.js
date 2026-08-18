@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      2.165.0
+// @version      2.168.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '2.165.0';
+  const SCRIPT_VERSION = '2.168.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -68,11 +68,11 @@
     // toute carte affichée (déjà filtrée par discoverMinRating). Les deux seuils sont
     // désormais stables quel que soit le réglage du filtre d'entrée.
     discoverWellRatedThreshold: 4.5,
-    discoverSuperRatedThreshold: 4.7,
+    discoverSuperRatedThreshold: 4.8,
     // Bonus de score ajoutés quand la note franchit ces seuils (voir discoverSignals).
     // Avant, +0.5 fixe et invisible dans le code — désormais réglable au même titre que
     // les seuils eux-mêmes, pour que le poids de la note dans le score soit ajustable.
-    discoverWellRatedBonus: 0.5,
+    discoverWellRatedBonus: 0.3,
     discoverSuperRatedBonus: 0.5,
     // Seuils du score « pépite » (voir discoverSignals : légendaire ≥ ce seuil, notable ≥
     // l'autre). Avant, légendaire ≥3/notable ≥2 exigeaient quasi systématiquement un goût
@@ -84,23 +84,21 @@
     // cosinus tasteScore vit désormais dans un espace de tags bien plus large et épars que
     // les ~20 genres d'avant, donc un « très bon goût » plafonne naturellement plus bas
     // (cosinus rarement > 0.5-0.6 même sur un match solide, contre 0.8-0.9 en genres).
-    // (fix) Réabaissés une dernière fois d'après un scan réel de 280 candidats notés :
-    // score max atteint 2.20 (le PLAFOND théorique ~4.3 n'est jamais approché), moyenne 0.07,
-    // médiane 0.12, top 10 % à 1.47, top 25 % à 0.60. À 1.4/0.8, légendaire était calé au
-    // ~90e centile et notable au ~80e : sur un pool déjà fortement pré-filtré (note ≥4.5,
-    // jamais vu, ≤3 saisons) et parfois amputé de l'enrichissement AniList (cooldown), le
-    // quota de pépites n'était quasi jamais atteint (« il ne trouve rien »). Nouveaux seuils
-    // ancrés sur cette distribution : légendaire 1.0 ≈ top ~18 % (≈50 candidats sur 280,
-    // ~3× la cible de 15, robuste même quand un scan filtre plus dur), notable 0.5 ≈ top ~28 %.
-    // Une migration ponctuelle (voir applySettings) réaligne les réglages restés sur l'ancien
-    // défaut sans jamais écraser une valeur que tu aurais toi-même personnalisée.
-    discoverLegendaryScore: 1.0,
-    discoverNotableScore: 0.5,
+    // (fix) Réabaissés une fois d'après un scan réel de 280 candidats notés (score max 2.20,
+    // médiane 0.12, top 10 % à 1.47) : à 1.4/0.8 le quota n'était quasi jamais atteint. Après
+    // recalibrage complet du scoring et essais côté utilisateur, valeurs adoptées comme défaut :
+    // légendaire 1.5, notable 1.0 (préférence assumée pour un ruban « légendaire » plus rare et
+    // sélectif, une fois les bonus note/goût réglés). Ces défauts ne s'appliquent qu'aux
+    // installations neuves et au bouton « Valeurs par défaut » : un réglage sauvegardé prime
+    // toujours (voir applySettings). Le rapport « Pourquoi seulement X » (section 2ter) donne,
+    // à partir de la distribution réelle de chaque scan, le seuil exact pour viser N pépites.
+    discoverLegendaryScore: 1.5,
+    discoverNotableScore: 1.0,
     // Poids du GOÛT NET (tasteScore, -1..1) dans le score final : score du goût = taste ×
-    // ce multiplicateur. Avant, ×2.5 fixe et invisible dans le code.
-    // (fix) Remonté à 3 pour redonner du poids au goût net dans la nouvelle échelle, plus
-    // basse, du cosinus sur tags détaillés (voir note ci-dessus).
-    discoverTasteWeight: 3,
+    // ce multiplicateur.
+    // (fix) Valeur adoptée comme défaut d'après tes essais : 2.5 — le goût pèse un peu moins,
+    // laissant relativement plus de place aux bonus de note/genre dans le score final.
+    discoverTasteWeight: 2.5,
     // (fix) Point de bascule du cosinus tasteScore : le cosinus est converti en goût net
     // (-1..1) en comparant cos à CE seuil, PAS à 0.5 comme avant. Diagnostic sur un scan de
     // 241 candidats : score moyen -0.40, médiane -0.31, alors que légendaire/notable étaient
@@ -108,21 +106,23 @@
     // que le cosinus atteint réellement dans l'espace de tags AniList (large et épars, cf.
     // note sur discoverLegendaryScore) : même une candidate solidement dans le goût plafonne
     // en pratique autour de 0.5-0.6, jamais près de 1. Résultat : la quasi-totalité des
-    // candidats, y compris les bons, tombait du mauvais côté du zéro. Recalibré à 0.35, la
+    // candidats, y compris les bons, tombait du mauvais côté du zéro. Recalibré à 0.3 (défaut
+    // adopté d'après tes essais), la
     // valeur de cosinus effectivement observée comme « moyenne » sur de vrais scans — un
     // candidat moyen obtient désormais un goût net proche de 0 (au lieu de nettement négatif),
     // et le haut du panier (cos ≈ 0.6-0.7) atteint un goût net de 0.4 à 0.55, suffisant pour
     // franchir notable/légendaire avec les bonus. Formule dans tasteScore : au-dessus du seuil,
     // (cos-seuil)/(1-seuil) ; en-dessous, (cos-seuil)/seuil (mêmes bornes -1..1 aux extrêmes).
-    discoverTasteNeutralCos: 0.35,
+    discoverTasteNeutralCos: 0.3,
     // Seuil de goût net (tasteScore, -1..1) à partir duquel le badge 💚 « dans tes goûts »
-    // s'affiche. Avant, fixé à 0.4 et invisible dans le code.
-    // (fix) Abaissé à 0.25 pour la même raison (échelle de cosinus plus basse sur tags).
-    discoverGoodTasteThreshold: 0.25,
+    // s'affiche. N'affecte QUE le badge, pas le score.
+    // (fix) Réglé à 0.4 (défaut adopté d'après tes essais).
+    discoverGoodTasteThreshold: 0.4,
     // Bonus de score ajouté quand la série contient un de tes 3 tags/genres les plus
     // représentés (badge 🎯) ET que le goût global reste positif. Avant, 🎯 était un badge
     // PUREMENT informatif, sans aucun effet sur le score « pépite ».
-    discoverPrefGenreBonus: 0.3,
+    // (fix) Défaut adopté d'après tes essais : 0.7.
+    discoverPrefGenreBonus: 0.7,
     // Pondération du profil de goût (voir buildTasteProfile) entre volume d'écoute brut
     // (nombre d'épisodes vus, 0 = comportement historique) et taux de complétion (part de
     // la série effectivement finie, 1 = seule l'adhésion compte). Une série de 100 épisodes
@@ -573,21 +573,6 @@
     Object.assign(CFG, CFG_DEFAULTS);
   }
   applySettings();
-
-  // (migration ponctuelle) Recalibrage des seuils « pépite ». Un diagnostic sur un scan réel
-  // (280 candidats : max 2.20, médiane 0.12, top 10 % à 1.47) a montré que légendaire ≥1.4 /
-  // notable ≥0.8 était trop haut — le quota de pépites n'était quasi jamais atteint. Nouveaux
-  // défauts 1.0 / 0.5. On ne réécrit une valeur SAUVEGARDÉE que si elle est restée sur
-  // l'ANCIEN défaut (à ε près) : un seuil que tu as volontairement choisi est préservé. Le
-  // drapeau `scoreCalib2` garantit un passage unique, pour ne pas re-forcer si tu remets 1.4.
-  if (!APP_STATE.scoreCalib2) {
-    const s = APP_STATE.settings || (APP_STATE.settings = {});
-    const near = (a, b) => typeof a === 'number' && Math.abs(a - b) < 1e-6;
-    if (near(s.discoverLegendaryScore, 1.4)) { s.discoverLegendaryScore = 1.0; CFG.discoverLegendaryScore = 1.0; }
-    if (near(s.discoverNotableScore, 0.8)) { s.discoverNotableScore = 0.5; CFG.discoverNotableScore = 0.5; }
-    APP_STATE.scoreCalib2 = true;
-    persistState(APP_STATE);
-  }
 
   // ─── Séries ignorées (masquées sans être marquées vues) ─────
   // Table id → { titre, source }. La source ('watchlist' ou 'discover') distingue
@@ -3646,10 +3631,50 @@
       legendaryScore: `« Score minimum — légendaire » à BAISSER (actuellement ${CFG.discoverLegendaryScore}) — ou « Poids du goût dans le score final » à monter (Réglages → Découverte)`,
     };
     const stopTxt = STOP[stopReason] || '';
-    const verdictHtml = (stopTxt || topReason) ? `
+
+    // (fix) Analyse SCORING dédiée — la demande répétée : « quel PARAMÈTRE du scoring bloque ».
+    // Distincte du frein de FILTRE (note/genre/saisons, en amont) : ici on ne regarde QUE les
+    // candidats qui ont atteint le calcul de score, et on traduit la distribution réelle en
+    // consigne actionnable — « pour K pépites, seuil ≤ V » — plus l'autre levier (poids du goût).
+    let scoringDiagHtml = '';
+    let scoringVerdict = '';
+    if (legendary && scoreSamples && scoreSamples.length) {
+      const N = scoreSamples.length;
+      const L = CFG.discoverLegendaryScore;
+      const sorted = [...scoreSamples].sort((a, b) => b - a);   // décroissant
+      const countAtLeast = (t) => { let c = 0; for (const s of sorted) { if (s >= t) c++; else break; } return c; };
+      const nAtL = countAtLeast(L);
+      const need = Math.min(target, N);
+      const vForTarget = sorted[need - 1];        // seuil à ne pas dépasser pour inclure `need`
+      const ladder = [5, 10, 15, 20, 30, 50, 75, 100].filter((k) => k <= N);
+      if (target <= N && !ladder.includes(target)) ladder.push(target);
+      ladder.sort((a, b) => a - b);
+      const rows2 = ladder.map((k) => {
+        const v = sorted[k - 1];
+        const isT = k === target;
+        return `<tr style="${isT ? 'background:rgba(244,117,33,.18)' : ''}">
+          <td style="padding:3px 10px">${k}${isT ? ' <b>(ta cible)</b>' : ''}</td>
+          <td style="padding:3px 10px;text-align:right"><b>${v.toFixed(2)}</b></td></tr>`;
+      }).join('');
+      scoringVerdict = `🎯 <b>Côté scoring :</b> au seuil actuel <b>${L.toFixed(1)}</b>, seulement <b>${nAtL}/${N}</b> des candidats notés passent légendaires.${need <= N ? ` Pour tes <b>${target}</b>, abaisse « Score minimum — légendaire » à <b>${vForTarget.toFixed(2)}</b> (voir 2ter).` : ` Ce scan n'a produit que ${N} candidat${N > 1 ? 's' : ''} notés — la cible de ${target} passe d'abord par assouplir les filtres en amont.`}`;
+      scoringDiagHtml = `
+        <p style="margin:10px 0 4px"><b>2ter. Le scoring, paramètre par paramètre</b> — quel réglage change combien de pépites</p>
+        <p style="margin:0 0 6px">Parmi les <b>${N}</b> candidats qui atteignent le calcul de score, <b>${nAtL}</b> passe${nAtL > 1 ? 'nt' : ''} le seuil légendaire actuel (<b>${L.toFixed(1)}</b>). Ce nombre est décidé par <b>« Score minimum — légendaire »</b> seul — les filtres note/genre/saisons agissent AVANT et n'entrent pas ici.</p>
+        ${need <= N
+          ? `<p style="margin:0 0 6px">➡️ <b>Réglage direct :</b> pour obtenir <b>${target}</b> pépites, abaisse « Score minimum — légendaire » à <b>${vForTarget.toFixed(2)}</b> (le ${target}ᵉ meilleur score de ce scan). Rien d'autre à toucher.</p>`
+          : `<p style="margin:0 0 6px">➡️ Même seuil à 0, ce scan n'a produit que <b>${N}</b> candidat${N > 1 ? 's' : ''} notés : pour viser ${target}, il faut d'abord élargir les filtres en amont (frein n°1 ci-dessus).</p>`}
+        <table style="border-collapse:collapse;margin:2px 0 6px;font-size:.92em;border:1px solid rgba(255,255,255,.12);border-radius:6px">
+          <thead><tr style="opacity:.7"><th style="text-align:left;padding:3px 10px">Pépites voulues</th><th style="text-align:right;padding:3px 10px">Seuil « légendaire » à ne pas dépasser</th></tr></thead>
+          <tbody>${rows2}</tbody>
+        </table>
+        <p style="margin:0 0 10px;opacity:.85"><b>Autre levier</b> (indirect) : monter « Poids du goût dans le score final » (actuellement <b>${CFG.discoverTasteWeight}</b>) étire tous les scores proportionnellement au goût net — utile si le max atteint (<b>${scoreStats.max.toFixed(2)}</b>) frôle à peine le seuil. Mais ça ne remonte pas un goût net négatif : une série hors de tes goûts le reste. Les bonus 🎯/🏆/✨ ne déplacent, eux, que les séries qui les déclenchent.</p>`;
+    }
+
+    const verdictHtml = (stopTxt || topReason || scoringVerdict) ? `
       <div style="background:rgba(244,117,33,.12);border:1px solid rgba(244,117,33,.5);border-radius:10px;padding:11px 13px;margin:0 0 14px">
-        ${stopTxt ? `<p style="margin:0 0 ${topReason ? '7px' : '0'}"><b>⚡ En bref :</b> ${stopTxt}</p>` : ''}
-        ${topReason ? `<p style="margin:0"><b>Frein n°1 :</b> ${escapeHtml(REASON_LABELS[topReason] || topReason)} — <b>${pct(rows[0][1])}%</b> des candidats écartés pour ça.<br><b>→ À changer en priorité :</b> ${PARAM_FIX[topReason]}.</p>` : ''}
+        ${stopTxt ? `<p style="margin:0 0 ${(topReason || scoringVerdict) ? '7px' : '0'}"><b>⚡ En bref :</b> ${stopTxt}</p>` : ''}
+        ${topReason ? `<p style="margin:0 0 ${scoringVerdict ? '7px' : '0'}"><b>Frein n°1 (filtre, en amont) :</b> ${escapeHtml(REASON_LABELS[topReason] || topReason)} — <b>${pct(rows[0][1])}%</b> des candidats écartés pour ça.<br><b>→ À changer en priorité :</b> ${PARAM_FIX[topReason]}.</p>` : ''}
+        ${scoringVerdict ? `<p style="margin:0">${scoringVerdict}</p>` : ''}
       </div>` : '';
 
     return `
@@ -3688,6 +3713,7 @@
           <li>La médiane (50 %) était à <b>${scoreStats.top50.toFixed(2)}</b></li>
         </ul>
         <p style="margin:0 0 10px;opacity:.85">Pour référence : notable ≥ <b>${CFG.discoverNotableScore}</b>, légendaire ≥ <b>${CFG.discoverLegendaryScore}</b>. Si le score max ci-dessus reste nettement sous ce seuil sur plusieurs scans, c'est le signe le plus fiable que le seuil est trop haut pour ton profil de goût actuel.</p>
+        ${scoringDiagHtml}
         ` : ''}
 
         <p style="margin:10px 0 4px"><b>3. Filtres actifs en ce moment</b></p>
