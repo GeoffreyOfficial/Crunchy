@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      2.153.0
+// @version      2.155.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '2.153.0';
+  const SCRIPT_VERSION = '2.155.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -63,6 +63,11 @@
     // désormais stables quel que soit le réglage du filtre d'entrée.
     discoverWellRatedThreshold: 4.5,
     discoverSuperRatedThreshold: 4.7,
+    // Bonus de score ajoutés quand la note franchit ces seuils (voir discoverSignals).
+    // Avant, +0.5 fixe et invisible dans le code — désormais réglable au même titre que
+    // les seuils eux-mêmes, pour que le poids de la note dans le score soit ajustable.
+    discoverWellRatedBonus: 0.5,
+    discoverSuperRatedBonus: 0.5,
     // Seuils du score « pépite » (voir discoverSignals : légendaire ≥ ce seuil, notable ≥
     // l'autre). Avant, légendaire ≥3/notable ≥2 exigeaient quasi systématiquement un goût
     // proche du match parfait CUMULÉ avec 2 à 3 bonus (note + popularité) — combinaison rare
@@ -71,6 +76,24 @@
     // ou qu'un bon goût + quelques bonus y arrive, sans exiger la totalité des signaux à la fois.
     discoverLegendaryScore: 2.2,
     discoverNotableScore: 1.3,
+    // Poids du GOÛT NET (tasteScore, -1..1) dans le score final : score du goût = taste ×
+    // ce multiplicateur. Avant, ×2.5 fixe et invisible dans le code.
+    discoverTasteWeight: 2.5,
+    // Poids d'un genre AIMÉ dans la moyenne du goût (voir tasteScore) — multiplie la
+    // contribution positive de chaque genre matché, AVANT moyenne avec les malus. Avant,
+    // fixé à 1 (contribution brute = ta part d'écoute de ce genre, 0 à 1) et invisible dans
+    // le code : impossible de faire peser davantage les genres que tu regardes vraiment
+    // beaucoup par rapport aux malus des genres jamais regardés. C'est le pendant « positif »
+    // de discoverMissPenalty ci-dessous.
+    discoverMatchBonus: 1,
+    // Seuil de goût net (tasteScore, -1..1) à partir duquel le badge 💚 « dans tes goûts »
+    // s'affiche. Avant, fixé à 0.4 et invisible dans le code.
+    discoverGoodTasteThreshold: 0.4,
+    // Bonus de score ajouté quand la série contient un de tes 3 genres les plus regardés
+    // (badge 🎯) ET que le goût global reste positif. Avant, 🎯 était un badge PUREMENT
+    // informatif, sans aucun effet sur le score « pépite » — impossible de faire peser un
+    // genre préféré dans le calcul, même en poussant discoverMatchBonus au maximum.
+    discoverPrefGenreBonus: 0.3,
     // Score de goût (voir tasteScore) : points retirés par genre jamais regardé, ET
     // nombre MAX de genres jamais regardés réellement comptés contre une série. Sans ce
     // plafond, une série à beaucoup de genres (ex. 6) accumule les malus un par un et son
@@ -371,8 +394,10 @@
   const SETTINGS_SUBGROUPS = {
     discoverFilters: { icon: '🔍', label: 'Filtres de suggestions', hue: '244,117,33' },
     discoverDice: { icon: '🎲', label: 'Dé légendaire — profondeur & quantité', hue: '255,209,102' },
-    discoverScoring: { icon: '✨', label: 'Score légendaire & notable', hue: '255,179,71' },
-    discoverLists: { icon: '➕', label: 'Ajout aux listes', hue: '77,222,128' },
+    discoverScoringTaste: { icon: '💚', label: 'Goût — poids des genres', hue: '77,222,128' },
+    discoverScoringRating: { icon: '🏆', label: 'Note — bonus', hue: '255,209,102' },
+    discoverScoringSeuils: { icon: '✨', label: 'Seuils légendaire & notable', hue: '255,179,71' },
+    discoverLists: { icon: '➕', label: 'Ajout aux listes', hue: '93,180,255' },
   };
 
   const SETTINGS_SCHEMA = [
@@ -441,24 +466,42 @@
     { key: 'legendaryMaxPages', label: 'Profondeur de scan', type: 'int', min: 12, max: 100, unit: 'pages',
       help: 'Jusqu’où le dé légendaire scanne le classement popularité pour dénicher ses pépites. Plus haut = plus long, mais plus de chances de trouver assez de légendaires.',
       impact: 'discover', sub: 'discoverDice' },
+    { key: 'discoverMatchBonus', label: 'Poids d’un genre aimé', type: 'float', min: 0, max: 3, step: 0.1,
+      help: 'Multiplie la contribution positive de chaque genre que tu regardes vraiment (ta part d’écoute de ce genre). Monte-le pour faire peser davantage tes genres aimés face aux malus ci-dessous. 1 = neutre (pas de sur-poids).',
+      impact: 'discover', sub: 'discoverScoringTaste' },
     { key: 'discoverMissPenalty', label: 'Malus par genre jamais regardé', type: 'float', min: 0, max: 1, step: 0.05,
       help: 'Points retirés du score de goût pour chaque genre d’une série que tu ne regardes jamais. Plus bas = plus tolérant, plus facile d’obtenir « légendaire ». 0 = les genres jamais regardés n’handicapent plus du tout.',
-      impact: 'discover', sub: 'discoverScoring' },
+      impact: 'discover', sub: 'discoverScoringTaste' },
     { key: 'discoverMaxPenalizedGenres', label: 'Genres jamais regardés max pénalisés', type: 'int', min: 0, max: 10,
       help: 'Au-delà de ce nombre, les genres jamais regardés d’une série ne comptent plus contre elle. Évite qu’une série à beaucoup de genres (ex. 6) soit écrasée juste parce qu’elle en liste beaucoup, même si 2-3 correspondent parfaitement à tes goûts. Monte-le pour redevenir plus strict, baisse-le (voire 0) pour être très tolérant.',
-      impact: 'discover', sub: 'discoverScoring' },
+      impact: 'discover', sub: 'discoverScoringTaste' },
+    { key: 'discoverTasteWeight', label: 'Poids du goût dans le score final', type: 'float', min: 0.5, max: 5, step: 0.1,
+      help: 'Multiplie le goût net (-1 à +1, résultat des deux réglages ci-dessus) pour obtenir sa part dans le score pépite. Plus haut = le goût domine largement le score ; plus bas = les bonus de note pèsent relativement plus.',
+      impact: 'discover', sub: 'discoverScoringTaste' },
+    { key: 'discoverGoodTasteThreshold', label: 'Seuil du badge 💚 « dans tes goûts »', type: 'float', min: -1, max: 1, step: 0.05,
+      help: 'Goût net (-1 à +1) à partir duquel le badge 💚 s’affiche. N’affecte que le badge, pas le score lui-même.',
+      impact: 'discover', sub: 'discoverScoringTaste' },
+    { key: 'discoverPrefGenreBonus', label: 'Bonus « genre préféré » 🎯', type: 'float', min: 0, max: 2, step: 0.1,
+      help: 'Points ajoutés directement au score quand la série contient un de tes 3 genres les plus regardés ET que le goût global reste positif. 0 = 🎯 reste un badge purement informatif, sans effet sur le score.',
+      impact: 'discover', sub: 'discoverScoringTaste' },
+    { key: 'discoverWellRatedThreshold', label: 'Note requise 🏆', type: 'float', min: 3, max: 5, step: 0.1,
+      help: 'Note AniList à partir de laquelle le badge 🏆 s’affiche et le bonus ci-dessous s’applique.',
+      impact: 'discover', sub: 'discoverScoringRating' },
+    { key: 'discoverWellRatedBonus', label: 'Bonus « très bien notée » 🏆', type: 'float', min: 0, max: 2, step: 0.1,
+      help: 'Points ajoutés au score quand la note dépasse le seuil ci-dessus.',
+      impact: 'discover', sub: 'discoverScoringRating' },
+    { key: 'discoverSuperRatedThreshold', label: 'Note requise ✨ (palier supplémentaire)', type: 'float', min: 3, max: 5, step: 0.1,
+      help: 'Note AniList à partir de laquelle un second bonus s’ajoute (cumulable avec le bonus 🏆 ci-dessus).',
+      impact: 'discover', sub: 'discoverScoringRating' },
+    { key: 'discoverSuperRatedBonus', label: 'Bonus « note exceptionnelle » ✨', type: 'float', min: 0, max: 2, step: 0.1,
+      help: 'Points ajoutés au score quand la note dépasse le seuil ✨ ci-dessus, en plus du bonus 🏆.',
+      impact: 'discover', sub: 'discoverScoringRating' },
     { key: 'discoverLegendaryScore', label: 'Score minimum — légendaire', type: 'float', min: 0.5, max: 5, step: 0.1,
-      help: 'Score « pépite » à atteindre pour décrocher le ruban ✨ Légendaire. Composé du goût (jusqu’à ±2.5) + bonus note (jusqu’à +1). Baisse-le pour en trouver plus souvent.',
-      impact: 'discover', sub: 'discoverScoring' },
+      help: 'Score « pépite » à atteindre pour décrocher le ruban ✨ Légendaire. Voir le schéma ci-dessus pour situer ce seuil dans l’intervalle possible. Baisse-le pour en trouver plus souvent.',
+      impact: 'discover', sub: 'discoverScoringSeuils' },
     { key: 'discoverNotableScore', label: 'Score minimum — notable', type: 'float', min: 0.5, max: 5, step: 0.1,
       help: 'Score « pépite » à partir duquel une série est marquée « notable » (un cran sous légendaire). Doit rester inférieur au score légendaire ci-dessus.',
-      impact: 'discover', sub: 'discoverScoring' },
-    { key: 'discoverWellRatedThreshold', label: 'Note « très bien notée » 🏆', type: 'float', min: 3, max: 5, step: 0.1,
-      help: 'Note AniList à partir de laquelle le badge 🏆 s’affiche, et qui donne un bonus de +0.5 au score pépite.',
-      impact: 'discover', sub: 'discoverScoring' },
-    { key: 'discoverSuperRatedThreshold', label: 'Note « exceptionnelle » (bonus supplémentaire)', type: 'float', min: 3, max: 5, step: 0.1,
-      help: 'Note AniList à partir de laquelle un second bonus de +0.5 s’ajoute au score pépite (cumulable avec le bonus « très bien notée » ci-dessus).',
-      impact: 'discover', sub: 'discoverScoring' },
+      impact: 'discover', sub: 'discoverScoringSeuils' },
     { key: 'defaultListId', label: 'Liste de destination par défaut (bouton + dans Découverte)',
       type: 'listselect',
       help: 'Tes Crunchylists sont détectées automatiquement (watchlist exclue). Sans choix ici, la première liste détectée est utilisée.',
@@ -3018,7 +3061,7 @@
     fromSnapshot: false,
     filters: loadFilters(),
     tab: 'suivi',
-    discover: { series: [], loading: false, error: null, warning: null, lastSync: null, excludedIds: new Set(), searchedFilters: undefined, similarTo: null, legendaryHunt: false, cancelRequested: false },
+    discover: { series: [], loading: false, error: null, warning: null, shortfallDetail: null, lastSync: null, excludedIds: new Set(), searchedFilters: undefined, similarTo: null, legendaryHunt: false, cancelRequested: false },
     orphan: { series: [], loading: false, error: null, warning: null, lastSync: null },
     newPremieres: { series: [], loading: false, error: null, lastSync: null, debug: null },
     // Crunchylists détectées (id + titre), pour le bouton d'ajout depuis Découverte.
@@ -3390,6 +3433,97 @@
     return `in:${norm(f.discoverCatsIn)}|mode:${f.discoverCatsInMode || 'any'}|ex:${norm(f.discoverCatsEx)}`;
   }
 
+  // Rapport détaillé affiché sous les résultats de Découverte quand le nombre de pépites
+  // VISÉ (CFG.discoverTarget, ou CFG.legendaryTarget en mode 🎲) n'a pas été atteint. But :
+  // rendre visible TOUT le pipeline (étapes, filtres, scoring) plutôt qu'un simple message
+  // d'échec, pour que tu puisses ajuster tes réglages en connaissance de cause plutôt qu'à
+  // tâtons. Conseils générés dynamiquement à partir de la cause de rejet la plus fréquente.
+  function buildDiscoverShortfallReport(ctx) {
+    const { target, foundCount, legendary, pagesScanned, maxPages, candidatesSeenTotal, rej } = ctx;
+    const f = STATE.filters;
+    const REASON_LABELS = {
+      known: 'Déjà connue (une de tes listes, ton historique de visionnage, ignorée à la main, ou déjà proposée lors d’une relance précédente)',
+      genrePreBrowse: 'Genre écarté (vérification rapide, avant toute requête)',
+      seasonsPreBrowse: 'Trop de saisons (vérification rapide, avant toute requête)',
+      seasons: `Trop de saisons (> ${CFG.discoverMaxSeasons}, après vérification précise)`,
+      genre: 'Genre exclu ou hors du filtre « garder uniquement » (après fiche complète)',
+      rating: `Note absente ou sous le minimum (${CFG.discoverMinRating}★)`,
+      progressPlayhead: 'Déjà commencée d’après ta progression réelle (filet de sécurité)',
+      legendaryScore: `Score « pépite » sous le seuil légendaire (${CFG.discoverLegendaryScore})`,
+    };
+    const rows = Object.entries(rej)
+      .filter(([k, n]) => n > 0 && (legendary || k !== 'legendaryScore'))
+      .sort((a, b) => b[1] - a[1]);
+    const totalRejected = rows.reduce((a, [, n]) => a + n, 0);
+    const pct = (n) => (candidatesSeenTotal ? Math.round((n / candidatesSeenTotal) * 100) : 0);
+    const topReason = rows[0] ? rows[0][0] : null;
+
+    const activeFilters = [
+      `Note minimale : <b>${CFG.discoverMinRating}★</b>`,
+      `Saisons maximum : <b>${CFG.discoverMaxSeasons}</b>`,
+      `Genres exclus par défaut : ${CFG.discoverExcludeCategories.length ? '<b>' + CFG.discoverExcludeCategories.map(escapeHtml).join(', ') + '</b>' : '<i>aucun</i>'}`,
+      f.discoverCatsIn.length ? `Genres gardés exclusivement (${f.discoverCatsInMode === 'all' ? 'TOUS requis' : 'au moins un'}) : <b>${f.discoverCatsIn.map(escapeHtml).join(', ')}</b>` : null,
+      f.discoverCatsEx.length ? `Genres exclus en plus (manuel) : <b>${f.discoverCatsEx.map(escapeHtml).join(', ')}</b>` : null,
+      `Profondeur de scan : <b>${maxPages}</b> pages max (${CFG.discoverPageSize} séries/page)`,
+    ].filter(Boolean);
+
+    // Conseils ciblés sur la cause de rejet dominante — chaque conseil pointe vers le
+    // réglage exact à modifier dans Réglages → Découverte.
+    const ADVICE = {
+      known: "La plupart des candidats croisés sont des séries que tu connais déjà (listes, historique, ignorées). C'est sain — essaie « 🔄 30 autres pépites » ou « 🎲 Dé légendaire » pour puiser plus profond dans le classement popularité.",
+      genrePreBrowse: "Beaucoup de séries sont écartées par le filtre de genre. Vérifie tes chips « garder uniquement »/« exclure » sous les résultats, ou élargis « Genres exclus par défaut » dans Réglages → Découverte.",
+      seasonsPreBrowse: `Beaucoup de séries dépassent ${CFG.discoverMaxSeasons} saison${CFG.discoverMaxSeasons > 1 ? 's' : ''}. Monte « Saisons maximum » dans Réglages → Découverte si tu es prêt·e à rattraper des séries plus longues.`,
+      seasons: `Beaucoup de séries dépassent ${CFG.discoverMaxSeasons} saison${CFG.discoverMaxSeasons > 1 ? 's' : ''}. Monte « Saisons maximum » dans Réglages → Découverte.`,
+      genre: "Le filtre de genre (exclusions par défaut ou chips « garder uniquement ») écarte la majorité des candidats. Assouplis-le dans Réglages → Découverte ou dans les chips sous les résultats.",
+      rating: `La note minimale (${CFG.discoverMinRating}★) élimine la majorité des candidats. Baisse « Note minimale » dans Réglages → Découverte.`,
+      progressPlayhead: "Beaucoup de séries sont déjà entamées d'après ta progression réelle — rien à régler ici, c'est le comportement voulu.",
+      legendaryScore: `Beaucoup de candidats passent les filtres mais restent sous le score légendaire (${CFG.discoverLegendaryScore}). Baisse « Score minimum — légendaire », monte « Poids du goût dans le score final », ou baisse « Malus par genre jamais regardé » dans Réglages → Découverte.`,
+    };
+    const mainAdvice = topReason ? ADVICE[topReason] : "Élargis un des filtres ci-dessous, ou relance plus tard : le classement popularité change en continu.";
+    const extraAdvice = [];
+    if (!legendary && maxPages <= CFG.discoverMaxPages) extraAdvice.push("Le scan s'arrête après un nombre de pages limité (garde-fou anti-attente) — relance ou essaie « 🎲 Dé légendaire » qui scanne beaucoup plus profond.");
+    if (target > 0 && foundCount === 0) extraAdvice.push("Zéro résultat : commence par assouplir le filtre le plus haut dans le tableau ci-dessus, c'est lui qui coûte le plus de candidats.");
+
+    return `
+      <div class="crrav-msg crrav-shortfall" style="text-align:left;background:rgba(244,117,33,.06);border:1px solid rgba(244,117,33,.35);border-radius:12px;padding:16px 18px;margin-top:14px">
+        <h3 style="margin:0 0 6px">🔎✨ Pourquoi seulement ${foundCount}/${target} pépite${target > 1 ? 's' : ''} ${legendary ? 'légendaire' + (target > 1 ? 's' : '') : ''} ?</h3>
+        <p style="margin:0 0 10px;opacity:.85">Détail complet du scan, des filtres et du scoring — pour ajuster tes réglages en connaissance de cause plutôt qu'à tâtons.</p>
+
+        <p style="margin:10px 0 4px"><b>1. Ce qui a été scanné</b></p>
+        <ul style="margin:0 0 10px;padding-left:20px">
+          <li>${pagesScanned} page${pagesScanned > 1 ? 's' : ''} sur ${maxPages} max scannée${pagesScanned > 1 ? 's' : ''} (${CFG.discoverPageSize} séries/page, triées par popularité)</li>
+          <li>${candidatesSeenTotal} candidat${candidatesSeenTotal > 1 ? 's' : ''} au total examiné${candidatesSeenTotal > 1 ? 's' : ''}</li>
+          <li><b>${foundCount}</b> retenu${foundCount > 1 ? 's' : ''} sur les <b>${target}</b> visé${target > 1 ? 's' : ''}</li>
+        </ul>
+
+        ${rows.length ? `
+        <p style="margin:10px 0 4px"><b>2. Pourquoi les candidats ont été écartés</b> (${totalRejected} rejet${totalRejected > 1 ? 's' : ''} au total)</p>
+        <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:10px">
+          ${rows.map(([k, n]) => `
+            <div style="display:flex;align-items:center;gap:8px;font-size:.92em">
+              <div style="flex:1;background:rgba(255,255,255,.08);border-radius:4px;overflow:hidden;height:8px">
+                <div style="width:${pct(n)}%;height:100%;background:#f47521"></div>
+              </div>
+              <span style="min-width:170px">${escapeHtml(REASON_LABELS[k] || k)}</span>
+              <b style="min-width:64px;text-align:right">${n} (${pct(n)}%)</b>
+            </div>`).join('')}
+        </div>` : ''}
+
+        <p style="margin:10px 0 4px"><b>3. Filtres actifs en ce moment</b></p>
+        <ul style="margin:0 0 10px;padding-left:20px">
+          ${activeFilters.map((l) => `<li>${l}</li>`).join('')}
+        </ul>
+
+        <p style="margin:10px 0 4px"><b>4. Comment le score « pépite » est calculé</b></p>
+        ${scoreFormulaSchema()}
+        <p style="margin:6px 0 10px;opacity:.85">Une série doit atteindre <b>${CFG.discoverNotableScore}</b> pour « notable » et <b>${CFG.discoverLegendaryScore}</b> pour « légendaire » ${legendary ? '(seul le score légendaire compte pour le quota en mode 🎲 Dé légendaire)' : '(informatif hors mode 🎲, n’écarte aucune série)'}.</p>
+
+        <p style="margin:10px 0 4px"><b>5. Conseil</b></p>
+        <p style="margin:0">${mainAdvice}</p>
+        ${extraAdvice.length ? `<ul style="margin:6px 0 0;padding-left:20px">${extraAdvice.map((a) => `<li>${a}</li>`).join('')}</ul>` : ''}
+      </div>`;
+  }
+
   async function loadDiscover(onProgress, opts) {
     const more = !!(opts && opts.more);
     // `force` : relance explicite (bouton « Actualiser » / « Relancer » / « 30 autres »).
@@ -3407,7 +3541,24 @@
     D.loading = true;
     D.error = null;
     D.warning = null;
+    D.shortfallDetail = null;
     D.cancelRequested = false;      // remis à zéro à chaque lancement (voir bouton Interrompre)
+    // Compteurs de diagnostic : pourquoi tel candidat n'est pas devenu une pépite affichée.
+    // Alimentent le rapport détaillé affiché sous les résultats quand le quota visé
+    // (CFG.discoverTarget / legendaryTarget) n'est pas atteint (voir buildShortfallReport).
+    const REJ = {
+      genrePreBrowse: 0,   // écarté avant toute requête (genre déjà connu dans le panel browse)
+      seasonsPreBrowse: 0, // écarté avant toute requête (nb saisons déjà connu dans le panel browse)
+      known: 0,            // déjà dans une liste, ta watchlist, ton historique de visionnage,
+                            // ignorée à la main, ou déjà proposée lors d'une relance précédente
+      seasons: 0,          // trop de saisons (après requête /seasons)
+      genre: 0,            // genre exclu / hors du filtre « garder uniquement » (après panel complet)
+      rating: 0,           // note absente ou sous le seuil minimum
+      progressPlayhead: 0, // progression réelle détectée via /playheads (filet de sécurité historique incomplet)
+      legendaryScore: 0,   // survit à tous les filtres mais score « pépite » sous le seuil légendaire
+    };
+    let candidatesSeenTotal = 0;
+    let pagesScanned = 0;
     D.legendaryHunt = legendary;
     // (relance) recherche « standard » : on repart d'un historique d'exclusion vierge.
     // recherche « 30 autres » / « encore des légendaires » : on garde le souvenir des
@@ -3488,20 +3639,25 @@
         if (!data.length) break;
         start += data.length;
 
+        pagesScanned = page + 1;
         const candidates = data
           .map((p) => p.panel || p)
           .filter((p) => {
             if (!p || !p.id) return false;
-            if (excluded.has(p.id) || seenCandidate.has(p.id)) return false;
+            if (excluded.has(p.id) || seenCandidate.has(p.id)) {
+              if (p && p.id && excluded.has(p.id)) REJ.known++;
+              return false;
+            }
+            candidatesSeenTotal++;
             // Pré-filtre de genre AVANT toute requête, MAIS seulement si le panel browse
             // porte les genres (souvent non). Le vrai filtre se fait plus bas, une fois le
             // panel complet récupéré — sinon « garder uniquement » écartait tout le monde ici.
-            if (browseRejectedByGenre(p)) return false;
+            if (browseRejectedByGenre(p)) { REJ.genrePreBrowse++; return false; }
             // Filtre GRATUIT : le nombre de saisons est déjà dans la réponse browse.
             // Avant, on dépensait une requête /seasons par candidat pour le découvrir,
             // puis on le jetait. C'était la cause des « plusieurs minutes ».
             const ns = panelSeasons(p);       // calculé une seule fois
-            if (ns != null && ns > CFG.discoverMaxSeasons) return false;
+            if (ns != null && ns > CFG.discoverMaxSeasons) { REJ.seasonsPreBrowse++; return false; }
             return true;
           });
         candidates.forEach((p) => seenCandidate.add(p.id));
@@ -3525,7 +3681,7 @@
             // 1. saisons : gratuit si le panel le donne, sinon 1 requête
             let seasons = panelSeasons(p);
             if (seasons == null) seasons = await getSeasonCount(p.id);
-            if (seasons == null || seasons > CFG.discoverMaxSeasons) return null;
+            if (seasons == null || seasons > CFG.discoverMaxSeasons) { REJ.seasons++; return null; }
             if (D.cancelRequested) return null;
 
             // 2. genres FIABLES : le panel browse ne porte pas toujours tenant_categories,
@@ -3543,14 +3699,14 @@
             // série croisée ailleurs — Suivi, Hors listes, un scan Découverte précédent) :
             // aucune requête, juste une lecture localStorage (voir mergeGenreLists).
             categories = mergeGenreLists(categories, readAnilistCached(p.id).genres);
-            if (categoriesRejectedByGenre(categories, null, null, STATE.filters.discoverCatsInMode === 'all')) return null;
+            if (categoriesRejectedByGenre(categories, null, null, STATE.filters.discoverCatsInMode === 'all')) { REJ.genre++; return null; }
             if (D.cancelRequested) return null;
 
             // 3. note : 1 requête, seulement pour les survivants (candidats jamais vus ⇒
             // jamais en cache : contrairement à Suivi/Hors listes, on ne peut pas se
             // contenter du cache ici, sous peine de rejeter systématiquement tout le monde).
             const rating = await getRating(p.id);
-            if (rating == null || rating < CFG.discoverMinRating) return null;
+            if (rating == null || rating < CFG.discoverMinRating) { REJ.rating++; return null; }
             if (D.cancelRequested) return null;
 
             // 4. épisodes + progression : le plus cher, réservé au dernier carré
@@ -3579,7 +3735,7 @@
                   }
                   return false;
                 });
-                if (started) return null;
+                if (started) { REJ.progressPlayhead++; return null; }
               }
             } catch (e) {
               // Une erreur ici laissait passer la série par défaut : on exclut par
@@ -3650,7 +3806,7 @@
             // quota. Une candidate qui a passé tous les filtres précédents mais n'est
             // « que » notable/pref est rejetée ici — c'est ELLE qui fait que le scan va
             // chercher plus loin.
-            if (legendary && !discoverSignals(candidate, tasteProfile).legendary) continue;
+            if (legendary && !discoverSignals(candidate, tasteProfile).legendary) { REJ.legendaryScore++; continue; }
             finalResults.push(candidate);
           }
           results.push(...finalResults);
@@ -3662,6 +3818,15 @@
 
       const found = matches.slice(0, target);
       found.forEach((s) => D.excludedIds.add(s.id));
+
+      // Rapport détaillé (voir buildDiscoverShortfallReport) : dès que le quota visé n'est
+      // pas atteint, peu importe la raison (interruption, relance à sec, dé légendaire à
+      // sec, ou simplement pas assez de survivants), on l'affiche sous les résultats.
+      const shortfallCtx = {
+        target, foundCount: found.length, legendary,
+        pagesScanned, maxPages, candidatesSeenTotal, rej: REJ,
+      };
+
       if (D.cancelRequested) {
         // Interrompu à la demande : on affiche ce qui a déjà été trouvé plutôt que rien.
         D.series = more ? [...D.series, ...found] : found;
@@ -3669,20 +3834,24 @@
         D.warning = found.length
           ? `Recherche interrompue — ${found.length} pépite${found.length > 1 ? 's' : ''} déjà ${found.length > 1 ? 'trouvées' : 'trouvée'} affichée${found.length > 1 ? 's' : ''}.`
           : "Recherche interrompue avant d'avoir trouvé une pépite.";
+        D.shortfallDetail = buildDiscoverShortfallReport(shortfallCtx);
         idle(() => fillMissingRatings(found));
       } else if (more && !found.length) {
         D.warning = legendary
           ? "Aucune autre pépite légendaire trouvée pour l'instant — essaie d'élargir tes genres, ou réessaie plus tard."
           : "Aucune autre pépite trouvée pour l'instant — le classement popularité n'a " +
             "pas assez changé. Réessaie plus tard.";
+        D.shortfallDetail = buildDiscoverShortfallReport(shortfallCtx);
       } else if (legendary && !found.length) {
         D.warning = "Aucune pépite légendaire trouvée dans les " + maxPages + " pages scannées. " +
           "Essaie d'élargir tes genres, ou relance le dé : le classement popularité bouge.";
         D.series = found;
         D.lastSync = new Date();
+        D.shortfallDetail = buildDiscoverShortfallReport(shortfallCtx);
       } else {
         D.series = found;
         D.lastSync = new Date();
+        if (found.length < target) D.shortfallDetail = buildDiscoverShortfallReport(shortfallCtx);
         idle(() => fillMissingRatings(found));
       }
     } catch (e) {
@@ -4879,14 +5048,20 @@
   // 6) était mécaniquement écrasée par ses genres non regardés même quand 2-3 genres
   // matchaient parfaitement — « légendaire » devenait quasi inatteignable dès qu'une série
   // listait beaucoup de genres, ce qui n'a rien à voir avec la qualité du match.
+  //
+  // (fix) CFG.discoverMatchBonus multiplie la contribution POSITIVE de chaque genre matché
+  // (pendant de CFG.discoverMissPenalty côté malus) — avant, ce poids était figé à 1 et
+  // invisible dans le code : impossible de faire peser davantage tes genres réellement
+  // regardés par rapport aux malus des genres jamais vus.
   function tasteScore(cats, profile) {
     if (!profile || !profile.max || !cats.length) return 0;
     const MISS_PENALTY = CFG.discoverMissPenalty;
+    const MATCH_BONUS = CFG.discoverMatchBonus ?? 1;
     const maxPenalized = Math.max(0, CFG.discoverMaxPenalizedGenres ?? cats.length);
     let sum = 0, denom = 0, missedCounted = 0;
     for (const c of cats) {
       const w = profile.weights[c];
-      if (w) { sum += w / profile.max; denom++; continue; }
+      if (w) { sum += (w / profile.max) * MATCH_BONUS; denom++; continue; }
       if (missedCounted >= maxPenalized) continue;   // genre en trop : ignoré, pas pénalisé
       sum -= MISS_PENALTY; denom++; missedCounted++;
     }
@@ -4909,67 +5084,93 @@
   // il faussait le score « pépite » (une candidate pouvait devenir notable/légendaire sur ce
   // seul critère, sans rapport avec le goût ou la note). Seuls le goût et la note comptent
   // désormais.
+  //
+  // (fix) TOUT le calcul est désormais réglable, positifs compris : avant, 🎯 (genre
+  // préféré) n'affectait le score nulle part (badge purement informatif), et le poids du
+  // goût (×2.5), le seuil 💚 (0.4) et les bonus de note (+0.5/+0.5) étaient des constantes
+  // invisibles dans le code — impossible de savoir « un genre aimé, ça donne combien ? »
+  // sans lire le source. Chaque levier vit maintenant dans CFG (Réglages → Découverte →
+  // ✨ Score légendaire & notable) et le schéma visuel (scoreFormulaSchema) se recalcule
+  // en direct dessus.
   function discoverSignals(s, profile) {
     const cats = s.categories || [];
     const isPref = !!(profile && profile.top.some((g) => cats.includes(g)));
     const taste = tasteScore(cats, profile);      // -1..1 : positif si aligné, négatif sinon
-    const goodTaste = taste >= 0.4;               // globalement bien dans tes goûts
+    const goodTaste = taste >= CFG.discoverGoodTasteThreshold;   // globalement bien dans tes goûts
     const wellRated = s.rating != null && s.rating >= CFG.discoverWellRatedThreshold;
     const superRated = s.rating != null && s.rating >= CFG.discoverSuperRatedThreshold;
+    const prefBoost = isPref && taste > 0;
 
     const badges = [];
     // 🎯 reste informatif (« contient un de tes genres préférés »), mais seulement si le
     // goût global n'est pas franchement négatif : sinon un simple genre aimé, noyé dans des
     // genres étrangers, arborerait 🎯 à tort (le cas sport/comédie/drame remonté).
-    if (isPref && taste > 0) badges.push(['🎯', 'Un de tes genres préférés']);
+    if (prefBoost) badges.push(['🎯', 'Un de tes genres préférés']);
     if (goodTaste) badges.push(['💚', 'Dans tes goûts']);
     if (wellRated) badges.push(['🏆', 'Très bien notée']);
 
     // Score « pépite ». Le goût NET pèse le plus, et il peut être NÉGATIF : un genre jamais
     // regardé fait baisser le score, pas seulement « ne l'augmente pas ». Un genre aimé ne
-    // suffit donc plus si le reste te correspond peu. La note (2 paliers) ajoute un bonus.
-    // Seuils : voir CFG.discoverLegendaryScore / discoverNotableScore.
-    let score = Math.max(-2.5, Math.min(2.5, taste * 2.5));   // goût : gros poids, positif ET négatif
-    // (clamp aligné sur le multiplicateur ×2.5 — avant, borné à ±2, un goût quasi parfait
-    // [taste > 0.8] perdait sa résolution et plafonnait comme un goût seulement « bon ».)
-    if (wellRated) score += 0.5;
-    if (superRated) score += 0.5;
+    // suffit donc plus si le reste te correspond peu. Genre préféré + note ajoutent des
+    // bonus configurables. Seuils : voir CFG.discoverLegendaryScore / discoverNotableScore.
+    const tw = CFG.discoverTasteWeight;
+    let score = Math.max(-tw, Math.min(tw, taste * tw));   // goût : gros poids, positif ET négatif
+    if (prefBoost) score += CFG.discoverPrefGenreBonus;
+    if (wellRated) score += CFG.discoverWellRatedBonus;
+    if (superRated) score += CFG.discoverSuperRatedBonus;
 
-    const lead = (isPref && taste > 0) ? 'pref' : goodTaste ? 'aff' : wellRated ? 'rated' : '';
+    const lead = prefBoost ? 'pref' : goodTaste ? 'aff' : wellRated ? 'rated' : '';
     const legendary = score >= CFG.discoverLegendaryScore;
     const notable = !legendary && score >= CFG.discoverNotableScore;
     return { badges, lead, legendary, notable, score };
   }
 
   // (32) Schéma horizontal du calcul du score « pépite », affiché en haut du sous-groupe
-  // ✨ Score légendaire & notable. Reflète les valeurs RÉELLEMENT configurées (bornes,
-  // seuils) plutôt qu'un exemple générique — sert de repère visuel immédiat pendant qu'on
-  // ajuste les curseurs juste en dessous.
-  // Composition (voir discoverSignals) : goût net (borné ±2.5, peut être négatif) puis
-  // deux bonus de note cumulables (+0.5 chacun) → intervalle total [-2.5 ; +3.5].
+  // ✨ Score légendaire & notable. Entièrement dynamique : chaque segment, chaque borne et
+  // chaque bulle « Notable »/« Légendaire » reflète les valeurs RÉELLEMENT configurées dans
+  // CFG — pas un exemple générique. Composition (voir discoverSignals) :
+  //   goût net (-1..1) × discoverTasteWeight   →   segment « taste », peut être négatif
+  //   + discoverPrefGenreBonus  (si 🎯 genre préféré)
+  //   + discoverWellRatedBonus  (si 🏆 très bien notée)
+  //   + discoverSuperRatedBonus (si ✨ note exceptionnelle, cumulable avec 🏆)
+  // Une note en bas rappelle aussi que le goût net lui-même dépend de discoverMatchBonus /
+  // discoverMissPenalty / discoverMaxPenalizedGenres — les leviers du bloc 💚 juste après.
   function scoreFormulaSchema() {
-    const min = -2.5, max = 3.5, span = max - min;
+    const tw = CFG.discoverTasteWeight;
+    const prefBonus = CFG.discoverPrefGenreBonus;
+    const rated1 = CFG.discoverWellRatedBonus;
+    const rated2 = CFG.discoverSuperRatedBonus;
+    const min = -tw, max = tw + prefBonus + rated1 + rated2;
+    const span = (max - min) || 1;
     const pct = (v) => Math.max(0, Math.min(100, ((v - min) / span) * 100));
     const notablePos = pct(CFG.discoverNotableScore);
     const legendaryPos = pct(CFG.discoverLegendaryScore);
     const zeroPos = pct(0);
+    const b0 = min, b1 = tw, b2 = tw + prefBonus, b3 = tw + prefBonus + rated1, b4 = max;
+    const fmt1 = (v) => (v >= 0 ? '+' : '') + v.toFixed(1);
+    const matchBonus = CFG.discoverMatchBonus ?? 1;
+    const maxPen = CFG.discoverMaxPenalizedGenres;
     return `<div class="crrav-scoreschema">
       <div class="crrav-scoreschema-track">
-        <div class="crrav-scoreschema-seg taste" style="left:${pct(-2.5)}%;width:${pct(2.5) - pct(-2.5)}%" title="Goût (genres) : de -2.5 à +2.5 selon ce que tu regardes"></div>
-        <div class="crrav-scoreschema-seg bonus1" style="left:${pct(2.5)}%;width:${pct(3) - pct(2.5)}%" title="🏆 très bien notée : +0.5"></div>
-        <div class="crrav-scoreschema-seg bonus2" style="left:${pct(3)}%;width:${pct(3.5) - pct(3)}%" title="✨ note exceptionnelle : +0.5 (cumulable)"></div>
+        <div class="crrav-scoreschema-seg taste" style="left:${pct(b0)}%;width:${pct(b1) - pct(b0)}%" title="Goût net (genres) × ${tw.toFixed(1)} : de ${min.toFixed(1)} à +${tw.toFixed(1)}"></div>
+        ${prefBonus > 0 ? `<div class="crrav-scoreschema-seg pref" style="left:${pct(b1)}%;width:${pct(b2) - pct(b1)}%" title="🎯 genre préféré : ${fmt1(prefBonus)}"></div>` : ''}
+        ${rated1 > 0 ? `<div class="crrav-scoreschema-seg bonus1" style="left:${pct(b2)}%;width:${pct(b3) - pct(b2)}%" title="🏆 très bien notée : ${fmt1(rated1)}"></div>` : ''}
+        ${rated2 > 0 ? `<div class="crrav-scoreschema-seg bonus2" style="left:${pct(b3)}%;width:${pct(b4) - pct(b3)}%" title="✨ note exceptionnelle : ${fmt1(rated2)} (cumulable)"></div>` : ''}
         <div class="crrav-scoreschema-zero" style="left:${zeroPos}%" title="Goût neutre (0)"></div>
         <div class="crrav-scoreschema-pin notable" style="left:${notablePos}%">
           <span class="crrav-scoreschema-pinlab">Notable<b>${CFG.discoverNotableScore.toFixed(1)}</b></span></div>
         <div class="crrav-scoreschema-pin legendary" style="left:${legendaryPos}%">
           <span class="crrav-scoreschema-pinlab">Légendaire<b>${CFG.discoverLegendaryScore.toFixed(1)}</b></span></div>
       </div>
+      <div class="crrav-scoreschema-bounds"><span>${min.toFixed(1)}</span><span>${max.toFixed(1)}</span></div>
       <div class="crrav-scoreschema-formula">
-        <span><i class="crrav-scoreschema-dot taste"></i>Goût (genres aimés − genres jamais regardés)</span>
-        <span>+</span><span><i class="crrav-scoreschema-dot bonus1"></i>🏆 bien notée</span>
-        <span>+</span><span><i class="crrav-scoreschema-dot bonus2"></i>✨ exceptionnelle</span>
+        <span><i class="crrav-scoreschema-dot taste"></i>Goût net × ${tw.toFixed(1)}</span>
+        <span>+</span><span><i class="crrav-scoreschema-dot pref"></i>🎯 préféré ${fmt1(prefBonus)}</span>
+        <span>+</span><span><i class="crrav-scoreschema-dot bonus1"></i>🏆 bien notée ${fmt1(rated1)}</span>
+        <span>+</span><span><i class="crrav-scoreschema-dot bonus2"></i>✨ except. ${fmt1(rated2)}</span>
         <span>=</span><span><b>Score pépite</b></span>
       </div>
+      <p class="crrav-scoreschema-note">Le goût net vient de la moyenne des genres de la série : chaque genre aimé compte pour <b>×${matchBonus.toFixed(1)}</b> (ta part d'écoute de ce genre), chaque genre jamais regardé retire <b>${CFG.discoverMissPenalty.toFixed(2)}</b> point — plafonné à <b>${maxPen}</b> genre${maxPen > 1 ? 's' : ''} pénalisé${maxPen > 1 ? 's' : ''} par série (réglages 💚 ci-dessous).</p>
     </div>`;
   }
 
@@ -5814,16 +6015,18 @@
     width:24px;height:24px;border-radius:8px;font-size:13px;
     background:rgba(var(--subhue,244,117,33),.16);box-shadow:inset 0 0 0 1px rgba(var(--subhue,244,117,33),.4)}
   /* (32) Schéma du calcul du score pépite (voir scoreFormulaSchema) : une piste horizontale
-     avec un segment dégradé rouge→vert pour le goût (peut être négatif) puis deux petits
-     segments dorés pour les bonus de note, et deux « drapeaux » positionnés aux seuils
-     notable/légendaire réellement configurés — pour voir d'un coup d'œil où ils tombent
-     dans l'intervalle possible, pas juste lire un nombre isolé. */
+     avec un segment dégradé rouge→vert pour le goût (peut être négatif), un segment violet
+     pour le bonus « genre préféré », deux segments dorés pour les bonus de note, et deux
+     « drapeaux » positionnés aux seuils notable/légendaire réellement configurés — pour voir
+     d'un coup d'œil où ils tombent dans l'intervalle possible, pas juste lire un nombre isolé.
+     Entièrement dynamique (bornes, largeurs, drapeaux) : se redessine avec les curseurs. */
   .crrav-scoreschema{margin:0 0 18px;padding:34px 10px 12px;background:rgba(255,255,255,.03);
     border:1px solid rgba(255,255,255,.07);border-radius:12px}
   .crrav-scoreschema-track{position:relative;height:9px;border-radius:999px;
-    background:rgba(255,255,255,.08);margin:0 4px 10px}
+    background:rgba(255,255,255,.08);margin:0 4px 6px}
   .crrav-scoreschema-seg{position:absolute;top:0;bottom:0;border-radius:999px}
   .crrav-scoreschema-seg.taste{background:linear-gradient(90deg,#f2545b,#8a8a94 50%,#4ade80)}
+  .crrav-scoreschema-seg.pref{background:#b98bff}
   .crrav-scoreschema-seg.bonus1{background:#ffd166}
   .crrav-scoreschema-seg.bonus2{background:#ffb347}
   .crrav-scoreschema-zero{position:absolute;top:-3px;bottom:-3px;width:2px;
@@ -5839,14 +6042,20 @@
   .crrav-scoreschema-pinlab b{font:800 11px/1.2 system-ui;color:#fff}
   .crrav-scoreschema-pin.legendary .crrav-scoreschema-pinlab{color:#ffd48a}
   .crrav-scoreschema-pin.legendary .crrav-scoreschema-pinlab b{color:#ffb347}
+  .crrav-scoreschema-bounds{display:flex;justify-content:space-between;margin:0 4px 12px;
+    font:700 10px/1 system-ui;color:#6f6f7a}
   .crrav-scoreschema-formula{display:flex;flex-wrap:wrap;align-items:center;gap:6px;
     font:600 11px/1.3 system-ui;color:#a9a9b4}
   .crrav-scoreschema-formula b{color:#fff}
   .crrav-scoreschema-dot{display:inline-block;width:8px;height:8px;border-radius:50%;
     margin-right:5px;vertical-align:middle}
   .crrav-scoreschema-dot.taste{background:linear-gradient(90deg,#f2545b,#4ade80)}
+  .crrav-scoreschema-dot.pref{background:#b98bff}
   .crrav-scoreschema-dot.bonus1{background:#ffd166}
   .crrav-scoreschema-dot.bonus2{background:#ffb347}
+  .crrav-scoreschema-note{margin:10px 0 0;padding-top:10px;border-top:1px solid rgba(255,255,255,.07);
+    font:500 11px/1.5 system-ui;color:#8a8a94}
+  .crrav-scoreschema-note b{color:#c9c9d2;font-weight:800}
   .crrav-field{display:flex;flex-direction:column;gap:5px}
   .crrav-field label{font:600 11.5px/1.3 system-ui;color:#c9c9d2}
   .crrav-field small{font:400 10.5px/1.4 system-ui;color:#8a8a94}
@@ -7592,6 +7801,7 @@
         </div>
       </div>
       ${body}
+      ${!D.loading && D.shortfallDetail && !f.showIgnoredDiscover ? D.shortfallDetail : ''}
       <div class="crrav-foot">${D.lastSync
         ? `Synchronisé à ${D.lastSync.toLocaleTimeString('fr-FR')}`
         : ''}</div>`;
@@ -7854,9 +8064,12 @@
           + subIds.map((subId) => {
             const meta = SETTINGS_SUBGROUPS[subId] || { icon: '', label: subId, hue: '244,117,33' };
             const subFs = fs.filter((f) => f.sub === subId);
-            return `<div class="crrav-subgroup" data-sub="${subId}" style="--subhue:${meta.hue}">
+            // (32) Le schéma récapitulatif (scoreFormulaSchema) est un bandeau UNIQUE, posé
+            // juste au-dessus du premier des 3 blocs du calcul de score (Goût/Note/Seuils) —
+            // il en montre la synthèse globale, pas le contenu d'un seul bloc.
+            const schemaBanner = subId === 'discoverScoringTaste' ? scoreFormulaSchema() : '';
+            return `${schemaBanner}<div class="crrav-subgroup" data-sub="${subId}" style="--subhue:${meta.hue}">
               <div class="crrav-subhead"><span class="crrav-subhead-ico">${meta.icon}</span><span class="crrav-subhead-lab">${meta.label}</span></div>
-              ${subId === 'discoverScoring' ? scoreFormulaSchema() : ''}
               <div class="crrav-sgrid">${subFs.map(settingsFieldHtml).join('')}</div>
             </div>`;
           }).join('');
