@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      2.168.0
+// @version      2.172.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '2.168.0';
+  const SCRIPT_VERSION = '2.172.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -139,10 +139,32 @@
                                // AniList au complet (pas seulement Crunchyroll, qui n'héberge
                                // pas ce contenu), retirable ici si tu veux le réintégrer.
     discoverPageSize: 50,      // taille de page de l'API popularité
-    discoverMaxPages: 12,      // garde-fou : on arrête de scanner après ça
+    // (fix) Plus de plafond de pages réglable : le scan popularité Crunchyroll va
+    // désormais TOUJOURS jusqu'au bout du classement (arrêt réel quand l'API ne sert
+    // plus rien, cf. stopReason 'exhausted'), que ce soit en Découverte normale ou en
+    // dé légendaire. Voir POPULAR_SCAN_SAFETY_CAP (hors CFG, non réglable) pour le seul
+    // filet de sécurité anti-boucle-infinie qui subsiste.
     discoverTarget: 30,        // nombre de résultats visés
-    legendaryMaxPages: 40,     // 🎲 dé légendaire : scan bien plus profond dans le classement
+    // Second bassin de candidats Découverte, EN COMPLÉMENT du classement popularité
+    // Crunchyroll ci-dessus (voir scanAnilistPopularity) : interrogé UNIQUEMENT si le
+    // bassin CR seul n'a pas suffi à atteindre discoverTarget/legendaryTarget, et
+    // seulement si ton profil de goût contient au moins un tag AniList exploitable
+    // (sinon zéro requête — rien à cibler). Filtré côté requête AniList (tags du
+    // profil, note minimale, format, contenu adulte exclu) pour rester économe.
+    discoverAnilistEnabled: true,
+    discoverAnilistMaxPages: 5,   // garde-fou : profondeur de scan de ce second bassin
+    // (fix) legendaryMaxPages supprimé : le dé légendaire scanne maintenant tout le
+    // classement popularité Crunchyroll disponible (jusqu'à épuisement réel), au lieu de
+    // s'arrêter à un plafond de pages réglable — c'est justement ce qui permet de puiser
+    // plus profond à chaque lancement plutôt que de retomber sur les mêmes candidats.
     legendaryTarget: 15,       // 🎲 dé légendaire : nombre de LÉGENDAIRES visées (pas de candidats bruts)
+    // Historique des pépites légendaires déjà montrées (persisté en cache, pas un simple
+    // Set en mémoire) : sans ça, un scan qui va « jusqu'au bout » retombe presque toujours
+    // sur les mêmes séries en tête de popularité d'un lancement à l'autre, puisque le
+    // classement Crunchyroll bouge peu d'un jour à l'autre. Ces séries restent exclues
+    // pendant cette fenêtre, ce qui force le scan à aller chercher plus loin des pépites
+    // réellement nouvelles ; elles redeviennent proposables une fois la fenêtre passée.
+    legendaryHistoryDays: 30,
 
     // Onglet Calendrier : bloc « Nouveautés » — épisodes 1 tout juste sortis, repérés
     // via AniList (voir loadNewPremieres — AniList plutôt que Crunchyroll : source fiable
@@ -194,6 +216,13 @@
   const LS = 'crrav:';
   const RAW_FETCH = window.fetch.bind(window);
   const DAY = 86400e3;
+
+  // (fix) Filet de sécurité anti-boucle-infinie pour le scan popularité Crunchyroll
+  // (Découverte / dé légendaire). N'est PAS un réglage : le scan s'arrête normalement
+  // bien avant, dès que la cible est atteinte ou que l'API ne sert plus de résultats
+  // (classement épuisé — voir stopReason 'exhausted'/'target'). Ce plafond ne sert qu'à
+  // éviter un scan sans fin si l'API se met un jour à répéter des pages indéfiniment.
+  const POPULAR_SCAN_SAFETY_CAP = 400;
 
   // Appel réseau vers un domaine EXTERNE (hors crunchyroll.com) — utilisé uniquement pour
   // AniList. `fetch()` depuis la page est soumis à la CSP de Crunchyroll (directive
@@ -486,12 +515,17 @@
       type: 'list',
       help: 'Séparés par des virgules. S’applique à Découverte (relance une recherche) et au bloc Nouveautés du Calendrier (relance au prochain rafraîchissement). « hentai » y est exclu par défaut.',
       impact: 'discover', sub: 'discoverFilters' },
+    { key: 'discoverAnilistEnabled', label: 'Second bassin AniList (en complément de Crunchyroll)', type: 'bool',
+      help: 'Cible AniList (via les tags les plus représentatifs de ton profil de goût) pour compléter le classement popularité Crunchyroll quand celui-ci ne suffit pas à atteindre le nombre de pépites visées. Filtré côté requête AniList (tags, note minimale, format, contenu adulte exclu) : coût marginal faible. Sans effet tant que ton profil de goût ne contient aucun tag AniList (regarde d’abord quelques séries dans « Reste à voir »).',
+      impact: 'discover', sub: 'discoverFilters' },
+    { key: 'discoverAnilistMaxPages', label: 'Second bassin AniList — profondeur de scan', type: 'int', min: 1, max: 20, unit: 'pages',
+      help: 'Nombre de pages AniList scannées au maximum — seulement si le bassin Crunchyroll seul n’a pas suffi à atteindre le quota visé.',
+      impact: 'discover', sub: 'discoverFilters' },
     { key: 'legendaryTarget', label: 'Nombre visé', type: 'int', min: 3, max: 50,
       help: 'Combien de pépites LÉGENDAIRES (score ≥ CFG.discoverLegendaryScore, réglable ci-dessous) viser quand tu lances le dé légendaire.',
       impact: 'discover', sub: 'discoverDice' },
-    { key: 'legendaryMaxPages', label: 'Profondeur de scan', type: 'int', min: 12, max: 100, unit: 'pages',
-      help: 'Jusqu’où le dé légendaire scanne le classement popularité pour dénicher ses pépites. Plus haut = plus long, mais plus de chances de trouver assez de légendaires.',
-      impact: 'discover', sub: 'discoverDice' },
+    // (fix) Réglage « Profondeur de scan » supprimé : le dé légendaire scanne toujours le
+    // classement popularité Crunchyroll jusqu'au bout (plus de plafond de pages à régler).
     { key: 'discoverTasteWeight', label: 'Poids du goût dans le score final', type: 'float', min: 0.5, max: 5, step: 0.1,
       help: 'Multiplie le goût net (-1 à +1, similarité cosinus entre tes tags/genres et ceux de la candidate) pour obtenir sa part dans le score pépite. Plus haut = le goût domine largement le score ; plus bas = les bonus de note pèsent relativement plus.',
       impact: 'discover', sub: 'discoverScoringTaste' },
@@ -1292,6 +1326,16 @@
       `un nettoyage a été fait automatiquement.`;
     forceRender();
   }
+  // (fix) checkQuota() scanne TOUT localStorage (lsBytes) — appelé en synchrone à chaque
+  // cacheSet(), il devenait le principal poste de lenteur pendant un scan (des centaines
+  // d'écritures rapprochées : rating/series/anilist/crmatch/seasoncount), avec un coût
+  // proche de O(n²) sur le nombre de clés en cache. Débounce à l'identique du flush eps3 :
+  // une seule vérification groupée après une rafale d'écritures, pas une par écriture.
+  let quotaCheckTimer = null;
+  function scheduleQuotaCheck() {
+    if (quotaCheckTimer) return;
+    quotaCheckTimer = setTimeout(() => { quotaCheckTimer = null; checkQuota(); }, 500);
+  }
 
   // (19) Le cache episodes-par-série (`eps3:<id>`) vivait en une clé localStorage par
   // série. Sur une watchlist de 100+ séries, ça fait autant de lectures synchrones +
@@ -1398,7 +1442,11 @@
   // serializeDetail) et elle nourrit directement Découverte. Avant, elle était épargnée par
   // la purge quota alors que des entrées bien plus légères (rating:, series-en:...) étaient
   // sacrifiées en premier — la purge tapait donc sur les mauvaises entrées.
-  const EVICTABLE = ['rating:', 'series:', 'series-en:', 'seasoncount:', 'snapshot', 'crmatch:', 'watchedids:'];
+  // (fix) 'anilist:' ajouté : oubliée depuis l'introduction du cache AniList, cette entrée
+  // (schedule + genres + tags par série) n'était JAMAIS purgée par evictOldest — elle
+  // pouvait donc s'accumuler indéfiniment et occuper une part croissante du quota pendant
+  // que les autres catégories (rating:, series:...) étaient sacrifiées en premier.
+  const EVICTABLE = ['rating:', 'series:', 'series-en:', 'seasoncount:', 'snapshot', 'crmatch:', 'watchedids:', 'anilist:', 'discep:'];
   function evictOldest(fraction) {
     let evicted = eps3EvictOldest(fraction);
     const entries = [];
@@ -1421,7 +1469,7 @@
     const payload = JSON.stringify({ ts: Date.now(), v });
     try {
       localStorage.setItem(LS + key, payload);
-      checkQuota();
+      scheduleQuotaCheck();
       return true;
     } catch (e) {
       // Une seule tentative de purge, puis on réessaie.
@@ -1438,6 +1486,33 @@
         return false;
       }
     }
+  }
+
+  // ─── Historique des pépites LÉGENDAIRES déjà montrées ───────────────────────────
+  // (fix) Une seule clé de cache (blob {id: timestamp}), PAS une clé par pépite : le
+  // volume reste minuscule (quelques centaines d'octets même avec des milliers d'entrées)
+  // et ça ne pèse donc pas sur le quota localStorage (voir evictOldest/checkQuota) — pas
+  // de risque d'« exploser » le cache. Les entrées plus vieilles que
+  // CFG.legendaryHistoryDays sont purgées à chaque lecture, donc une pépite finit
+  // toujours par redevenir proposable.
+  const LEGENDARY_HISTORY_KEY = 'legendaryShown';
+  function loadLegendaryHistory() {
+    const raw = cacheReadRaw(LEGENDARY_HISTORY_KEY);
+    const obj = (raw && raw.v && typeof raw.v === 'object') ? raw.v : {};
+    const cutoff = Date.now() - CFG.legendaryHistoryDays * DAY;
+    let changed = false;
+    for (const id of Object.keys(obj)) {
+      if (!obj[id] || obj[id] < cutoff) { delete obj[id]; changed = true; }
+    }
+    if (changed) cacheSet(LEGENDARY_HISTORY_KEY, obj);
+    return obj;
+  }
+  function addLegendaryHistory(ids) {
+    if (!ids || !ids.length) return;
+    const obj = loadLegendaryHistory();
+    const now = Date.now();
+    for (const id of ids) obj[id] = now;
+    cacheSet(LEGENDARY_HISTORY_KEY, obj);
   }
 
   // L'API met ~2,1 s par requête — pour l'application Crunchyroll comme pour ce script.
@@ -2167,21 +2242,6 @@
     return Number.isFinite(n) && n > 0 ? n : null;
   }
 
-  async function getSeasonCount(seriesId) {
-    const c = cacheGet('seasoncount:' + seriesId, 30 * DAY);
-    if (c !== null) return c;
-    try {
-      const r = await api(`/content/v2/cms/series/${seriesId}/seasons`, { locale: CFG.locale });
-      const seasons = dedupeSeasons(r.data || []);
-      const nums = new Set(seasons.map((s) => s.season_number ?? 0));
-      const count = nums.size || seasons.length;
-      cacheSet('seasoncount:' + seriesId, count);
-      return count;
-    } catch (_) {
-      return null;
-    }
-  }
-
   function dedupeSeasons(seasons) {
     const byKey = new Map();
     for (const s of seasons) {
@@ -2195,19 +2255,56 @@
     return [...byKey.values()];
   }
 
-  // Renvoie { episodes, maxAir }. Cache adaptatif (3) : court si la série diffuse encore.
-  async function getEpisodes(seriesId) {
-    const raw = eps3ReadRaw(seriesId);
-    if (raw && raw.v) {
-      const ttl = (isAiring(raw.v.maxAir) ? CFG.cacheHoursAiring : CFG.cacheHoursFinished) * 3600e3;
-      if (Date.now() - raw.ts < ttl) { STATS.hit++; return raw.v; }
-    }
-    STATS.miss++;
-
-    const sr = await api(`/content/v2/cms/series/${seriesId}/seasons`, {
+  // (fix) Mémo MÉMOIRE très court (comme PH_MEMO) de la liste brute des saisons par série.
+  // AVANT : getSeasonCount() ET getEpisodes() appelaient CHACUN /cms/series/{id}/seasons
+  // — pour un même candidat Découverte qui passe le filtre saisons puis atteint l'étape
+  // épisodes, ça faisait DEUX requêtes réseau pour exactement la même ressource, la
+  // première étant jetée après un simple comptage. Ce mémo permet à getEpisodes() de
+  // réutiliser la réponse si getSeasonCount() vient de la récupérer (et vice-versa),
+  // sans persister quoi que ce soit (le cache 30 j de seasoncount: reste inchangé pour
+  // la partie « nombre »).
+  const SEASONS_MEMO = new Map();          // seriesId -> { v, ts }
+  const SEASONS_MEMO_TTL = 5 * 60e3;
+  function seasonsMemoGet(seriesId) {
+    const e = SEASONS_MEMO.get(seriesId);
+    if (!e) return null;
+    if (Date.now() - e.ts > SEASONS_MEMO_TTL) { SEASONS_MEMO.delete(seriesId); return null; }
+    return e.v;
+  }
+  async function fetchSeasonsRaw(seriesId) {
+    const hit = seasonsMemoGet(seriesId);
+    if (hit) return hit;
+    // preferred_audio_language inclus dès ce premier appel : c'est le même paramétrage
+    // que celui dont getEpisodes() a besoin, pour que la réponse soit interchangeable
+    // entre les deux appelants (sinon on retélécharge quand même côté episodes).
+    const r = await api(`/content/v2/cms/series/${seriesId}/seasons`, {
       locale: CFG.locale, preferred_audio_language: CFG.preferredAudio,
     });
-    const seasonsAll = dedupeSeasons(sr.data || []);
+    const seasons = dedupeSeasons(r.data || []);
+    SEASONS_MEMO.set(seriesId, { v: seasons, ts: Date.now() });
+    return seasons;
+  }
+
+  async function getSeasonCount(seriesId) {
+    const c = cacheGet('seasoncount:' + seriesId, 30 * DAY);
+    if (c !== null) return c;
+    try {
+      const seasons = await fetchSeasonsRaw(seriesId);
+      const nums = new Set(seasons.map((s) => s.season_number ?? 0));
+      const count = nums.size || seasons.length;
+      cacheSet('seasoncount:' + seriesId, count);
+      return count;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // Requêtes réseau + calcul purs, SANS écriture de cache : partagés par getEpisodes()
+  // (watchlist / Hors listes, cache persistant eps3) et getEpisodesForDiscover() (scan
+  // Découverte, cache séparé — voir plus bas) pour que les deux n'aient qu'UNE seule
+  // implémentation à maintenir.
+  async function fetchEpisodesRaw(seriesId) {
+    const seasonsAll = await fetchSeasonsRaw(seriesId);
 
     // (26) Crunchyroll range parfois les OAD/spéciaux comme des « saisons » à part
     // entière (season_number brut distinct), alors qu'ils n'apparaissent PAS comme
@@ -2264,11 +2361,55 @@
     }
     episodes.sort((a, b) => a.season - b.season || a.n - b.n);
     const maxAir = episodes.reduce((m, e) => (e.air && e.air > m ? e.air : m), 0) || null;
+    return { episodes, maxAir };
+  }
 
-    const out = { episodes, maxAir };
+  // Renvoie { episodes, maxAir }. Cache adaptatif (3) : court si la série diffuse encore.
+  // Persisté dans le blob eps3 (watchlist + Hors listes : séries que tu suis ou as déjà
+  // commencées — ça vaut la peine de garder leur détail longtemps).
+  async function getEpisodes(seriesId) {
+    const raw = eps3ReadRaw(seriesId);
+    if (raw && raw.v) {
+      const ttl = (isAiring(raw.v.maxAir) ? CFG.cacheHoursAiring : CFG.cacheHoursFinished) * 3600e3;
+      if (Date.now() - raw.ts < ttl) { STATS.hit++; return raw.v; }
+    }
+    STATS.miss++;
+    const out = await fetchEpisodesRaw(seriesId);
     eps3Write(seriesId, out);
     return out;
   }
+
+  // (fix) Variante Découverte : mêmes données, mais PAS écrites dans le blob eps3 principal.
+  // Un scan Découverte (surtout 🎲 légendaire, jusqu'à 100 pages × 50 séries) peut examiner
+  // des centaines de séries dont l'écrasante majorité ne sera jamais ajoutée à une liste.
+  // Avant, leur détail épisodes finissait quand même dans eps3 — LE cache le plus lourd,
+  // chargé intégralement en mémoire à chaque accès et purgé par fraction sans distinguer
+  // « série suivie » de « candidate croisée une fois » : un gros scan Découverte pouvait
+  // évincer le cache épisodes de séries réellement suivies. Ici : clés individuelles
+  // dédiées (discep:), évictables séparément (voir EVICTABLE), avec le même TTL adaptatif.
+  // Si la série est déjà connue côté eps3 (déjà suivie), on réutilise directement CE
+  // cache-là plutôt que d'en dupliquer un second.
+  function getEpisodesDiscoverCached(seriesId) {
+    const c = cacheReadRaw('discep:' + seriesId);
+    if (!c || !c.v) return null;
+    const ttl = (isAiring(c.v.maxAir) ? CFG.cacheHoursAiring : CFG.cacheHoursFinished) * 3600e3;
+    if (Date.now() - c.ts > ttl) return null;
+    return c.v;
+  }
+  async function getEpisodesForDiscover(seriesId) {
+    const main = eps3ReadRaw(seriesId);
+    if (main && main.v) {
+      const ttl = (isAiring(main.v.maxAir) ? CFG.cacheHoursAiring : CFG.cacheHoursFinished) * 3600e3;
+      if (Date.now() - main.ts < ttl) { STATS.hit++; return main.v; }
+    }
+    const cached = getEpisodesDiscoverCached(seriesId);
+    if (cached) { STATS.hit++; return cached; }
+    STATS.miss++;
+    const out = await fetchEpisodesRaw(seriesId);
+    cacheSet('discep:' + seriesId, out);
+    return out;
+  }
+
 
   // Taille de lot vérifiée empiriquement via resteAVoir.probeBatch() : à 300 GUID,
   // l'API renvoie exactement les mêmes résultats qu'en lots de 100, en 3× moins de
@@ -3594,7 +3735,7 @@
       `Genres exclus par défaut : ${CFG.discoverExcludeCategories.length ? '<b>' + CFG.discoverExcludeCategories.map(escapeHtml).join(', ') + '</b>' : '<i>aucun</i>'}`,
       f.discoverCatsIn.length ? `Genres gardés exclusivement (${f.discoverCatsInMode === 'all' ? 'TOUS requis' : 'au moins un'}) : <b>${f.discoverCatsIn.map(escapeHtml).join(', ')}</b>` : null,
       f.discoverCatsEx.length ? `Genres exclus en plus (manuel) : <b>${f.discoverCatsEx.map(escapeHtml).join(', ')}</b>` : null,
-      `Profondeur de scan : <b>${maxPages}</b> pages max (${CFG.discoverPageSize} séries/page)`,
+      `Profondeur de scan : <b>classement popularité entier</b> (${CFG.discoverPageSize} séries/page, jusqu'à épuisement)`,
     ].filter(Boolean);
 
     // Conseils ciblés sur la cause de rejet dominante — chaque conseil pointe vers le
@@ -3613,15 +3754,14 @@
     };
     const mainAdvice = topReason ? ADVICE[topReason] : "Élargis un des filtres ci-dessous, ou relance plus tard : le classement popularité change en continu.";
     const extraAdvice = [];
-    if (!legendary && maxPages <= CFG.discoverMaxPages) extraAdvice.push("Le scan s'arrête après un nombre de pages limité (garde-fou anti-attente) — relance ou essaie « 🎲 Dé légendaire » qui scanne beaucoup plus profond.");
     if (target > 0 && foundCount === 0) extraAdvice.push("Zéro résultat : commence par assouplir le filtre le plus haut dans le tableau ci-dessous, c'est lui qui coûte le plus de candidats.");
 
     // (fix) VERDICT en tête : répond aux deux questions qui manquaient — POURQUOI le scan
     // s'est arrêté (ex. « seulement 10 mais pas 60 pages ? » = classement épuisé, pas un
     // plafond de pages), et QUEL réglage précis changer en priorité (le frein n°1 chiffré).
     const STOP = {
-      exhausted: `le classement popularité a été <b>entièrement parcouru</b> (${pagesScanned} page${pagesScanned > 1 ? 's' : ''} — l'API Crunchyroll n'en sert pas davantage). Le frein n'est donc PAS le nombre de pages : monter « Profondeur de scan » n'y changerait rien.`,
-      maxPages: `le scan a atteint son <b>plafond de ${maxPages} pages</b> sans épuiser le classement — monter « Profondeur de scan » (Réglages → Découverte) peut permettre d'en trouver plus.`,
+      exhausted: `le classement popularité a été <b>entièrement parcouru</b> (${pagesScanned} page${pagesScanned > 1 ? 's' : ''} — l'API Crunchyroll n'en sert pas davantage). Le scan va toujours jusqu'au bout : ce n'est donc jamais un plafond de pages qui manque ici.`,
+      maxPages: `le scan a atteint son <b>filet de sécurité interne</b> (${maxPages} pages, anti-boucle-infinie) sans épuiser le classement — cas très inhabituel, relance ou regarde la console pour un éventuel comportement anormal de l'API.`,
       cancelled: `tu as <b>interrompu</b> le scan avant la fin.`,
       target: '',
     };
@@ -3690,7 +3830,7 @@
 
         <p style="margin:10px 0 4px"><b>1. Ce qui a été scanné</b></p>
         <ul style="margin:0 0 10px;padding-left:20px">
-          <li>${pagesScanned} page${pagesScanned > 1 ? 's' : ''} sur ${maxPages} max scannée${pagesScanned > 1 ? 's' : ''} (${CFG.discoverPageSize} séries/page, triées par popularité)</li>
+          <li>${pagesScanned} page${pagesScanned > 1 ? 's' : ''} scannée${pagesScanned > 1 ? 's' : ''} (${CFG.discoverPageSize} séries/page, triées par popularité, classement parcouru jusqu'au bout)</li>
           <li>${candidatesSeenTotal} candidat${candidatesSeenTotal > 1 ? 's' : ''} au total examiné${candidatesSeenTotal > 1 ? 's' : ''}</li>
           <li><b>${foundCount}</b> retenu${foundCount > 1 ? 's' : ''} sur les <b>${target}</b> visé${target > 1 ? 's' : ''}</li>
         </ul>
@@ -3736,18 +3876,113 @@
       </div>`;
   }
 
+  // Pipeline d'évaluation d'un candidat Découverte (saisons → genres → note →
+  // épisodes/progression), factorisé pour être partagé par les DEUX bassins de
+  // candidats : le classement popularité Crunchyroll (loadDiscover ci-dessous) ET
+  // le second bassin AniList (voir scanAnilistPopularity, plus bas) — un seul
+  // pipeline de filtres/exclusions à maintenir, identique quelle que soit la source.
+  // `p` : objet panel-like (panel browse OU panel complet /cms/series slim — mêmes
+  // accesseurs partout dans ce fichier, voir panelSeasons/extractGenres/posterOf).
+  // `ctx` : { accountId, REJ, D } (compteurs de rejet + état du scan en cours, pour
+  // pouvoir s'arrêter net sur annulation). Retourne un candidat INTERMÉDIAIRE
+  // (categories/tags pas encore complétés par AniList en mode légendaire — géré par
+  // l'appelant) ou null si le candidat est rejeté ou le scan annulé en cours de route.
+  async function evaluateDiscoverCandidate(p, ctx) {
+    const { accountId, REJ, D } = ctx;
+    // (fix) Points de sortie précoce à CHAQUE étape (pas seulement au tout début) :
+    // un candidat déjà en vol au moment d'une annulation s'arrête net à la prochaine
+    // étape plutôt que de dérouler tout son pipeline avant de s'arrêter.
+    if (D.cancelRequested) return null;
+    // 1. saisons : gratuit si le panel le donne, sinon 1 requête
+    let seasons = panelSeasons(p);
+    if (seasons == null) seasons = await getSeasonCount(p.id);
+    if (seasons == null || seasons > CFG.discoverMaxSeasons) { REJ.seasons++; return null; }
+    if (D.cancelRequested) return null;
+
+    // 2. genres FIABLES : le panel browse ne porte pas toujours tenant_categories,
+    // d'où des cartes sans genre (aucune puce de filtre) et un filtre par genre
+    // inopérant. On lit le panel complet /cms/series (en cache 7 j, souvent déjà là
+    // pour une série populaire) pour disposer des vrais genres, puis on applique le
+    // filtre de genre qui fait AUTORITÉ. Placé avant note/épisodes : on économise
+    // ces requêtes pour les séries que le genre écarte de toute façon.
+    let categories = extractGenres(p);
+    if (!categories.length) {
+      const full = await getSeriesPanel(p.id);
+      if (full) categories = extractGenres(full);
+    }
+    // (fix) Fusion GRATUITE avec un éventuel cache AniList déjà présent (même
+    // série croisée ailleurs — Suivi, Hors listes, un scan Découverte précédent, OU
+    // le second bassin AniList lui-même qui vient d'écrire ce cache) : aucune
+    // requête, juste une lecture localStorage (voir mergeGenreLists).
+    const cachedAni = readAnilistCached(p.id);
+    categories = mergeGenreLists(categories, cachedAni.genres);
+    // Tags déjà en cache, sans requête (voir plus bas : complétés en mode légendaire
+    // pour les survivants qui n'en ont toujours pas, via anilistSearchBatch).
+    let tags = cachedAni.tags || [];
+    if (categoriesRejectedByGenre(categories, null, null, STATE.filters.discoverCatsInMode === 'all')) { REJ.genre++; return null; }
+    if (D.cancelRequested) return null;
+
+    // 3. note : 1 requête, seulement pour les survivants (candidats jamais vus ⇒
+    // jamais en cache : contrairement à Suivi/Hors listes, on ne peut pas se
+    // contenter du cache ici, sous peine de rejeter systématiquement tout le monde).
+    const rating = await getRating(p.id);
+    if (rating == null || rating < CFG.discoverMinRating) { REJ.rating++; return null; }
+    if (D.cancelRequested) return null;
+
+    // 4. épisodes + progression : le plus cher, réservé au dernier carré
+    let episodes = 0;
+    let secTotal = 0;
+    let maxAir = null;          // date du dernier épisode sorti → tri « publication récente »
+    try {
+      const eps = await getEpisodesForDiscover(p.id);
+      episodes = eps.episodes.length;
+      secTotal = eps.episodes.reduce((a, e) => a + (e.dur || 0), 0);
+      maxAir = eps.maxAir || null;
+
+      // Filet de sécurité (6) : l'historique peut être incomplet, donc on vérifie
+      // la progression réelle. Inutile quand le scan a couvert TOUT l'historique :
+      // watchedIds fait alors autorité, et on économise une requête par candidat.
+      if (eps.episodes.length && !historyComplete) {
+        const epIds = [...new Set(eps.episodes.flatMap((e) => e.ids))];
+        const ph = await getPlayheads(accountId, epIds);
+        const started = eps.episodes.some((e) => {
+          for (const id of e.ids) {
+            const x = ph.get(id);
+            if (!x) continue;
+            if (x.full) return true;
+            if (e.dur && x.p >= e.dur * CFG.watchedRatio) return true;
+            if (x.p > 0) return true;
+          }
+          return false;
+        });
+        if (started) { REJ.progressPlayhead++; return null; }
+      }
+    } catch (e) {
+      // Une erreur ici laissait passer la série par défaut : on exclut par
+      // prudence, cohérent avec « jamais proposer ce qui est déjà vu ».
+      console.warn('[reste-à-voir] vérif. impossible pour', p.id, '— exclue par prudence', e);
+      return null;
+    }
+    if (D.cancelRequested) return null;
+
+    // Retourne un candidat INTERMÉDIAIRE (categories/tags pas encore complétés par
+    // AniList en mode légendaire — voir juste après le pool()). p est repris pour
+    // les étapes suivantes (titre, id, popRank…).
+    return { p, seasons, categories, tags, rating, episodes, secTotal, maxAir };
+  }
+
   async function loadDiscover(onProgress, opts) {
     const more = !!(opts && opts.more);
     // `force` : relance explicite (bouton « Actualiser » / « Relancer » / « 30 autres »).
     // On rafraîchit alors l'historique de visionnage, pour ne PLUS reproposer ce que tu
     // viens de regarder. Les membres de tes listes, eux, sont TOUJOURS relus (ci-dessous).
     const force = !!(opts && opts.force);
-    // 🎲 Dé légendaire : au lieu de viser CFG.discoverTarget candidats bruts en scannant au
-    // plus CFG.discoverMaxPages pages, on vise CFG.legendaryTarget pépites LÉGENDAIRES (3
-    // signaux ou plus) en scannant beaucoup plus profond (CFG.legendaryMaxPages). Un candidat
-    // qui n'est pas légendaire est rejeté comme les autres filtres (note, saisons, genre) —
-    // il continue de coûter la requête mais ne compte pas dans le quota, d'où le scan plus
-    // long : il faut brasser plus de popularité pour tomber sur d'authentiques pépites.
+    // 🎲 Dé légendaire : au lieu de viser CFG.discoverTarget candidats bruts, on vise
+    // CFG.legendaryTarget pépites LÉGENDAIRES (3 signaux ou plus). Un candidat qui n'est pas
+    // légendaire est rejeté comme les autres filtres (note, saisons, genre) — il continue de
+    // coûter la requête mais ne compte pas dans le quota, d'où le scan potentiellement plus
+    // long : il faut brasser plus de popularité pour tomber sur d'authentiques pépites (le
+    // scan va désormais jusqu'au bout du classement au besoin, cf. POPULAR_SCAN_SAFETY_CAP).
     const legendary = !!(opts && opts.legendary);
     const D = STATE.discover;
     D.loading = true;
@@ -3837,11 +4072,22 @@
           "Découverte n'exclut que les séries de tes listes.";
       }
 
-      const excluded = new Set([...knownIds, ...watchedIds, ...D.excludedIds]);
+      // 🎲 Dé légendaire : sans ça, un lancement « frais » (pas « 30 autres ») repart d'un
+      // historique d'exclusion vide et retombe quasi toujours sur les MÊMES pépites en tête
+      // du classement popularité (qui bouge peu d'un jour à l'autre) — l'historique persisté
+      // (voir loadLegendaryHistory) force le scan à aller chercher plus loin des pépites
+      // réellement nouvelles à chaque nouveau lancement, tout en les laissant redevenir
+      // proposables passé CFG.legendaryHistoryDays.
+      const legendaryHistoryIds = legendary ? Object.keys(loadLegendaryHistory()) : [];
+      const excluded = new Set([...knownIds, ...watchedIds, ...D.excludedIds, ...legendaryHistoryIds]);
       const seenCandidate = new Set();
       const matches = [];
       let start = 0;
-      const maxPages = legendary ? CFG.legendaryMaxPages : CFG.discoverMaxPages;
+      // (fix) Plus de plafond réglable : on va jusqu'au bout du classement popularité
+      // (arrêt réel = l'API n'a plus rien à servir, cf. `data.length === 0` plus bas).
+      // POPULAR_SCAN_SAFETY_CAP n'est qu'un garde-fou anti-boucle-infinie, jamais atteint
+      // en usage normal.
+      const maxPages = POPULAR_SCAN_SAFETY_CAP;
       const target = legendary ? CFG.legendaryTarget : CFG.discoverTarget;
       const progressWord = legendary ? 'légendaires' : 'trouvées';
       // Raison d'arrêt du scan — sert au rapport « Pourquoi seulement X » à expliquer POURQUOI
@@ -3862,8 +4108,12 @@
         // redondance « page N/M » répétée en haut ET en bas, et le compte de légendaires
         // n'est plus tronqué. `progressWord` reste dispo pour d'éventuels autres affichages.
         void progressWord;
+        // (fix) Plus de dénominateur affiché : le scan va jusqu'au bout du classement, dont
+        // la taille réelle n'est pas connue à l'avance (maxPages n'est qu'un filet de
+        // sécurité interne, pas une vraie cible de pages — l'afficher comme tel induisait en
+        // erreur, cf. renderActivityBar plus bas qui n'en fait plus une barre % / ETA).
         D.scan = { page: page + 1, maxPages, found: matches.length, target, legendary };
-        onProgress(stepLabel(3, 3, `page ${page + 1}/${maxPages}`));
+        onProgress(stepLabel(3, 3, `page ${page + 1}`));
         const r = await api('/content/v2/discover/browse', {
           sort_by: 'popularity', n: CFG.discoverPageSize, start,
           locale: CFG.locale, type: 'series',
@@ -3902,91 +4152,9 @@
         for (let c = 0; c < candidates.length && matches.length + results.length < target; c += 8) {
           if (D.cancelRequested) break;
           const slice = candidates.slice(c, c + 8);
-          const got = await pool(slice, async (p) => {
-            // (fix) Points de sortie précoce : avant, une annulation ne prenait effet
-            // qu'ENTRE deux tranches de 8 candidats — mais chaque candidat en vol devait
-            // quand même dérouler tout son pipeline (saisons → genre → note → épisodes →
-            // playheads) avant que la tranche se termine, d'où un « Arrêt en cours… » qui
-            // semblait ne jamais aboutir. On vérifie maintenant D.cancelRequested à CHAQUE
-            // étape (pas seulement au tout début, sinon un candidat déjà lancé filait quand
-            // même jusqu'au bout) : un candidat en cours s'arrête net à la prochaine étape.
-            if (D.cancelRequested) return null;
-            // 1. saisons : gratuit si le panel le donne, sinon 1 requête
-            let seasons = panelSeasons(p);
-            if (seasons == null) seasons = await getSeasonCount(p.id);
-            if (seasons == null || seasons > CFG.discoverMaxSeasons) { REJ.seasons++; return null; }
-            if (D.cancelRequested) return null;
-
-            // 2. genres FIABLES : le panel browse ne porte pas toujours tenant_categories,
-            // d'où des cartes sans genre (aucune puce de filtre) et un filtre par genre
-            // inopérant. On lit le panel complet /cms/series (en cache 7 j, souvent déjà là
-            // pour une série populaire) pour disposer des vrais genres, puis on applique le
-            // filtre de genre qui fait AUTORITÉ. Placé avant note/épisodes : on économise
-            // ces requêtes pour les séries que le genre écarte de toute façon.
-            let categories = extractGenres(p);
-            if (!categories.length) {
-              const full = await getSeriesPanel(p.id);
-              if (full) categories = extractGenres(full);
-            }
-            // (fix) Fusion GRATUITE avec un éventuel cache AniList déjà présent (même
-            // série croisée ailleurs — Suivi, Hors listes, un scan Découverte précédent) :
-            // aucune requête, juste une lecture localStorage (voir mergeGenreLists).
-            const cachedAni = readAnilistCached(p.id);
-            categories = mergeGenreLists(categories, cachedAni.genres);
-            // Tags déjà en cache, sans requête (voir plus bas : complétés en mode légendaire
-            // pour les survivants qui n'en ont toujours pas, via anilistSearchBatch).
-            let tags = cachedAni.tags || [];
-            if (categoriesRejectedByGenre(categories, null, null, STATE.filters.discoverCatsInMode === 'all')) { REJ.genre++; return null; }
-            if (D.cancelRequested) return null;
-
-            // 3. note : 1 requête, seulement pour les survivants (candidats jamais vus ⇒
-            // jamais en cache : contrairement à Suivi/Hors listes, on ne peut pas se
-            // contenter du cache ici, sous peine de rejeter systématiquement tout le monde).
-            const rating = await getRating(p.id);
-            if (rating == null || rating < CFG.discoverMinRating) { REJ.rating++; return null; }
-            if (D.cancelRequested) return null;
-
-            // 4. épisodes + progression : le plus cher, réservé au dernier carré
-            let episodes = 0;
-            let secTotal = 0;
-            let maxAir = null;          // date du dernier épisode sorti → tri « publication récente »
-            try {
-              const eps = await getEpisodes(p.id);
-              episodes = eps.episodes.length;
-              secTotal = eps.episodes.reduce((a, e) => a + (e.dur || 0), 0);
-              maxAir = eps.maxAir || null;
-
-              // Filet de sécurité (6) : l'historique peut être incomplet, donc on vérifie
-              // la progression réelle. Inutile quand le scan a couvert TOUT l'historique :
-              // watchedIds fait alors autorité, et on économise une requête par candidat.
-              if (eps.episodes.length && !historyComplete) {
-                const epIds = [...new Set(eps.episodes.flatMap((e) => e.ids))];
-                const ph = await getPlayheads(accountId, epIds);
-                const started = eps.episodes.some((e) => {
-                  for (const id of e.ids) {
-                    const x = ph.get(id);
-                    if (!x) continue;
-                    if (x.full) return true;
-                    if (e.dur && x.p >= e.dur * CFG.watchedRatio) return true;
-                    if (x.p > 0) return true;
-                  }
-                  return false;
-                });
-                if (started) { REJ.progressPlayhead++; return null; }
-              }
-            } catch (e) {
-              // Une erreur ici laissait passer la série par défaut : on exclut par
-              // prudence, cohérent avec « jamais proposer ce qui est déjà vu ».
-              console.warn('[reste-à-voir] vérif. impossible pour', p.id, '— exclue par prudence', e);
-              return null;
-            }
-            if (D.cancelRequested) return null;
-
-            // Retourne un candidat INTERMÉDIAIRE (categories/tags pas encore complétés par
-            // AniList en mode légendaire — voir juste après le pool()). p est repris pour
-            // les étapes suivantes (titre, id, popRank…).
-            return { p, seasons, categories, tags, rating, episodes, secTotal, maxAir };
-          }, CFG.concurrency, undefined, () => D.cancelRequested);
+          const got = await pool(slice,
+            (p) => evaluateDiscoverCandidate(p, { accountId, REJ, D }),
+            CFG.concurrency, undefined, () => D.cancelRequested);
 
           const survivors = got.filter(Boolean);
 
@@ -4057,17 +4225,58 @@
           }
           results.push(...finalResults);
           D.scan = { page: page + 1, maxPages, found: matches.length + results.length, target, legendary };
-          onProgress(stepLabel(3, 3, `page ${page + 1}/${maxPages}`));
+          onProgress(stepLabel(3, 3, `page ${page + 1}`));
         }
 
         matches.push(...results.filter(Boolean));
       }
+
+      // Second bassin AniList (voir scanAnilistPopularity), EN COMPLÉMENT du classement
+      // popularité Crunchyroll ci-dessus — lancé uniquement si celui-ci n'a pas suffi à
+      // atteindre le quota visé et que le scan n'a pas été interrompu (ordre le plus
+      // économe en requêtes des deux possibles). `seenCandidate` est le MÊME Set que
+      // celui déjà rempli par le scan CR ci-dessus (jamais un second) : il couvre donc
+      // les deux sources et empêche tout doublon d'affichage entre elles.
+      if (!D.cancelRequested && matches.length < target && CFG.discoverAnilistEnabled) {
+        const aniProfile = tasteProfile || buildTasteProfile();
+        // Titres déjà suivis, pour le pré-filtre local LÉGER de scanAnilistPopularity
+        // (même logique que isKnown() dans loadNewPremieres) — évite de dépenser une
+        // résolution Crunchyroll pour un titre déjà repéré comme connu.
+        const knownTitlesNorm = STATE.series.map((s) => aniNorm(s.title)).filter(Boolean);
+        onProgress(stepLabel(3, 3, 'Découverte : second bassin AniList…'));
+        const aniFound = await scanAnilistPopularity(
+          aniProfile, excluded, seenCandidate, knownTitlesNorm, target - matches.length,
+          { accountId, REJ, D },
+          (page, maxP) => onProgress(stepLabel(3, 3, `AniList ${page}/${maxP}`)),
+        );
+        for (const x of aniFound) {
+          if (matches.length >= target) break;
+          const candidate = {
+            id: x.p.id, title: x.p.title, slug: x.p.slug_title, poster: posterOf(x.p),
+            synopsis: x.p.description || '',
+            rating: x.rating, seasons: x.seasons,
+            categories: x.categories, tags: x.tags,
+            episodes: x.episodes, secTotal: x.secTotal, maxAir: x.maxAir,
+            order: seenCandidate.size,
+          };
+          // Même filtre final que le bassin CR (voir plus haut) : en mode légendaire,
+          // seules les pépites au score ≥ CFG.discoverLegendaryScore comptent dans le quota.
+          if (legendary) {
+            const sig = discoverSignals(candidate, aniProfile);
+            scoreSamples.push(sig.score);
+            if (!sig.legendary) { REJ.legendaryScore++; continue; }
+          }
+          matches.push(candidate);
+        }
+      }
+
       // Si la boucle n'a pas été coupée en cours (cancel/exhausted), c'est soit la cible
       // atteinte, soit le plafond de pages.
       if (stopReason === undefined) stopReason = matches.length >= target ? 'target' : 'maxPages';
 
       const found = matches.slice(0, target);
       found.forEach((s) => D.excludedIds.add(s.id));
+      if (legendary) addLegendaryHistory(found.map((s) => s.id));
 
       // Rapport détaillé (voir buildDiscoverShortfallReport) : dès que le quota visé n'est
       // pas atteint, peu importe la raison (interruption, relance à sec, dé légendaire à
@@ -4093,8 +4302,9 @@
             "pas assez changé. Réessaie plus tard.";
         D.shortfallDetail = buildDiscoverShortfallReport(shortfallCtx);
       } else if (legendary && !found.length) {
-        D.warning = "Aucune pépite légendaire trouvée dans les " + maxPages + " pages scannées. " +
-          "Essaie d'élargir tes genres, ou relance le dé : le classement popularité bouge.";
+        D.warning = "Aucune pépite légendaire trouvée en " + pagesScanned + " page" + (pagesScanned > 1 ? 's' : '') +
+          " (classement popularité parcouru jusqu'au bout). Essaie d'élargir tes genres, " +
+          "ou relance le dé : le classement popularité bouge et l'historique des pépites déjà vues expire avec le temps.";
         D.series = found;
         D.lastSync = new Date();
         D.shortfallDetail = buildDiscoverShortfallReport(shortfallCtx);
@@ -4348,6 +4558,140 @@
     return result;
   }
 
+  // ─── Découverte — second bassin AniList (en complément du classement popularité
+  // Crunchyroll, voir loadDiscover) ──────────────────────────────────────────────
+  // Requête paginée, CIBLÉE sur le profil de goût (tag_in — voir arbitrage ci-dessous),
+  // filtrée côté AniList (note minimale, format, contenu adulte exclu) pour ramener le
+  // moins de volume inutile possible. Formats alignés sur loadNewPremieres (on exclut
+  // MOVIE/MUSIC, jamais ce qu'on cherche ici).
+  const ANILIST_DISCOVER_FORMATS = ['TV', 'TV_SHORT', 'ONA', 'OVA'];
+  const ANILIST_DISCOVER_QUERY = `query ($page: Int!, $perPage: Int!, $tagIn: [String], $scoreMin: Int, $formatIn: [MediaFormat]) {
+    Page(page: $page, perPage: $perPage) {
+      pageInfo { hasNextPage }
+      media(type: ANIME, sort: POPULARITY_DESC, tag_in: $tagIn, averageScore_greater: $scoreMin, isAdult: false, format_in: $formatIn) {
+        id
+        title { romaji english native }
+        genres
+        tags { name rank isMediaSpoiler }
+        format
+        status
+        averageScore
+        popularity
+        coverImage { large }
+        description(asHtml: false)
+        externalLinks { site url type }
+      }
+    }
+  }`;
+
+  // profile : ton profil de goût (voir buildTasteProfile). exclude : le Set `excluded`
+  // déjà construit par loadDiscover (watchlist/listes/ignorées/historique/relances
+  // précédentes). seenCandidate : LE MÊME Set que celui déjà rempli par le scan CR —
+  // étendu ici, jamais recréé, pour empêcher tout doublon d'affichage entre les deux
+  // bassins. knownTitlesNorm : titres déjà suivis, normalisés (aniNorm), pour le
+  // pré-filtre local — même logique que isKnown() dans loadNewPremieres. target :
+  // nombre de candidats encore nécessaires (quota déjà entamé par le bassin CR).
+  // ctx : { accountId, REJ, D } (mêmes compteurs/état que le bassin CR, voir
+  // evaluateDiscoverCandidate). Retourne un tableau de candidats INTERMÉDIAIRES, au
+  // même format que ceux produits par le bassin CR (voir evaluateDiscoverCandidate).
+  async function scanAnilistPopularity(profile, exclude, seenCandidate, knownTitlesNorm, target, ctx, onProgress) {
+    const found = [];
+    if (!CFG.discoverAnilistEnabled || target <= 0) return found;
+    // Profil neuf/vide : rien à cibler côté AniList — zéro requête plutôt qu'un scan
+    // large et non pertinent.
+    if (!profile || !profile.size) return found;
+    // On ne cible QUE via tag_in (voir la tâche : n'utiliser genre_in que si les
+    // `genre:` du profil sont sûrement d'origine AniList — un `genre:` peut aussi
+    // venir de Crunchyroll, localisé en CFG.locale, et enverrait alors une chaîne
+    // française à l'enum anglais d'AniList → 0 résultat silencieux). `tag:Nom` vient
+    // TOUJOURS d'AniList (voir buildTasteProfile) : nom directement utilisable.
+    const tagIn = (profile.top || [])
+      .filter((k) => k.startsWith('tag:'))
+      .map((k) => k.slice(4));
+    if (!tagIn.length) return found;   // profil basé uniquement sur des genres : rien d'exploitable ici
+    if (anilistCooldownRemainingMs() > 0) return found;   // coupe-circuit déjà en place : on n'insiste pas
+
+    const isKnownTitle = (title) => {
+      const nt = aniNorm(title);
+      if (!nt) return false;
+      return knownTitlesNorm.some((k) => k === nt || k.includes(nt) || nt.includes(k) || aniDice(k, nt) >= 0.82);
+    };
+
+    const scoreMin = CFG.discoverMinRating > 0
+      ? Math.round(Math.max(0, Math.min(5, CFG.discoverMinRating)) * 20) : null;
+    const maxPages = Math.max(1, CFG.discoverAnilistMaxPages || 5);
+    const perPage = Math.min(50, Math.max(10, CFG.discoverPageSize || 50));
+    const { accountId, REJ, D } = ctx;
+
+    let page = 1, hasNext = true;
+    while (hasNext && page <= maxPages && found.length < target) {
+      if (D.cancelRequested || anilistCooldownRemainingMs() > 0) break;
+      if (onProgress) onProgress(page, maxPages);
+      let data;
+      try {
+        data = await anilistQuery(ANILIST_DISCOVER_QUERY, {
+          page, perPage, tagIn, scoreMin, formatIn: ANILIST_DISCOVER_FORMATS,
+        });
+      } catch (e) { safeCall.log(e, 'scanAnilistPopularity'); break; }   // 429/mur d'accès : on s'arrête net, comme le bassin CR
+      const pageData = data && data.Page;
+      const media = (pageData && pageData.media) || [];
+      hasNext = !!(pageData && pageData.pageInfo && pageData.pageInfo.hasNextPage);
+      page++;
+      if (!media.length) continue;
+
+      for (const m of media) {
+        if (D.cancelRequested || found.length >= target) break;
+        if (!m || m.id == null) continue;
+
+        // ── Filtre local, GRATUIT (aucune requête) — rejeté ici = aucune requête
+        // CR dépensée pour ce candidat. ──────────────────────────────────────────
+        // Déjà ignoré côté Calendrier (bloc Nouveautés, voir loadNewPremieres) sous
+        // la clé 'ani:'+id — même convention réutilisée ici pour reconnaître le même
+        // anime, quelle que soit la vue depuis laquelle il a été ignoré.
+        if (IGNORED.has('ani:' + m.id)) continue;
+        // Genre exclu en permanence (ex. hentai — déjà bloqué aussi par isAdult:false
+        // côté requête, ceci est une seconde barrière) — toujours en OR, jamais strict,
+        // même logique que browseRejectedByGenre pour le bassin CR.
+        const genresFr = translateAniGenres(m.genres || []);
+        if (genresFr.length && categoriesRejectedByGenre(genresFr)) continue;
+        const title = aniPrimaryTitle(m) || (m.title && m.title.native) || '';
+        if (!title) continue;
+        if (isKnownTitle(title)) continue;
+
+        // ── Résolution vers Crunchyroll (réutilise resolveCrunchyrollForPremiere
+        // telle quelle — cache crmatch: déjà géré par cette fonction). ──────────
+        let cr;
+        try { cr = await resolveCrunchyrollForPremiere(m); }
+        catch (e) { safeCall.log(e, 'scanAnilistPopularity:resolve'); continue; }
+        if (!cr || !cr.id) continue;   // pas de fiche CR assez sûre : rien à évaluer ici
+
+        // Vérification IMMÉDIATE contre les exclusions les plus fraîches ET contre
+        // les candidats déjà vus (CR ou AniList) DANS CE MÊME scan, AVANT tout appel
+        // coûteux (saisons/genres/note/épisodes). Verrou posé tout de suite après.
+        if (exclude.has(cr.id) || seenCandidate.has(cr.id)) continue;
+        seenCandidate.add(cr.id);
+
+        // Genres/tags AniList déjà en main (zéro requête de plus, on les a via `m`) :
+        // mis en cache tout de suite, pour que evaluateDiscoverCandidate (qui relit
+        // ce même cache, voir readAnilistCached) les récupère automatiquement, ET
+        // pour qu'un futur scan (CR ou AniList) n'ait plus jamais à les redemander.
+        const aniResult = { matched: false, ...EMPTY_ANI, aniId: null, aniTitle: '', av: ANILIST_CACHE_VER };
+        Object.assign(aniResult, computeAniSchedule(m, {}), { matched: true, aniId: m.id, aniTitle: title });
+        cacheSet('anilist:' + cr.id, aniResult);
+
+        // Panel complet CR (déjà en cache 7 j si la série a déjà été croisée ailleurs,
+        // voir getSeriesPanel) — seule façon d'obtenir jaquette/résumé/genres CR/nombre
+        // de saisons pour ce candidat, au même format que les candidats du bassin CR.
+        let panel;
+        try { panel = await getSeriesPanel(cr.id); } catch (e) { safeCall.log(e, 'scanAnilistPopularity:panel'); continue; }
+        if (!panel) continue;
+
+        const evald = await evaluateDiscoverCandidate(panel, { accountId, REJ, D });
+        if (evald) found.push(evald);
+      }
+    }
+    return found;
+  }
 
   async function loadNewPremieres(onProgress) {
     const N = STATE.newPremieres;
@@ -9821,11 +10165,17 @@
       const title = legendary
         ? `🎲 Pépites légendaires · ${nf} trouvée${nf > 1 ? 's' : ''} sur ${target} visée${target > 1 ? 's' : ''}`
         : `🔎 Découverte · ${nf} trouvée${nf > 1 ? 's' : ''} sur ${target}`;
+      // (fix) Le scan va désormais jusqu'au bout du classement (plus de plafond de pages
+      // réglable) : `maxPages` n'est plus qu'un filet de sécurité interne dont le nombre
+      // total de pages réel n'est jamais atteint en usage normal — l'utiliser pour un % /
+      // ETA induisait en erreur (barre bloquée près de 0%). On progresse plutôt sur le vrai
+      // signal utile : le nombre de pépites déjà trouvées par rapport à la cible.
+      void maxPages;
       items.push({
         label: title,
-        count: `page ${page}/${maxPages}`,
-        pct: maxPages ? Math.round((page / maxPages) * 100) : null,
-        eta: maxPages ? estimateEta('main', page, maxPages, activityStartedAt) : null,
+        count: `page ${page}`,
+        pct: target ? Math.round((nf / target) * 100) : null,
+        eta: target ? estimateEta('main', nf, target, activityStartedAt) : null,
         done: false,
         cancellable: STATE.discover.loading,
         cancelling: STATE.discover.cancelRequested,
