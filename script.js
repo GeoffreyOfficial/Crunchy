@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      2.172.0
+// @version      2.174.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '2.172.0';
+  const SCRIPT_VERSION = '2.174.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -410,13 +410,24 @@
   // jour du script. Avant, il était estampillé avec SCRIPT_VERSION : la moindre
   // correction cosmétique relançait un scan complet de l'historique (~80 requêtes).
   // À n'incrémenter QUE si la structure d'une entrée de cache change.
-  const CACHE_TIER = '7';
+  // (T8) Le format de PERSISTANCE change, pas la structure des entrées elles-mêmes : le
+  // cache passe d'un blob unique sous la clé IDB 'v1' à une clé IDB par entrée (voir
+  // initBigCache). Sans ce bump, l'ancien blob 'v1' resterait orphelin sur disque (plus
+  // jamais lu ni écrit, jamais nettoyé) et le premier chargement démarrerait avec un cache
+  // vide au lieu de migrer proprement via le passage idbClear() + re-scan.
+  const CACHE_TIER = '8';
 
   // Le cache re-téléchargeable (épisodes, notes, historique, instantané, teintes…) est
-  // Le cache re-téléchargeable est estampillé du palier qui l'a écrit, dans la clé
-  // « schema ». Au démarrage, si l'estampille est ABSENTE ou DIFFÉRENTE du palier courant,
-  // tout le cache est vidé d'un coup. L'état utilisateur (réglages, filtres, séries
-  // ignorées, empreinte diffusion) est toujours préservé.
+  // estampillé du palier qui l'a écrit. Au démarrage, si l'estampille est ABSENTE ou
+  // DIFFÉRENTE du palier courant, tout le cache est vidé d'un coup. L'état utilisateur
+  // (réglages, filtres, séries ignorées, empreinte diffusion) est toujours préservé.
+  //
+  // (fix) Cette fonction ne gère QUE d'éventuels restes localStorage d'une installation
+  // pas encore migrée sur IndexedDB — elle tourne beaucoup trop tôt (avant même la
+  // déclaration d'idbDBPromise, en TDZ) pour toucher à IndexedDB directement. Le VRAI
+  // cache (le blob IndexedDB / BIGCACHE) est estampillé et vérifié séparément dans
+  // initBigCache() via IDB_TIER_KEY, plus bas dans le fichier. Les deux vérifications
+  // doivent rester alignées sur le même CACHE_TIER.
   function enforceCacheSchema() {
     const stored = safeCall(() => localStorage.getItem(LS + 'schema'), null, 'enforceCacheSchema:read');
     if (stored === CACHE_TIER) return;                     // format compatible : on garde tout
@@ -1295,7 +1306,6 @@
     STATS.hit = STATS.miss = STATS.requests = STATS.rate429 = 0;
     STATS.writeFail = STATS.evicted = STATS.guids = STATS.maxParallel = 0;
     STATS.byEndpoint = {};
-    warnedQuota = false;
   }
 
   function lsBytes() {
@@ -1306,118 +1316,302 @@
     }
     return n * 2;                       // UTF-16 : 2 octets par caractère
   }
+  // Taille approximative du cache réel (BIGCACHE, persisté sur IndexedDB) — sert
+  // uniquement d'indicateur (logs, diagnostic), plus de plafond ~5 Mo à surveiller dessus.
+  function bigCacheBytes() {
+    return safeCall(() => JSON.stringify(BIGCACHE).length * 2, 0, 'bigCacheBytes');
+  }
   const fmtBytes = (n) => n > 1e6 ? `${(n / 1e6).toFixed(1)} Mo` : `${Math.round(n / 1e3)} ko`;
 
-  // (16) Alerte proactive avant l'échec : la limite de ~5 Mo est une convention de
-  // navigateur, pas une valeur exposée par l'API — on l'estime donc en pratique.
-  // Dès 85 % atteints, on prévient et on purge un peu de cache de nous-même, au lieu
-  // d'attendre que setItem() échoue une première fois (et perde potentiellement des
-  // réglages avant que le mécanisme de retry n'existe pour ce point d'écriture).
-  const LS_QUOTA_ESTIMATE = 5 * 1024 * 1024;
-  let quotaWarnedProactively = false;
+  // Ne reste utile que pour STATE_KEY (réglages/filtres/ignorées/empreinte), le seul gros
+  // reste de localStorage désormais — le cache re-téléchargeable vit sur IndexedDB (voir
+  // plus bas) et n'a plus de plafond ~5 Mo. STATE_KEY étant petit, ce garde-fou ne se
+  // déclenche normalement jamais ; il reste par sécurité (ex. autre extension qui remplit
+  // localStorage sur le même domaine).
   function checkQuota() {
     const used = lsBytes();
-    if (used < LS_QUOTA_ESTIMATE * 0.85) { quotaWarnedProactively = false; return; }
-    if (quotaWarnedProactively) return;
-    quotaWarnedProactively = true;
-    const n = evictOldest(0.2);
-    LOG(`⚠ localStorage à ${Math.round((used / LS_QUOTA_ESTIMATE) * 100)}% (${fmtBytes(used)}) — purge préventive de ${n} entrées.`);
-    STATE.quotaWarning = `Cache proche de la limite du navigateur (${fmtBytes(used)} sur ~5 Mo) — ` +
-      `un nettoyage a été fait automatiquement.`;
+    if (used < 4 * 1024 * 1024) return;
+    STATE.quotaWarning = `localStorage proche de sa limite (${fmtBytes(used)}) — ` +
+      `probablement une autre extension sur ce site ; tes réglages restent prioritaires.`;
     forceRender();
   }
-  // (fix) checkQuota() scanne TOUT localStorage (lsBytes) — appelé en synchrone à chaque
-  // cacheSet(), il devenait le principal poste de lenteur pendant un scan (des centaines
-  // d'écritures rapprochées : rating/series/anilist/crmatch/seasoncount), avec un coût
-  // proche de O(n²) sur le nombre de clés en cache. Débounce à l'identique du flush eps3 :
-  // une seule vérification groupée après une rafale d'écritures, pas une par écriture.
-  let quotaCheckTimer = null;
-  function scheduleQuotaCheck() {
-    if (quotaCheckTimer) return;
-    quotaCheckTimer = setTimeout(() => { quotaCheckTimer = null; checkQuota(); }, 500);
+
+  // ─── Cache « gros volume » : IndexedDB au lieu de localStorage ─────────────────────
+  // localStorage plafonne à ~5 Mo par origine (limite fixe du navigateur, aucun code ne
+  // peut la repousser). IndexedDB n'a pas ce plafond : le quota dépend de l'espace disque
+  // disponible (en pratique des centaines de Mo, souvent plus), et il est demandé au
+  // navigateur au lieu d'être fixé en dur.
+  //
+  // Pour ne RIEN changer aux ~40 points d'appel de cacheGet/cacheSet/cacheReadRaw dans le
+  // reste du script (tous synchrones), le cache continue de vivre en mémoire dans UN SEUL
+  // objet (BIGCACHE), toujours défini (jamais null). Côté PERSISTANCE en revanche, chaque
+  // clé de BIGCACHE est son propre enregistrement IndexedDB — plus un blob unique réécrit
+  // en entier à chaque flush. Le coût d'écriture suit ce qui a changé (les clés marquées
+  // dirty/deleted depuis le dernier flush), pas la taille totale du cache. BIGCACHE.eps3all
+  // (données épisodes par série, le plus gros contributeur en volume) suit la même logique
+  // en étant éclaté en clés IDB `eps3:<seriesId>` distinctes, tout en restant un unique
+  // objet imbriqué en mémoire — aucun call site d'eps3ReadRaw/eps3Write n'a besoin de le
+  // savoir. Le très bref instant avant que le chargement initial soit terminé ne produit
+  // que des cache-miss silencieux (donnée retéléchargée une fois), jamais d'erreur — aucun
+  // appelant n'a donc besoin d'attendre ce chargement.
+  const IDB_NAME = 'crrav-cache';
+  const IDB_STORE = 'blob';
+  const IDB_EPS3_PREFIX = 'eps3:';
+  // Palier de compatibilité estampillé DANS IndexedDB (clé séparée, même store). Avant :
+  // enforceCacheSchema() (plus haut, appelée en tout début de script) ne purgeait que
+  // localStorage — un reliquat de l'époque où TOUT le cache y vivait. Depuis le passage sur
+  // IndexedDB, un changement de CACHE_TIER (ex. le passage aux tags AniList) ne vidait donc
+  // plus RIEN : le blob IndexedDB entier, écrit dans l'ancien format, était rechargé tel
+  // quel et mélangé à du code qui attend le nouveau format → données de mauvaise forme
+  // utilisées silencieusement (scoring/tags faussés, pas d'erreur visible). Ce palier est
+  // vérifié dans initBigCache(), seul endroit où l'exécution a atteint la déclaration de
+  // idbDBPromise (une vérification faite plus tôt, dans enforceCacheSchema(), planterait :
+  // idbDBPromise est un `let` pas encore initialisé à ce stade → ReferenceError).
+  const IDB_TIER_KEY = 'tier';
+  let idbDBPromise = null;
+
+  function idbOpen() {
+    if (idbDBPromise) return idbDBPromise;
+    idbDBPromise = new Promise((resolve, reject) => {
+      if (typeof indexedDB === 'undefined') { reject(new Error('IndexedDB indisponible')); return; }
+      const req = indexedDB.open(IDB_NAME, 1);
+      req.onupgradeneeded = () => { req.result.createObjectStore(IDB_STORE); };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error || new Error('ouverture IndexedDB échouée'));
+      // Deux onglets ouverts simultanément lors de la toute première création (version 1) :
+      // le second bloque tant que le premier n'a pas fini son upgrade. Sans ce handler,
+      // req reste pendu indéfiniment (ni onsuccess ni onerror) et idbDBPromise ne se
+      // règle jamais.
+      req.onblocked = () => reject(new Error('ouverture IndexedDB bloquée par un autre onglet'));
+    });
+    // (fix) Avant : une promesse REJETÉE restait mise en cache indéfiniment dans
+    // idbDBPromise. Un seul échec transitoire (autre onglet en pleine upgrade, navigateur
+    // en mode privé restrictif, etc.) désactivait alors IndexedDB pour TOUTE la session :
+    // les appelants rappelaient idbOpen(), qui renvoyait la même promesse déjà rejetée,
+    // sans jamais retenter — plus aucun cache lu ni écrit jusqu'au rechargement de la page.
+    // On réinitialise donc la promesse mise en cache dès qu'elle échoue, pour que le
+    // prochain appel retente une vraie ouverture.
+    idbDBPromise.catch(() => { idbDBPromise = null; });
+    return idbDBPromise;
   }
-
-  // (19) Le cache episodes-par-série (`eps3:<id>`) vivait en une clé localStorage par
-  // série. Sur une watchlist de 100+ séries, ça fait autant de lectures synchrones +
-  // JSON.parse séparés à chaque vérification de fraîcheur — le genre de chose déjà
-  // consolidée ailleurs (réglages/filtres/ignorées/empreinte → STATE_KEY, cf. plus haut).
-  // Ici : un seul objet { [seriesId]: {ts, v} }, chargé une fois en mémoire, avec les
-  // écritures groupées (debounce) pour ne pas réécrire tout le blob à chaque série.
-  const EPS3_KEY = LS + 'eps3all';
-  let eps3Store = null;           // objet en mémoire, chargé paresseusement
-  let eps3Dirty = false;
-  let eps3FlushTimer = null;
-
-  function loadEps3Store() {
-    if (eps3Store) return eps3Store;
-    eps3Store = safeCall(() => JSON.parse(localStorage.getItem(EPS3_KEY) || '{}'), {}, 'eps3:load') || {};
-
-    // Migration depuis les anciennes clés individuelles `eps3:<id>`, si présentes
-    // (mise à jour depuis une version antérieure à cette consolidation).
-    const prefix = LS + 'eps3:';
-    const legacyKeys = Object.keys(localStorage).filter((k) => k.startsWith(prefix));
-    if (legacyKeys.length) {
-      for (const k of legacyKeys) {
-        const raw = safeCall(() => JSON.parse(localStorage.getItem(k)), null, 'eps3:migrate');
-        if (raw) eps3Store[k.slice(prefix.length)] = raw;
-        safeCall(() => localStorage.removeItem(k), undefined, 'eps3:migrate:cleanup');
-      }
-      LOG(`migration : ${legacyKeys.length} caches d'épisodes fusionnés dans une seule clé`);
-      eps3Dirty = true;
-      flushEps3Store();
-    }
-    return eps3Store;
-  }
-
-  function flushEps3Store() {
-    clearTimeout(eps3FlushTimer);
-    eps3FlushTimer = null;
-    if (!eps3Dirty || !eps3Store) return;
-    eps3Dirty = false;
+  async function idbGet(key) {
     try {
-      localStorage.setItem(EPS3_KEY, JSON.stringify(eps3Store));
-      checkQuota();
-    } catch (e) {
-      safeCall.log(e, 'eps3:flush');
-      evictOldest(0.25);
-      safeCall(() => localStorage.setItem(EPS3_KEY, JSON.stringify(eps3Store)), undefined, 'eps3:flush:retry');
+      const db = await idbOpen();
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction(IDB_STORE, 'readonly');
+        const req = tx.objectStore(IDB_STORE).get(key);
+        req.onsuccess = () => resolve(req.result !== undefined ? req.result : null);
+        req.onerror = () => reject(req.error);
+      });
+    } catch (e) { safeCall.log(e, 'idb:get'); return null; }
+  }
+  async function idbSet(key, obj) {
+    try {
+      const db = await idbOpen();
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction(IDB_STORE, 'readwrite');
+        tx.objectStore(IDB_STORE).put(obj, key);
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch (e) { safeCall.log(e, 'idb:set'); return false; }
+  }
+  // Écrit et/ou efface plusieurs clés dans UNE SEULE transaction IndexedDB — regroupe les
+  // écritures d'une même rafale (voir scheduleBigCacheFlush) au lieu d'un round-trip par
+  // clé modifiée.
+  async function idbBatch(puts, deletes) {
+    if (!puts.length && !deletes.length) return true;
+    try {
+      const db = await idbOpen();
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction(IDB_STORE, 'readwrite');
+        const store = tx.objectStore(IDB_STORE);
+        for (const [k, v] of puts) store.put(v, k);
+        for (const k of deletes) store.delete(k);
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch (e) { safeCall.log(e, 'idb:batch'); return false; }
+  }
+  // Charge tout le store en une passe (curseur) au démarrage — remplace l'ancien
+  // idbGet('v1') d'un blob unique, puisque chaque clé de cache est maintenant son propre
+  // enregistrement.
+  async function idbLoadAll() {
+    try {
+      const db = await idbOpen();
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction(IDB_STORE, 'readonly');
+        const out = [];
+        const req = tx.objectStore(IDB_STORE).openCursor();
+        req.onsuccess = () => {
+          const cur = req.result;
+          if (cur) { out.push([cur.key, cur.value]); cur.continue(); }
+          else resolve(out);
+        };
+        req.onerror = () => reject(req.error);
+      });
+    } catch (e) { safeCall.log(e, 'idb:loadAll'); return []; }
+  }
+  async function idbClear() {
+    try {
+      const db = await idbOpen();
+      return await new Promise((resolve) => {
+        const tx = db.transaction(IDB_STORE, 'readwrite');
+        tx.objectStore(IDB_STORE).clear();
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => resolve(false);
+      });
+    } catch (e) { safeCall.log(e, 'idb:clear'); return false; }
+  }
+
+  const BIGCACHE = {};   // { [key]: {ts, v} }, sauf BIGCACHE.eps3all qui est { [seriesId]: {ts, v} }
+  // Clés IDB (déjà préfixées 'eps3:' pour les entrées épisodes) en attente d'écriture ou de
+  // suppression, regroupées par le timer 400 ms puis vidées en une seule transaction (voir
+  // flushBigCache). markDirty/markDeleted sont les deux seuls points d'entrée : ils gardent
+  // les deux Sets mutuellement exclusifs (une clé récrite après suppression redevient
+  // dirty, jamais les deux à la fois).
+  const dirtyIdbKeys = new Set();
+  const deletedIdbKeys = new Set();
+  let bigCacheFlushTimer = null;
+  // Clés qui restent en localStorage (petites, lues en synchrone dès le tout début du
+  // script, avant même que boot() ne tourne) — jamais migrées vers IndexedDB.
+  const IDB_SPARED = new Set([STATE_KEY, LS + 'schema', LS + 'debug', LS + 'hues']);
+
+  function markDirty(idbKey) {
+    deletedIdbKeys.delete(idbKey);
+    dirtyIdbKeys.add(idbKey);
+    scheduleBigCacheFlush();
+  }
+  function markDeleted(idbKey) {
+    dirtyIdbKeys.delete(idbKey);
+    deletedIdbKeys.add(idbKey);
+    scheduleBigCacheFlush();
+  }
+
+  // Reprend, une seule fois, tout ce qui traînait encore dans localStorage (installations
+  // mises à jour depuis une version antérieure à ce passage sur IndexedDB) et le supprime
+  // de localStorage pour libérer la place tout de suite.
+  function migrateLocalStorageCacheToIdb() {
+    let n = 0;
+    for (const k of Object.keys(localStorage)) {
+      if (!k.startsWith(LS) || IDB_SPARED.has(k)) continue;
+      const shortKey = k.slice(LS.length);
+      const raw = safeCall(() => JSON.parse(localStorage.getItem(k)), null, 'idb:migrate');
+      if (raw != null) { BIGCACHE[shortKey] = raw; markDirty(shortKey); n++; }
+      safeCall(() => localStorage.removeItem(k), undefined, 'idb:migrate:cleanup');
+    }
+    if (n) LOG(`migration : ${n} entrées de cache reprises de localStorage vers IndexedDB`);
+  }
+
+  // Lancé au chargement du script, sans bloquer le reste (aucun `await` requis ailleurs —
+  // voir le commentaire en tête de section).
+  async function initBigCache() {
+    // (fix) Palier de schéma : si le store IndexedDB a été écrit par un CACHE_TIER différent
+    // (ou n'a jamais été estampillé — installations d'avant ce correctif), il est
+    // incompatible avec le code courant. On l'ignore et on le vide sur disque, exactement
+    // comme enforceCacheSchema() le fait déjà pour les restes localStorage. Sans ce
+    // contrôle, un changement de format de cache (ex. tags AniList, ou le passage à des
+    // clés IDB par entrée) ne se verrait jamais appliqué tant que l'utilisateur ne vide pas
+    // le cache à la main.
+    const storedTier = await idbGet(IDB_TIER_KEY);
+    if (storedTier !== CACHE_TIER) {
+      if (storedTier !== null) {
+        LOG(`cache IndexedDB au format T${storedTier}, script en T${CACHE_TIER} — cache invalidé`);
+      }
+      await idbClear();
+      idbSet(IDB_TIER_KEY, CACHE_TIER); // pas d'await : ne bloque pas le reste du boot
+      migrateLocalStorageCacheToIdb();
+      return;
+    }
+    const entries = await idbLoadAll();
+    for (const [k, v] of entries) {
+      if (k === IDB_TIER_KEY) continue;
+      if (typeof k === 'string' && k.startsWith(IDB_EPS3_PREFIX)) {
+        const seriesId = k.slice(IDB_EPS3_PREFIX.length);
+        const store = loadEps3Store();
+        // Les entrées déjà présentes en mémoire (écrites pendant le chargement) gagnent.
+        if (!(seriesId in store)) store[seriesId] = v;
+      } else if (!(k in BIGCACHE)) {
+        BIGCACHE[k] = v;
+      }
     }
   }
-  function scheduleEps3Flush() {
-    eps3Dirty = true;
-    clearTimeout(eps3FlushTimer);
-    // 400 ms : le temps que les séries d'une même vague (pool concurrent) s'écrivent
-    // toutes avant de sérialiser le blob une seule fois, plutôt qu'une fois par série.
-    eps3FlushTimer = setTimeout(flushEps3Store, 400);
+  initBigCache();
+
+  // Tente d'écrire/effacer le lot de clés en attente. En cas d'échec (quota IndexedDB
+  // atteint, navigateur en mode privé restrictif…), purge une partie du cache et retente
+  // UNE fois — au-delà, on abandonne et on prévient l'utilisateur, comme avant.
+  function bigCacheAttemptFlush(isRetry) {
+    if (!dirtyIdbKeys.size && !deletedIdbKeys.size) return;
+    const puts = [];
+    for (const k of dirtyIdbKeys) {
+      const v = k.startsWith(IDB_EPS3_PREFIX) ? loadEps3Store()[k.slice(IDB_EPS3_PREFIX.length)] : BIGCACHE[k];
+      if (v !== undefined) puts.push([k, v]);
+    }
+    const deletes = Array.from(deletedIdbKeys);
+    dirtyIdbKeys.clear();
+    deletedIdbKeys.clear();
+    idbBatch(puts, deletes).then((ok) => {
+      if (ok) return;
+      if (isRetry) {
+        STATS.writeFail++;
+        STATE.quotaWarning = `Le cache (IndexedDB) n'a pas pu être sauvegardé — il sera reconstruit au fil des visites.`;
+        forceRender();
+        return;
+      }
+      // evictOldest() repeuple dirtyIdbKeys/deletedIdbKeys via markDirty/markDeleted ; on
+      // relance donc un flush immédiat plutôt que d'attendre le timer 400 ms.
+      const n = evictOldest(0.25);
+      LOG(`⚠ échec écriture IndexedDB — purge de ${n} entrées, nouvel essai.`);
+      bigCacheAttemptFlush(true);
+    });
   }
-  // Ne pas perdre les dernières écritures si l'onglet se ferme avant les 400 ms.
-  window.addEventListener('pagehide', flushEps3Store);
+  function flushBigCache() {
+    clearTimeout(bigCacheFlushTimer);
+    bigCacheFlushTimer = null;
+    bigCacheAttemptFlush(false);
+  }
+  function scheduleBigCacheFlush() {
+    clearTimeout(bigCacheFlushTimer);
+    // 400 ms : le temps que les écritures d'une même vague (pool concurrent) s'accumulent
+    // avant de les regrouper en une seule transaction, plutôt qu'une par écriture.
+    bigCacheFlushTimer = setTimeout(flushBigCache, 400);
+  }
+  // Ne pas perdre les dernières écritures si l'onglet se ferme avant les 400 ms (best
+  // effort : contrairement à localStorage, une écriture IndexedDB lancée à la fermeture
+  // n'est pas garantie à 100 % de finir — voir visibilitychange ci-dessous qui déclenche
+  // le flush dès la mise en arrière-plan, plus tôt et plus fiable que pagehide seul).
+  window.addEventListener('pagehide', flushBigCache);
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') flushEps3Store();
+    if (document.visibilityState === 'hidden') flushBigCache();
   });
 
+  function loadEps3Store() {
+    if (!BIGCACHE.eps3all) BIGCACHE.eps3all = {};
+    return BIGCACHE.eps3all;
+  }
   function eps3ReadRaw(seriesId) {
     return loadEps3Store()[seriesId] || null;
   }
   function eps3Write(seriesId, v) {
     loadEps3Store()[seriesId] = { ts: Date.now(), v };
-    scheduleEps3Flush();
+    markDirty(IDB_EPS3_PREFIX + seriesId);
   }
-  // Purge les entrées les plus vieilles du blob eps3 (utilisé par evictOldest).
+  // Purge les entrées les plus vieilles du store eps3 (utilisé par evictOldest).
   function eps3EvictOldest(fraction) {
     const store = loadEps3Store();
     const entries = Object.entries(store).sort((a, b) => (a[1].ts || 0) - (b[1].ts || 0));
     const n = Math.ceil(entries.length * fraction);
-    for (let i = 0; i < n && i < entries.length; i++) delete store[entries[i][0]];
-    if (n > 0) { eps3Dirty = true; flushEps3Store(); }
+    for (let i = 0; i < n && i < entries.length; i++) {
+      const seriesId = entries[i][0];
+      delete store[seriesId];
+      markDeleted(IDB_EPS3_PREFIX + seriesId);
+    }
     return Math.min(n, entries.length);
   }
 
   function cacheReadRaw(key) {
-    try {
-      const raw = localStorage.getItem(LS + key);
-      return raw ? JSON.parse(raw) : null;
-    } catch (_) { return null; }
+    return BIGCACHE[key] || null;
   }
   // Lecture SANS contrainte d'âge : sert au scan incrémental, qui repart de l'ancien
   // résultat même expiré (il ne le fait pas confiance, il le complète).
@@ -1432,60 +1626,33 @@
     return o.v;
   }
 
-  // Quota plein = plus AUCUNE écriture, donc plus aucun cache, donc tout se
-  // retélécharge à chaque fois. La lenteur s'installe alors progressivement,
-  // à mesure que le cache grossit. On purge les entrées les plus vieilles.
-  // (eps3: n'est plus une clé individuelle mais le blob consolidé ci-dessus,
-  // purgé en premier — c'est généralement le plus gros contributeur.)
-  // (fix) 'watchedids:' ajouté : c'est l'entrée la plus volumineuse du cache (historique de
-  // visionnage complet + détail par série, dont la liste des clés d'épisodes — voir
-  // serializeDetail) et elle nourrit directement Découverte. Avant, elle était épargnée par
-  // la purge quota alors que des entrées bien plus légères (rating:, series-en:...) étaient
-  // sacrifiées en premier — la purge tapait donc sur les mauvaises entrées.
-  // (fix) 'anilist:' ajouté : oubliée depuis l'introduction du cache AniList, cette entrée
-  // (schedule + genres + tags par série) n'était JAMAIS purgée par evictOldest — elle
-  // pouvait donc s'accumuler indéfiniment et occuper une part croissante du quota pendant
-  // que les autres catégories (rating:, series:...) étaient sacrifiées en premier.
+  // Nettoyage : purge les entrées les plus vieilles (utilisé en secours si une écriture
+  // IndexedDB échoue, et par le bouton « Vider une partie du cache » des réglages).
+  // (fix) 'watchedids:' et 'anilist:' inclus : ce sont les entrées les plus volumineuses
+  // (historique de visionnage détaillé, et schedule/genres/tags par série) — sans elles,
+  // la purge tapait sur des entrées bien plus légères en épargnant les grosses.
   const EVICTABLE = ['rating:', 'series:', 'series-en:', 'seasoncount:', 'snapshot', 'crmatch:', 'watchedids:', 'anilist:', 'discep:'];
   function evictOldest(fraction) {
     let evicted = eps3EvictOldest(fraction);
-    const entries = [];
-    for (const k of Object.keys(localStorage)) {
-      if (!k.startsWith(LS)) continue;
-      if (!EVICTABLE.some((p) => k.startsWith(LS + p))) continue;
-      const ts = safeCall(() => (JSON.parse(localStorage.getItem(k)) || {}).ts || 0, 0, 'evictOldest');
-      entries.push([k, ts]);
-    }
+    const entries = Object.keys(BIGCACHE)
+      .filter((k) => k !== 'eps3all' && EVICTABLE.some((p) => k.startsWith(p)))
+      .map((k) => [k, (BIGCACHE[k] || {}).ts || 0]);
     entries.sort((a, b) => a[1] - b[1]);
     const n = Math.max(evicted ? 0 : 1, Math.ceil(entries.length * fraction));
-    for (let i = 0; i < n && i < entries.length; i++) localStorage.removeItem(entries[i][0]);
+    for (let i = 0; i < n && i < entries.length; i++) {
+      const k = entries[i][0];
+      delete BIGCACHE[k];
+      markDeleted(k);
+    }
     evicted += Math.min(n, entries.length);
     STATS.evicted += evicted;
     return evicted;
   }
 
-  let warnedQuota = false;
   function cacheSet(key, v) {
-    const payload = JSON.stringify({ ts: Date.now(), v });
-    try {
-      localStorage.setItem(LS + key, payload);
-      scheduleQuotaCheck();
-      return true;
-    } catch (e) {
-      // Une seule tentative de purge, puis on réessaie.
-      const n = evictOldest(0.25);
-      if (!warnedQuota) {
-        warnedQuota = true;
-        LOG(`⚠ localStorage plein (${fmtBytes(lsBytes())}) — purge de ${n} entrées de cache.`);
-      }
-      try {
-        localStorage.setItem(LS + key, payload);
-        return true;
-      } catch (_) {
-        STATS.writeFail++;
-        return false;
-      }
-    }
+    BIGCACHE[key] = { ts: Date.now(), v };
+    markDirty(key);
+    return true;
   }
 
   // ─── Historique des pépites LÉGENDAIRES déjà montrées ───────────────────────────
@@ -1513,6 +1680,26 @@
     const now = Date.now();
     for (const id of ids) obj[id] = now;
     cacheSet(LEGENDARY_HISTORY_KEY, obj);
+  }
+
+  // ─── Curseur de reprise du scan popularité pour le dé légendaire ────────────────
+  // (fix) Sans ça, un scan qui va « jusqu'au bout » repartait de la page 0 à CHAQUE
+  // lancement (frais après reload, ou même « encore des légendaires » dans la même
+  // session) : les mêmes centaines de candidats déjà rejetés une fois (note, genre,
+  // saisons…) étaient reréévalués en entier à chaque fois — d'où un scan « très long »
+  // et un cache qui grossit vite (rating:/anilist:/seasoncount:/crmatch: réécrits pour
+  // les mêmes séries à répétition). Ici on mémorise juste où le DERNIER scan légendaire
+  // s'est arrêté (un entier, poids négligeable) et on reprend de là au lancement suivant
+  // — donc on avance dans le classement au lieu de repasser sur le même terrain. Une fois
+  // le classement réellement épuisé, le curseur est remis à 0 pour capter les nouveautés
+  // qui grimperaient depuis en haut du classement.
+  const LEGENDARY_CURSOR_KEY = 'legendaryCursor';
+  function loadLegendaryCursor() {
+    const raw = cacheReadRaw(LEGENDARY_CURSOR_KEY);
+    return (raw && raw.v && Number.isFinite(raw.v.start)) ? raw.v.start : 0;
+  }
+  function saveLegendaryCursor(start) {
+    cacheSet(LEGENDARY_CURSOR_KEY, { start: Math.max(0, start | 0) });
   }
 
   // L'API met ~2,1 s par requête — pour l'application Crunchyroll comme pour ce script.
@@ -3481,7 +3668,7 @@
         LOG(`📊 cache ${STATS.hit} hits / ${STATS.miss} miss` +
           ` · ${STATS.requests} requêtes · ${STATS.guids} GUID · ${STATS.rate429} erreurs 429` +
           ` · parallélisme max ${STATS.maxParallel}` +
-          ` · localStorage ${fmtBytes(lsBytes())}` +
+          ` · cache ${fmtBytes(bigCacheBytes())}` +
           (STATS.evicted ? ` · ${STATS.evicted} entrées purgées` : '') +
           (STATS.writeFail ? ` · ⚠ ${STATS.writeFail} ÉCRITURES DE CACHE ÉCHOUÉES` : ''));
         const rows = Object.entries(STATS.byEndpoint)
@@ -4082,7 +4269,11 @@
       const excluded = new Set([...knownIds, ...watchedIds, ...D.excludedIds, ...legendaryHistoryIds]);
       const seenCandidate = new Set();
       const matches = [];
-      let start = 0;
+      // (fix) Le scan légendaire reprend là où le précédent s'est arrêté (voir
+      // loadLegendaryCursor) au lieu de toujours repartir de la page 0 — Découverte
+      // normale, elle, repart bien de 0 à chaque fois (cible modeste, atteinte vite,
+      // aucun intérêt à mémoriser un curseur).
+      let start = legendary ? (more ? (D.legendaryCursor ?? loadLegendaryCursor()) : loadLegendaryCursor()) : 0;
       // (fix) Plus de plafond réglable : on va jusqu'au bout du classement popularité
       // (arrêt réel = l'API n'a plus rien à servir, cf. `data.length === 0` plus bas).
       // POPULAR_SCAN_SAFETY_CAP n'est qu'un garde-fou anti-boucle-infinie, jamais atteint
@@ -4273,6 +4464,17 @@
       // Si la boucle n'a pas été coupée en cours (cancel/exhausted), c'est soit la cible
       // atteinte, soit le plafond de pages.
       if (stopReason === undefined) stopReason = matches.length >= target ? 'target' : 'maxPages';
+
+      // (fix) Curseur de reprise (voir loadLegendaryCursor) : mémorisé pour TOUT arrêt sauf
+      // 'exhausted', où on revient à 0 pour rebalayer depuis le haut du classement au
+      // prochain lancement (capter ce qui aurait grimpé entre-temps). Fait aussi pour un
+      // arrêt 'cancelled' : reprendre pile où l'interruption a eu lieu, plutôt que de perdre
+      // la progression et repartir de 0.
+      if (legendary) {
+        const nextStart = stopReason === 'exhausted' ? 0 : start;
+        D.legendaryCursor = nextStart;
+        saveLegendaryCursor(nextStart);
+      }
 
       const found = matches.slice(0, target);
       found.forEach((s) => D.excludedIds.add(s.id));
@@ -6458,7 +6660,11 @@
   .crrav-card.crrav-legendary{animation:crrav-legpulse 2.6s ease-in-out infinite}
   .crrav-card.crrav-legendary::before{background:linear-gradient(180deg,#ffe08a,#f4a521)!important;width:4px}
   .crrav-lrow-discover.crrav-legendary{animation:crrav-legpulse 2.6s ease-in-out infinite}
-  .crrav-legribbon{position:absolute;top:8px;right:8px;z-index:2;
+  /* (fix) z-index abaissé (2 → 0, comme .crrav-rating/.crrav-airing qui n'en avaient déjà
+     pas) : à z-index:2 le ruban restait AU-DESSUS du panneau résumé (.crrav-syn, z-index:1,
+     inset:0) une fois ouvert via le bouton « i », et cachait le début du texte en haut à
+     droite. Il passe maintenant derrière comme les autres badges de la jaquette. */
+  .crrav-legribbon{position:absolute;top:8px;right:8px;z-index:0;
     background:linear-gradient(135deg,#ffe08a,#f4a521);color:#241a04;
     font:800 10px/1 system-ui;letter-spacing:.02em;border-radius:6px;padding:4px 7px;
     box-shadow:0 2px 8px rgba(244,165,33,.5);white-space:nowrap}
@@ -6491,7 +6697,9 @@
   .crrav-card.crrav-notable{box-shadow:0 0 0 1px rgba(159,214,255,.4),0 0 10px 0 rgba(159,214,255,.22)}
   .crrav-card.crrav-notable::before{width:3.5px;background:linear-gradient(180deg,#c7e8ff,#5fa8e0)!important}
   .crrav-lrow-discover.crrav-notable{box-shadow:0 0 0 1px rgba(159,214,255,.35),0 0 8px 0 rgba(159,214,255,.18)}
-  .crrav-notaribbon{position:absolute;top:8px;right:8px;z-index:2;
+  /* (fix) même correction que .crrav-legribbon : z-index 2 → 0 pour ne plus recouvrir le
+     résumé une fois le panneau .crrav-syn ouvert. */
+  .crrav-notaribbon{position:absolute;top:8px;right:8px;z-index:0;
     background:linear-gradient(135deg,#c7e8ff,#5fa8e0);color:#0b2436;
     font:800 10px/1 system-ui;letter-spacing:.02em;border-radius:6px;padding:4px 7px;
     box-shadow:0 2px 8px rgba(95,168,224,.5);white-space:nowrap}
@@ -9685,22 +9893,97 @@
     return { status: 'ok', note: `${s.episodes.length} épisode(s) analysés pour « ${s.title} ».` };
   }
 
-  // Répartition du localStorage par groupe (même logique que resteAVoir.stats(), mais
-  // renvoyée en données plutôt qu'affichée en console.table).
-  function computeStorageDiag() {
-    const groups = {};
-    for (const k of Object.keys(localStorage)) {
-      if (!k.startsWith(LS)) continue;
-      const g = (k.slice(LS.length).split(':')[0]) || '(racine)';
-      const size = (k.length + (localStorage.getItem(k) || '').length) * 2;
-      groups[g] = groups[g] || { entrées: 0, octets: 0 };
-      groups[g].entrées++; groups[g].octets += size;
+  // Petit format d'âge relatif (« il y a 3 j »…) — pour le diagnostic uniquement.
+  function fmtAge(ts) {
+    if (!ts) return '—';
+    const sec = Math.max(0, (Date.now() - ts) / 1000);
+    if (sec < 3600) return `il y a ${Math.max(1, Math.round(sec / 60))} min`;
+    if (sec < 86400) return `il y a ${Math.round(sec / 3600)} h`;
+    return `il y a ${Math.round(sec / 86400)} j`;
+  }
+
+  // Écrit puis relit une valeur de test dans IndexedDB : vérifie que le stockage
+  // fonctionne VRAIMENT sur cet appareil (navigation privée restrictive sur Safari/Firefox
+  // iOS, quota déjà épuisé, IndexedDB désactivé…), plutôt que de le supposer parce que le
+  // code ne plante pas — sur mobile, sans console, c'est le seul moyen de le savoir.
+  async function testIdbRoundtrip() {
+    try {
+      const db = await idbOpen();
+      const probeKey = '__diag_probe__';
+      const val = { t: Date.now() };
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(IDB_STORE, 'readwrite');
+        tx.objectStore(IDB_STORE).put(val, probeKey);
+        tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
+      });
+      const read = await new Promise((resolve, reject) => {
+        const tx = db.transaction(IDB_STORE, 'readonly');
+        const req = tx.objectStore(IDB_STORE).get(probeKey);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+      await new Promise((resolve) => {
+        const tx = db.transaction(IDB_STORE, 'readwrite');
+        tx.objectStore(IDB_STORE).delete(probeKey);
+        tx.oncomplete = () => resolve(); tx.onerror = () => resolve();
+      });
+      return !!(read && read.t === val.t);
+    } catch (e) { safeCall.log(e, 'diag:idbRoundtrip'); return false; }
+  }
+
+  // Âge de l'entrée la plus ancienne / la plus récente du cache — signale un cache qui ne
+  // se renouvelle plus (toutes les entrées vieilles) ou qui vient d'être vidé.
+  function computeCacheFreshness() {
+    let oldest = null, newest = null, count = 0;
+    const scan = (o) => {
+      for (const k of Object.keys(o)) {
+        const ts = (o[k] || {}).ts;
+        if (!ts) continue;
+        count++;
+        if (oldest == null || ts < oldest) oldest = ts;
+        if (newest == null || ts > newest) newest = ts;
+      }
+    };
+    for (const k of Object.keys(BIGCACHE)) {
+      if (k === 'eps3all') scan(BIGCACHE.eps3all || {});
+      else scan({ [k]: BIGCACHE[k] });
     }
-    const total = lsBytes();
-    // ~5 Mo est l'estimation de quota déjà utilisée ailleurs dans ce script (voir
-    // stats() et les avertissements de purge) — pas une garantie du navigateur, un repère.
-    const pctOfQuota = Math.round((total / 5e6) * 100);
-    return { total, groups, pctOfQuota };
+    return { count, oldest, newest };
+  }
+
+  // Répartition + santé du cache. Le cache re-téléchargeable vit dans BIGCACHE, persisté
+  // sur IndexedDB — plus de plafond fixe ~5 Mo : on demande le quota réel du navigateur
+  // quand l'API le permet (navigator.storage.estimate), et on VÉRIFIE que l'écriture
+  // fonctionne réellement (testIdbRoundtrip) plutôt que de le supposer.
+  async function computeStorageDiag() {
+    const groups = {};
+    for (const k of Object.keys(BIGCACHE)) {
+      if (k === 'eps3all') {
+        groups.eps3 = {
+          entrées: Object.keys(BIGCACHE.eps3all || {}).length,
+          octets: safeCall(() => JSON.stringify(BIGCACHE.eps3all).length * 2, 0, 'diag:eps3size'),
+        };
+        continue;
+      }
+      const g = k.split(':')[0] || '(racine)';
+      const octets = safeCall(() => JSON.stringify(BIGCACHE[k]).length * 2, 0, 'diag:size');
+      groups[g] = groups[g] || { entrées: 0, octets: 0 };
+      groups[g].entrées++; groups[g].octets += octets;
+    }
+    const total = bigCacheBytes();
+    let pctOfQuota = null;
+    let quotaLabel = `${fmtBytes(total)} (IndexedDB — pas de plafond fixe)`;
+    try {
+      const est = navigator.storage && navigator.storage.estimate ? await navigator.storage.estimate() : null;
+      if (est && est.quota) {
+        pctOfQuota = Math.round((total / est.quota) * 100);
+        quotaLabel = `${fmtBytes(total)} sur ${fmtBytes(est.quota)} disponibles sur cet appareil (${pctOfQuota} %)`;
+      }
+    } catch (e) { safeCall.log(e, 'diag:estimate'); }
+    const leftover = Object.keys(localStorage).filter((k) => k.startsWith(LS) && !IDB_SPARED.has(k)).length;
+    const roundtrip = await testIdbRoundtrip();
+    const fresh = computeCacheFreshness();
+    return { total, groups, pctOfQuota, quotaLabel, leftover, roundtrip, fresh };
   }
 
   async function runFullDiagnostic() {
@@ -9757,15 +10040,30 @@
     addStep({ id: 'seasons', title: 'Découpage en saisons (Crunchyroll)',
       ...summarizeSeasonDiag(), html: renderSeasonDiag() });
 
-    // 6. Stockage local.
-    const storage = computeStorageDiag();
+    // 6. Cache & stockage (IndexedDB) — tout ce que resteAVoir.stats() montrait en
+    // console, désormais dans le rapport à l'écran (inutilisable sur mobile sans console).
+    const storage = await computeStorageDiag();
     addStep({
-      id: 'storage', title: 'Stockage local',
-      status: storage.pctOfQuota > 85 ? 'err' : storage.pctOfQuota > 60 ? 'warn' : 'ok',
+      id: 'storage', title: 'Cache & stockage (IndexedDB)',
+      status: !storage.roundtrip ? 'err'
+        : (storage.leftover || (storage.pctOfQuota != null && storage.pctOfQuota > 85)) ? 'warn'
+          : 'ok',
       lines: [
-        ['Utilisé', `${fmtBytes(storage.total)} sur ~5 Mo (${storage.pctOfQuota} %)`],
+        ['Lecture/écriture IndexedDB', storage.roundtrip ? '✅ fonctionne' : '❌ échec — rien ne sera sauvegardé sur cet appareil'],
+        ['Utilisé', storage.quotaLabel],
+        ['Entrées en cache', String(storage.fresh.count)],
+        ['Entrée la plus ancienne', fmtAge(storage.fresh.oldest)],
+        ['Entrée la plus récente', fmtAge(storage.fresh.newest)],
+        ...(storage.leftover
+          ? [['⚠ Restes d\'une ancienne version', `${storage.leftover} clé(s) localStorage — se videront au prochain rechargement`]]
+          : []),
+        ['Cache (cette session)', `${STATS.hit} lectures en cache / ${STATS.miss} absentes · ${STATS.requests} requêtes réseau`],
+        ...(STATS.rate429 ? [['⚠ Erreurs 429 (limitation réseau)', String(STATS.rate429)]] : []),
+        ...(STATS.evicted ? [['Entrées purgées (session)', String(STATS.evicted)]] : []),
+        ...(STATS.writeFail ? [['❌ Échecs d\'écriture (session)', String(STATS.writeFail)]] : []),
+        ...(Object.keys(storage.groups).length ? [['— Détail par catégorie —', '']] : []),
         ...Object.entries(storage.groups).sort((a, b) => b[1].octets - a[1].octets)
-          .map(([g, v]) => [g, `${v.entrées} entrée${v.entrées > 1 ? 's' : ''} · ${fmtBytes(v.octets)}`]),
+          .map(([g, v]) => [`· ${g}`, `${v.entrées} entrée${v.entrées > 1 ? 's' : ''} · ${fmtBytes(v.octets)}`]),
       ],
     });
 
@@ -9975,16 +10273,29 @@
     return patch;
   }
 
-  // (2) ne détruit que les données re-téléchargeables.
+  // (2) ne détruit que les données re-téléchargeables (cache IndexedDB + éventuels
+  // restes localStorage d'une installation pas encore migrée).
   function clearCache() {
-    // Réglages, filtres, ignorées et empreinte diffusion vivent maintenant dans
-    // une seule clé (STATE_KEY) : plus besoin d'un ensemble de clés à préserver.
+    const n = Object.keys(BIGCACHE).length;
+    for (const k of Object.keys(BIGCACHE)) delete BIGCACHE[k];
+    // (fix) Un flush (écriture des clés en attente) puis un clear() juste derrière
+    // lançaient deux transactions IndexedDB pour rien — annuler le flush en attente et
+    // vider les Sets suffit, clear() fait tout le travail. clear() efface aussi la clé de
+    // palier (IDB_TIER_KEY) : on la réécrit tout de suite pour que le prochain démarrage
+    // ne re-déclenche pas, à tort, le message « cache au format T… — invalidé » (voir
+    // initBigCache).
+    dirtyIdbKeys.clear();
+    deletedIdbKeys.clear();
+    clearTimeout(bigCacheFlushTimer);
+    bigCacheFlushTimer = null;
+    idbClear().then(() => idbSet(IDB_TIER_KEY, CACHE_TIER));
+    // Réglages, filtres, ignorées et empreinte diffusion vivent dans une seule clé
+    // (STATE_KEY), préservée. Restes éventuels d'une ancienne installation localStorage.
     const keep = new Set([STATE_KEY]);
-    const keys = Object.keys(localStorage).filter((k) => k.startsWith(LS) && !keep.has(k));
+    const keys = Object.keys(localStorage).filter((k) => k.startsWith(LS) && !keep.has(k) && !IDB_SPARED.has(k));
     keys.forEach((k) => localStorage.removeItem(k));
-    eps3Store = null; eps3Dirty = false; clearTimeout(eps3FlushTimer);
-    LOG(`${keys.length} entrées de cache supprimées`);
-    return keys.length;
+    LOG(`${n + keys.length} entrées de cache supprimées`);
+    return n + keys.length;
   }
 
   // Invalide seulement certains préfixes de cache (ex. épisodes, historique), pour
@@ -9994,13 +10305,11 @@
     if (prefixes.includes('eps3:')) {
       const store = loadEps3Store();
       n += Object.keys(store).length;
-      for (const k of Object.keys(store)) delete store[k];
-      eps3Dirty = true;
-      flushEps3Store();
+      for (const k of Object.keys(store)) { delete store[k]; markDeleted(IDB_EPS3_PREFIX + k); }
     }
-    for (const k of Object.keys(localStorage)) {
-      if (!k.startsWith(LS)) continue;
-      if (prefixes.some((p) => p !== 'eps3:' && k.startsWith(LS + p))) { localStorage.removeItem(k); n++; }
+    for (const k of Object.keys(BIGCACHE)) {
+      if (k === 'eps3all') continue;
+      if (prefixes.some((p) => p !== 'eps3:' && k.startsWith(p))) { delete BIGCACHE[k]; markDeleted(k); n++; }
     }
     LOG(`cache invalidé (${prefixes.join(', ')}) : ${n} entrées`);
     return n;
@@ -10840,9 +11149,6 @@
         if (act.dataset.act === 'legendary-discover') legendaryHuntDiscover();
         if (act.dataset.act === 'dismiss-quota') {
           STATE.quotaWarning = null;
-          // On réarme l'alerte proactive : si le cache regonfle au-delà du seuil plus tard,
-          // le message pourra réapparaître (sinon il resterait muet à vie une fois fermé).
-          quotaWarnedProactively = false;
           forceRender();
           return;
         }
@@ -11396,23 +11702,18 @@
       },
 
       // Diagnostic : où part la place, et le cache fonctionne-t-il ?
-      stats() {
-        const groups = {};
-        for (const k of Object.keys(localStorage)) {
-          if (!k.startsWith(LS)) continue;
-          const g = (k.slice(LS.length).split(':')[0]) || '(racine)';
-          const size = (k.length + (localStorage.getItem(k) || '').length) * 2;
-          groups[g] = groups[g] || { entrées: 0, octets: 0 };
-          groups[g].entrées++; groups[g].octets += size;
-        }
-        const table = Object.entries(groups)
+      // (async — IndexedDB oblige : resteAVoir.stats() reste utilisable telle quelle
+      // depuis la console, juste précéder d'un `await` si besoin de la valeur de retour.)
+      async stats() {
+        const storage = await computeStorageDiag();
+        const table = Object.entries(storage.groups)
           .sort((a, b) => b[1].octets - a[1].octets)
           .map(([g, v]) => ({ groupe: g, entrées: v.entrées, taille: fmtBytes(v.octets) }));
-        console.log(`%c[reste-à-voir] localStorage : ${fmtBytes(lsBytes())} sur ~5 Mo`,
+        console.log(`%c[reste-à-voir] cache (IndexedDB) : ${storage.quotaLabel}`,
           'color:#f47521;font-weight:bold');
         console.table(table);
         console.log('compteurs du dernier chargement :', { ...STATS });
-        return { total: lsBytes(), groups, stats: { ...STATS } };
+        return { total: storage.total, groups: storage.groups, stats: { ...STATS } };
       },
       resetStats() {
         resetCounters();
@@ -11466,12 +11767,17 @@
       resetAll() {
         const keys = Object.keys(localStorage).filter((k) => k.startsWith(LS));
         keys.forEach((k) => safeCall(() => localStorage.removeItem(k), undefined, 'resetAll'));
-        eps3Store = null; eps3Dirty = false; clearTimeout(eps3FlushTimer);
+        const n = Object.keys(BIGCACHE).length;
+        for (const k of Object.keys(BIGCACHE)) delete BIGCACHE[k];
+        dirtyIdbKeys.clear();
+        deletedIdbKeys.clear();
+        clearTimeout(bigCacheFlushTimer);
+        idbClear().then(() => idbSet(IDB_TIER_KEY, CACHE_TIER));
         IGNORED = new Map();
         AIR_SNAP = {};
         APP_STATE = { v: STATE_SCHEMA_VERSION, settings: {}, filters: {}, ignored: {}, airsnap: {} };
         resetSettings();
-        console.log(`[reste-à-voir] remise à zéro totale (${keys.length} entrées)`);
+        console.log(`[reste-à-voir] remise à zéro totale (${keys.length + n} entrées)`);
       },
       // Active/désactive le logging des erreurs normalement avalées silencieusement
       // (voir safeCall). Persiste entre les sessions.
