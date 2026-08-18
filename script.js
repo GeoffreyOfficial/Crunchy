@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      2.160.0
+// @version      2.161.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '2.160.0';
+  const SCRIPT_VERSION = '2.161.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -34,7 +34,13 @@
   // ─────────────────────────────────────────────────────────────
   const CFG = {
     refreshMinutes: 15,
-    concurrency: 5,
+    // (fix) 5 → 8 : le scan Découverte/Dé légendaire passe le plus clair de son temps à
+    // attendre le réseau (saisons, genres, note, épisodes, playheads par candidat), pas le
+    // CPU — augmenter la concurrence par défaut réduit directement le temps par page. Le
+    // rythme reste auto-adaptatif (voir paceOnThrottle/paceOnSuccess) : en cas de 429, il
+    // redescend tout seul jusqu'à PACE.floor, donc ce 8 est un plafond de départ, pas un
+    // risque de surcharge permanent.
+    concurrency: 8,
     prefetchTabs: true,          // précharge « Hors listes » à l'inactivité (voir prefetchIdle)
     tvMode: false,               // affichage « salon » : lecture à distance, pilotage télécommande
     showSearchBar: false,        // barre de recherche globale masquée par défaut (en-tête sur une
@@ -3515,8 +3521,23 @@
   // rendre visible TOUT le pipeline (étapes, filtres, scoring) plutôt qu'un simple message
   // d'échec, pour que tu puisses ajuster tes réglages en connaissance de cause plutôt qu'à
   // tâtons. Conseils générés dynamiquement à partir de la cause de rejet la plus fréquente.
+  // (fix) Statistiques de distribution sur les scores « pépite » RÉELLEMENT rencontrés
+  // pendant ce scan (mode 🎲 légendaire) : max atteint, moyenne, et bornes de tranches
+  // hautes (top 10 % / 25 % / 50 %). Permet de voir d'un coup d'œil si le seuil légendaire
+  // configuré est proche de ce qui existe vraiment dans le classement popularité, ou s'il
+  // est hors d'atteinte — plutôt que de deviner après plusieurs scans à vide.
+  function scoreDistributionStats(scores) {
+    if (!scores || !scores.length) return null;
+    const sorted = [...scores].sort((a, b) => b - a); // décroissant
+    const n = sorted.length;
+    const avg = sorted.reduce((a, b) => a + b, 0) / n;
+    const at = (p) => sorted[Math.min(n - 1, Math.max(0, Math.floor(p * n)))];
+    return { n, max: sorted[0], min: sorted[n - 1], avg, top10: at(0.10), top25: at(0.25), top50: at(0.50) };
+  }
+
   function buildDiscoverShortfallReport(ctx) {
-    const { target, foundCount, legendary, pagesScanned, maxPages, candidatesSeenTotal, rej } = ctx;
+    const { target, foundCount, legendary, pagesScanned, maxPages, candidatesSeenTotal, rej, scoreSamples } = ctx;
+    const scoreStats = legendary ? scoreDistributionStats(scoreSamples) : null;
     const f = STATE.filters;
     const REASON_LABELS = {
       known: 'Déjà connue (une de tes listes, ton historique de visionnage, ignorée à la main, ou déjà proposée lors d’une relance précédente)',
@@ -3554,7 +3575,9 @@
       genre: "Le filtre de genre (exclusions par défaut ou chips « garder uniquement ») écarte la majorité des candidats. Assouplis-le dans Réglages → Découverte ou dans les chips sous les résultats.",
       rating: `La note minimale (${CFG.discoverMinRating}★) élimine la majorité des candidats. Baisse « Note minimale » dans Réglages → Découverte.`,
       progressPlayhead: "Beaucoup de séries sont déjà entamées d'après ta progression réelle — rien à régler ici, c'est le comportement voulu.",
-      legendaryScore: `Beaucoup de candidats passent les filtres mais restent sous le score légendaire (${CFG.discoverLegendaryScore}). Baisse « Score minimum — légendaire » ou monte « Poids du goût dans le score final » dans Réglages → Découverte.`,
+      legendaryScore: scoreStats
+        ? `Beaucoup de candidats passent les filtres mais restent sous le score légendaire (${CFG.discoverLegendaryScore}). Sur ce scan, le score max réellement atteint était de <b>${scoreStats.max.toFixed(2)}</b> — si c'est en-dessous ou tout juste au-dessus du seuil, baisse « Score minimum — légendaire » (par exemple vers ${Math.max(0, scoreStats.top25).toFixed(1)}, la borne des 25% meilleurs candidats de ce scan) ou monte « Poids du goût dans le score final » dans Réglages → Découverte.`
+        : `Beaucoup de candidats passent les filtres mais restent sous le score légendaire (${CFG.discoverLegendaryScore}). Baisse « Score minimum — légendaire » ou monte « Poids du goût dans le score final » dans Réglages → Découverte.`,
     };
     const mainAdvice = topReason ? ADVICE[topReason] : "Élargis un des filtres ci-dessous, ou relance plus tard : le classement popularité change en continu.";
     const extraAdvice = [];
@@ -3585,6 +3608,18 @@
               <b style="min-width:64px;text-align:right">${n} (${pct(n)}%)</b>
             </div>`).join('')}
         </div>` : ''}
+
+        ${scoreStats ? `
+        <p style="margin:10px 0 4px"><b>2bis. Distribution des scores « pépite » obtenus</b> (${scoreStats.n} candidat${scoreStats.n > 1 ? 's' : ''} ayant atteint le calcul de score)</p>
+        <ul style="margin:0 0 6px;padding-left:20px">
+          <li>Score maximum atteint sur ce scan : <b>${scoreStats.max.toFixed(2)}</b></li>
+          <li>Score moyen : <b>${scoreStats.avg.toFixed(2)}</b> (le plus bas : ${scoreStats.min.toFixed(2)})</li>
+          <li>Les 10 % meilleurs candidats étaient à <b>${scoreStats.top10.toFixed(2)}</b> ou plus</li>
+          <li>Les 25 % meilleurs candidats étaient à <b>${scoreStats.top25.toFixed(2)}</b> ou plus</li>
+          <li>La médiane (50 %) était à <b>${scoreStats.top50.toFixed(2)}</b></li>
+        </ul>
+        <p style="margin:0 0 10px;opacity:.85">Pour référence : notable ≥ <b>${CFG.discoverNotableScore}</b>, légendaire ≥ <b>${CFG.discoverLegendaryScore}</b>. Si le score max ci-dessus reste nettement sous ce seuil sur plusieurs scans, c'est le signe le plus fiable que le seuil est trop haut pour ton profil de goût actuel.</p>
+        ` : ''}
 
         <p style="margin:10px 0 4px"><b>3. Filtres actifs en ce moment</b></p>
         <ul style="margin:0 0 10px;padding-left:20px">
@@ -3636,6 +3671,13 @@
     };
     let candidatesSeenTotal = 0;
     let pagesScanned = 0;
+    // (fix) Scores « pépite » de TOUS les candidats qui ont atteint le calcul de score
+    // (mode 🎲 légendaire uniquement — c'est le seul mode où ce calcul a lieu pendant le
+    // scan). Sert à afficher la VRAIE distribution des scores obtenus dans le rapport
+    // (max atteint, moyenne, tranches hautes) plutôt qu'un simple compteur de rejets —
+    // pour que tu puisses juger si le seuil légendaire est réaliste ou pas au vu de ce
+    // qui existe vraiment dans le classement popularité, au lieu de deviner à l'aveugle.
+    const scoreSamples = [];
     D.legendaryHunt = legendary;
     // (relance) recherche « standard » : on repart d'un historique d'exclusion vierge.
     // recherche « 30 autres » / « encore des légendaires » : on garde le souvenir des
@@ -3892,7 +3934,11 @@
             // quota. Une candidate qui a passé tous les filtres précédents mais n'est
             // « que » notable/pref est rejetée ici — c'est ELLE qui fait que le scan va
             // chercher plus loin.
-            if (legendary && !discoverSignals(candidate, tasteProfile).legendary) { REJ.legendaryScore++; continue; }
+            if (legendary) {
+              const sig = discoverSignals(candidate, tasteProfile);
+              scoreSamples.push(sig.score);
+              if (!sig.legendary) { REJ.legendaryScore++; continue; }
+            }
             finalResults.push(candidate);
           }
           results.push(...finalResults);
@@ -3910,7 +3956,7 @@
       // sec, ou simplement pas assez de survivants), on l'affiche sous les résultats.
       const shortfallCtx = {
         target, foundCount: found.length, legendary,
-        pagesScanned, maxPages, candidatesSeenTotal, rej: REJ,
+        pagesScanned, maxPages, candidatesSeenTotal, rej: REJ, scoreSamples,
       };
 
       if (D.cancelRequested) {
