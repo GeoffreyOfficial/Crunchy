@@ -84,8 +84,18 @@
     // cosinus tasteScore vit désormais dans un espace de tags bien plus large et épars que
     // les ~20 genres d'avant, donc un « très bon goût » plafonne naturellement plus bas
     // (cosinus rarement > 0.5-0.6 même sur un match solide, contre 0.8-0.9 en genres).
-    discoverLegendaryScore: 1.4,
-    discoverNotableScore: 0.8,
+    // (fix) Réabaissés une dernière fois d'après un scan réel de 280 candidats notés :
+    // score max atteint 2.20 (le PLAFOND théorique ~4.3 n'est jamais approché), moyenne 0.07,
+    // médiane 0.12, top 10 % à 1.47, top 25 % à 0.60. À 1.4/0.8, légendaire était calé au
+    // ~90e centile et notable au ~80e : sur un pool déjà fortement pré-filtré (note ≥4.5,
+    // jamais vu, ≤3 saisons) et parfois amputé de l'enrichissement AniList (cooldown), le
+    // quota de pépites n'était quasi jamais atteint (« il ne trouve rien »). Nouveaux seuils
+    // ancrés sur cette distribution : légendaire 1.0 ≈ top ~18 % (≈50 candidats sur 280,
+    // ~3× la cible de 15, robuste même quand un scan filtre plus dur), notable 0.5 ≈ top ~28 %.
+    // Une migration ponctuelle (voir applySettings) réaligne les réglages restés sur l'ancien
+    // défaut sans jamais écraser une valeur que tu aurais toi-même personnalisée.
+    discoverLegendaryScore: 1.0,
+    discoverNotableScore: 0.5,
     // Poids du GOÛT NET (tasteScore, -1..1) dans le score final : score du goût = taste ×
     // ce multiplicateur. Avant, ×2.5 fixe et invisible dans le code.
     // (fix) Remonté à 3 pour redonner du poids au goût net dans la nouvelle échelle, plus
@@ -563,6 +573,21 @@
     Object.assign(CFG, CFG_DEFAULTS);
   }
   applySettings();
+
+  // (migration ponctuelle) Recalibrage des seuils « pépite ». Un diagnostic sur un scan réel
+  // (280 candidats : max 2.20, médiane 0.12, top 10 % à 1.47) a montré que légendaire ≥1.4 /
+  // notable ≥0.8 était trop haut — le quota de pépites n'était quasi jamais atteint. Nouveaux
+  // défauts 1.0 / 0.5. On ne réécrit une valeur SAUVEGARDÉE que si elle est restée sur
+  // l'ANCIEN défaut (à ε près) : un seuil que tu as volontairement choisi est préservé. Le
+  // drapeau `scoreCalib2` garantit un passage unique, pour ne pas re-forcer si tu remets 1.4.
+  if (!APP_STATE.scoreCalib2) {
+    const s = APP_STATE.settings || (APP_STATE.settings = {});
+    const near = (a, b) => typeof a === 'number' && Math.abs(a - b) < 1e-6;
+    if (near(s.discoverLegendaryScore, 1.4)) { s.discoverLegendaryScore = 1.0; CFG.discoverLegendaryScore = 1.0; }
+    if (near(s.discoverNotableScore, 0.8)) { s.discoverNotableScore = 0.5; CFG.discoverNotableScore = 0.5; }
+    APP_STATE.scoreCalib2 = true;
+    persistState(APP_STATE);
+  }
 
   // ─── Séries ignorées (masquées sans être marquées vues) ─────
   // Table id → { titre, source }. La source ('watchlist' ou 'discover') distingue
@@ -3158,7 +3183,7 @@
     fromSnapshot: false,
     filters: loadFilters(),
     tab: 'suivi',
-    discover: { series: [], loading: false, error: null, warning: null, shortfallDetail: null, lastSync: null, excludedIds: new Set(), searchedFilters: undefined, similarTo: null, legendaryHunt: false, cancelRequested: false },
+    discover: { series: [], loading: false, error: null, warning: null, shortfallDetail: null, lastSync: null, excludedIds: new Set(), searchedFilters: undefined, similarTo: null, legendaryHunt: false, cancelRequested: false, scan: null },
     orphan: { series: [], loading: false, error: null, warning: null, lastSync: null },
     newPremieres: { series: [], loading: false, error: null, lastSync: null, debug: null },
     // Crunchylists détectées (id + titre), pour le bouton d'ajout depuis Découverte.
@@ -3766,7 +3791,14 @@
       // gardant ce qui a déjà été trouvé.
       for (let page = 0; page < maxPages && matches.length < target; page++) {
         if (D.cancelRequested) break;
-        onProgress(stepLabel(3, 3, `Séries populaires… page ${page + 1}/${maxPages} · ${matches.length}/${target} ${progressWord}`));
+        // Progression du scan en état STRUCTURÉ plutôt qu'en chaîne à re-parser : le bandeau
+        // (voir renderActivityBar) affiche alors le NOMBRE de pépites trouvées en titre et
+        // garde la progression par page (barre + %  + ETA) pour la sous-ligne — plus de
+        // redondance « page N/M » répétée en haut ET en bas, et le compte de légendaires
+        // n'est plus tronqué. `progressWord` reste dispo pour d'éventuels autres affichages.
+        void progressWord;
+        D.scan = { page: page + 1, maxPages, found: matches.length, target, legendary };
+        onProgress(stepLabel(3, 3, `page ${page + 1}/${maxPages}`));
         const r = await api('/content/v2/discover/browse', {
           sort_by: 'popularity', n: CFG.discoverPageSize, start,
           locale: CFG.locale, type: 'series',
@@ -3959,7 +3991,8 @@
             finalResults.push(candidate);
           }
           results.push(...finalResults);
-          onProgress(stepLabel(3, 3, `Séries populaires… page ${page + 1}/${maxPages} · ${matches.length + results.length}/${target} ${progressWord}`));
+          D.scan = { page: page + 1, maxPages, found: matches.length + results.length, target, legendary };
+          onProgress(stepLabel(3, 3, `page ${page + 1}/${maxPages}`));
         }
 
         matches.push(...results.filter(Boolean));
@@ -4008,6 +4041,7 @@
       D.error = e.message || String(e);
     } finally {
       D.loading = false;
+      D.scan = null;
       render();
     }
   }
@@ -5390,161 +5424,52 @@
     const prefBonus = C.discoverPrefGenreBonus;
     const rated1 = C.discoverWellRatedBonus;
     const rated2 = C.discoverSuperRatedBonus;
-    const rated1Thr = C.discoverWellRatedThreshold;
-    const rated2Thr = C.discoverSuperRatedThreshold;
-    const notable = C.discoverNotableScore;
-    const legend = C.discoverLegendaryScore;
     const min = -tw, max = tw + prefBonus + rated1 + rated2;
     const span = (max - min) || 1;
-    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
-    const pct = (v) => clamp((v - min) / span * 100, 0, 100);
-    const r1n = (v) => Math.round(v * 10) / 10;
+    const pct = (v) => Math.max(0, Math.min(100, ((v - min) / span) * 100));
+    const notablePos = pct(C.discoverNotableScore);
+    const legendaryPos = pct(C.discoverLegendaryScore);
+    const zeroPos = pct(0);
+    const b0 = min, b1 = tw, b2 = tw + prefBonus, b3 = tw + prefBonus + rated1, b4 = max;
     const fmt1 = (v) => (v >= 0 ? '+' : '') + v.toFixed(1);
-    const fmtS = (v) => (v >= 0 ? '+' : '\u2212') + Math.abs(v).toFixed(1);
-
-    // Bornes des zones sur la piste, remises en ordre croissant par sécurité : les seuils
-    // sont réglables et pourraient théoriquement se croiser (légendaire < notable, etc.).
-    let stops = [pct(min), pct(0), pct(notable), pct(legend), pct(max)];
-    for (let i = 1; i < stops.length; i++) if (stops[i] < stops[i - 1]) stops[i] = stops[i - 1];
-    const s0 = stops[0], s1 = stops[1], s2 = stops[2], s3 = stops[3], s4 = stops[4];
-    const zeroPos = pct(0), notablePos = pct(notable), legendPos = pct(legend);
-
-    // Ancrage des drapeaux de seuil : évite qu'une étiquette déborde du cadre aux extrêmes.
-    const flagAnchor = (p) => p < 12 ? 'left:0;transform:none;text-align:left;align-items:flex-start'
-      : p > 88 ? 'left:auto;right:0;transform:none;text-align:right;align-items:flex-end'
-      : 'left:' + p + '%;transform:translateX(-50%)';
-
-    // Levier de chaque bonus rapporté au plus gros levier possible (l'amplitude du goût,
-    // 2 x tw) : les mini-barres montrent d'un coup d'oeil que le goût domine largement.
-    const tasteSwing = 2 * tw;
-    const barW = (v) => clamp(v / (tasteSwing || 1) * 100, 0, 100);
-
-    // Trois cas concrets, chiffrés avec la MÊME formule que discoverSignals, pour rendre
-    // les seuils tangibles. Les termes affichés sont arrondis au dixième ET leur somme
-    // affichée est recalculée sur ces arrondis : ce qu'on lit s'additionne toujours.
-    const tierOf = (sc) => sc >= legend ? ['legend', '\u2728 L\u00e9gendaire']
-      : sc >= notable ? ['notable', '\u25c6 Notable']
-      : sc >= 0 ? ['plain', 'Ordinaire']
-      : ['neg', '\u2715 Hors de tes go\u00fbts'];
-    const examples = [
-      { lbl: 'Pile dans tes go\u00fbts, un genre pr\u00e9f\u00e9r\u00e9, tr\u00e8s bien not\u00e9e', taste: 0.85, pref: true, r1: true, r2: false },
-      { lbl: 'Go\u00fbt ti\u00e8de, mais tr\u00e8s bien not\u00e9e', taste: 0.10, pref: false, r1: true, r2: true },
-      { lbl: 'Correcte, mais loin de tes go\u00fbts', taste: -0.40, pref: false, r1: false, r2: false },
-    ].map((e) => {
-      const items = [{ ic: '', v: r1n(clamp(e.taste * tw, -tw, tw)) }];
-      if (e.pref && prefBonus > 0) items.push({ ic: '\ud83c\udfaf', v: r1n(prefBonus) });
-      if (e.r1 && rated1 > 0) items.push({ ic: '\ud83c\udfc6', v: r1n(rated1) });
-      if (e.r2 && rated2 > 0) items.push({ ic: '\u2728', v: r1n(rated2) });
-      const total = r1n(items.reduce((a, b) => a + b.v, 0));
-      const t = tierOf(total);
-      const parts = items.map((it) => (it.ic ? it.ic + ' ' : '') + fmtS(it.v)).join(' <i>+</i> ');
-      return `<div class="crrav-ss-exrow">
-        <div class="crrav-ss-exhead"><span class="crrav-ss-exlbl">${e.lbl}</span>
-          <span class="crrav-ss-extier ${t[0]}">${t[1]}</span></div>
-        <div class="crrav-ss-exform">${parts} <i>=</i> <b>${fmtS(total)}</b></div>
-      </div>`;
-    }).join('');
-
+    const rated1Thr = C.discoverWellRatedThreshold;
+    const rated2Thr = C.discoverSuperRatedThreshold;
     return `<div class="crrav-scoreschema"${live ? ' id="crrav-scoreschema-live"' : ''}>
       <div class="crrav-scoreschema-head">
-        <span class="crrav-scoreschema-title">\ud83d\udcd0 Comment se calcule le score \u00ab p\u00e9pite \u00bb</span>
-        <span class="crrav-scoreschema-sub">On part de ton <b>go\u00fbt net</b> (\u00e0 quel point les tags/genres de la s\u00e9rie ressemblent aux tiens), puis on <b>ajoute des bonus</b> si elle touche un genre que tu adores ou si elle est tr\u00e8s bien not\u00e9e. Le total place la s\u00e9rie sur l'\u00e9chelle ci-dessous et d\u00e9cide si elle est <b>Notable</b> ou <b>L\u00e9gendaire</b>.</span>
+        <span class="crrav-scoreschema-title">📐 De quoi le score « pépite » est fait</span>
+        <span class="crrav-scoreschema-sub">Chaque tronçon coloré ci-dessous s'ADDITIONNE au précédent, de gauche à droite. Le total obtenu place la série sur cette échelle — et détermine si elle franchit un des deux repères « Notable » / « Légendaire ».</span>
       </div>
-
-      <div class="crrav-ss-sec">
-        <div class="crrav-ss-h">\ud83e\uddee La formule</div>
-        <div class="crrav-ss-formula">
-          <span class="crrav-ss-fres">Score</span><span class="crrav-ss-op">=</span>
-          <span class="crrav-ss-fchip taste">Go\u00fbt net <b>\u00d7\u2009${tw.toFixed(1)}</b></span>
-          ${prefBonus > 0 ? `<span class="crrav-ss-op">+</span><span class="crrav-ss-fchip pref">\ud83c\udfaf <b>${fmt1(prefBonus)}</b></span>` : ''}
-          ${rated1 > 0 ? `<span class="crrav-ss-op">+</span><span class="crrav-ss-fchip b1">\ud83c\udfc6 <b>${fmt1(rated1)}</b></span>` : ''}
-          ${rated2 > 0 ? `<span class="crrav-ss-op">+</span><span class="crrav-ss-fchip b2">\u2728 <b>${fmt1(rated2)}</b></span>` : ''}
-        </div>
+      <div class="crrav-scoreschema-track">
+        <div class="crrav-scoreschema-seg taste" style="left:${pct(b0)}%;width:${pct(b1) - pct(b0)}%" title="① Goût net (tags/genres, cosinus) × ${tw.toFixed(1)} : de ${min.toFixed(1)} à +${tw.toFixed(1)}"></div>
+        ${prefBonus > 0 ? `<div class="crrav-scoreschema-seg pref" style="left:${pct(b1)}%;width:${pct(b2) - pct(b1)}%" title="② 🎯 tag/genre préféré : ${fmt1(prefBonus)}"></div>` : ''}
+        ${rated1 > 0 ? `<div class="crrav-scoreschema-seg bonus1" style="left:${pct(b2)}%;width:${pct(b3) - pct(b2)}%" title="③ 🏆 très bien notée : ${fmt1(rated1)}"></div>` : ''}
+        ${rated2 > 0 ? `<div class="crrav-scoreschema-seg bonus2" style="left:${pct(b3)}%;width:${pct(b4) - pct(b3)}%" title="④ ✨ note exceptionnelle : ${fmt1(rated2)} (cumulable)"></div>` : ''}
+        <div class="crrav-scoreschema-zero" style="left:${zeroPos}%" title="Goût neutre (0)"></div>
+        <div class="crrav-scoreschema-pin notable" style="left:${notablePos}%">
+          <span class="crrav-scoreschema-pinlab">Notable<b>${C.discoverNotableScore.toFixed(1)}</b></span></div>
+        <div class="crrav-scoreschema-pin legendary" style="left:${legendaryPos}%">
+          <span class="crrav-scoreschema-pinlab">Légendaire<b>${C.discoverLegendaryScore.toFixed(1)}</b></span></div>
       </div>
+      <div class="crrav-scoreschema-bounds"><span>${min.toFixed(1)} · pire des cas</span><span>${max.toFixed(1)} · meilleur des cas</span></div>
 
-      <div class="crrav-ss-sec">
-        <div class="crrav-ss-h">\ud83d\udcca L'\u00e9chelle du score</div>
-        <div class="crrav-ss-gauge">
-          <div class="crrav-ss-flags">
-            <div class="crrav-ss-flag notable" style="${flagAnchor(notablePos)}">
-              <span class="crrav-ss-flagname">Notable</span><span class="crrav-ss-flagval">${notable.toFixed(1)}</span></div>
-            <div class="crrav-ss-flag legendary" style="${flagAnchor(legendPos)}">
-              <span class="crrav-ss-flagname">L\u00e9gendaire</span><span class="crrav-ss-flagval">${legend.toFixed(1)}</span></div>
-          </div>
-          <div class="crrav-ss-bar">
-            <div class="crrav-ss-zone neg" style="left:${s0}%;width:${s1 - s0}%"></div>
-            <div class="crrav-ss-zone ok" style="left:${s1}%;width:${s2 - s1}%"></div>
-            <div class="crrav-ss-zone notable" style="left:${s2}%;width:${s3 - s2}%"></div>
-            <div class="crrav-ss-zone legend" style="left:${s3}%;width:${s4 - s3}%"></div>
-            <div class="crrav-ss-zero" style="left:${zeroPos}%"></div>
-            <div class="crrav-ss-tick notable" style="left:${notablePos}%"></div>
-            <div class="crrav-ss-tick legend" style="left:${legendPos}%"></div>
-          </div>
-          <div class="crrav-ss-scale">
-            <span style="left:0">${min.toFixed(1)}</span>
-            <span style="left:${zeroPos}%;transform:translateX(-50%)">0</span>
-            <span style="left:100%;transform:translateX(-100%)">${max.toFixed(1)}</span>
-          </div>
-        </div>
-        <ul class="crrav-ss-zones">
-          <li class="neg"><i></i><span><b>Hors de tes go\u00fbts</b> \u2014 score n\u00e9gatif, la s\u00e9rie est \u00e9cart\u00e9e</span></li>
-          <li class="ok"><i></i><span><b>Ordinaire</b> \u2014 de 0 \u00e0 ${notable.toFixed(1)}</span></li>
-          <li class="notable"><i></i><span><b>\u25c6 Notable</b> \u2014 de ${notable.toFixed(1)} \u00e0 ${legend.toFixed(1)}</span></li>
-          <li class="legend"><i></i><span><b>\u2728 L\u00e9gendaire</b> \u2014 ${legend.toFixed(1)} et plus</span></li>
-        </ul>
-      </div>
+      <ul class="crrav-scoreschema-legend">
+        <li><span class="crrav-scoreschema-legnum">①</span><i class="crrav-scoreschema-dot taste"></i>
+          <span class="crrav-scoreschema-legtxt"><b>Goût net</b> — similarité cosinus entre les tags/genres de la série et ton profil</span>
+          <span class="crrav-scoreschema-legval">× ${tw.toFixed(1)}</span></li>
+        <li><span class="crrav-scoreschema-legnum">②</span><i class="crrav-scoreschema-dot pref"></i>
+          <span class="crrav-scoreschema-legtxt"><b>🎯 Tag/genre préféré</b> — contient un de tes 3 tags/genres les plus représentés</span>
+          <span class="crrav-scoreschema-legval">${fmt1(prefBonus)}</span></li>
+        <li><span class="crrav-scoreschema-legnum">③</span><i class="crrav-scoreschema-dot bonus1"></i>
+          <span class="crrav-scoreschema-legtxt"><b>🏆 Très bien notée</b> — note ≥ ${rated1Thr.toFixed(1)}★</span>
+          <span class="crrav-scoreschema-legval">${fmt1(rated1)}</span></li>
+        <li><span class="crrav-scoreschema-legnum">④</span><i class="crrav-scoreschema-dot bonus2"></i>
+          <span class="crrav-scoreschema-legtxt"><b>✨ Note exceptionnelle</b> — note ≥ ${rated2Thr.toFixed(1)}★ (cumulable avec 🏆)</span>
+          <span class="crrav-scoreschema-legval">${fmt1(rated2)}</span></li>
+      </ul>
 
-      <div class="crrav-ss-sec">
-        <div class="crrav-ss-h">\ud83e\udde9 Le d\u00e9tail, terme par terme</div>
-        <div class="crrav-ss-ing">
-          <div class="crrav-ss-ingrow">
-            <span class="crrav-ss-inum">1</span>
-            <span class="crrav-ss-idot taste"></span>
-            <div class="crrav-ss-imain">
-              <div class="crrav-ss-iname">Go\u00fbt net <span class="crrav-ss-ival taste">\u00d7\u2009${tw.toFixed(1)}</span></div>
-              <div class="crrav-ss-idesc">Ressemblance (cosinus) entre les tags/genres de la s\u00e9rie et ton profil, de <b>\u22121</b> (rien en commun) \u00e0 <b>+1</b> (alignement parfait). <b>Seul terme qui peut faire BAISSER le score</b> : une s\u00e9rie vraiment hors de tes go\u00fbts part dans le n\u00e9gatif.</div>
-              <div class="crrav-ss-ibar diverge"><span class="crrav-ss-ibar-neg"></span><span class="crrav-ss-ibar-pos"></span></div>
-              <div class="crrav-ss-irange"><span>\u2212${tw.toFixed(1)}</span><span>le levier le plus fort</span><span>+${tw.toFixed(1)}</span></div>
-            </div>
-          </div>
-          ${prefBonus > 0 ? `<div class="crrav-ss-ingrow">
-            <span class="crrav-ss-inum">2</span>
-            <span class="crrav-ss-idot pref"></span>
-            <div class="crrav-ss-imain">
-              <div class="crrav-ss-iname">\ud83c\udfaf Tag/genre pr\u00e9f\u00e9r\u00e9 <span class="crrav-ss-ival pref">${fmt1(prefBonus)}</span></div>
-              <div class="crrav-ss-idesc">Bonus fixe si la s\u00e9rie contient <b>un de tes 3 tags/genres les plus regard\u00e9s</b>.</div>
-              <div class="crrav-ss-ibar"><span class="pref" style="width:${barW(prefBonus)}%"></span></div>
-            </div>
-          </div>` : ''}
-          ${rated1 > 0 ? `<div class="crrav-ss-ingrow">
-            <span class="crrav-ss-inum">3</span>
-            <span class="crrav-ss-idot b1"></span>
-            <div class="crrav-ss-imain">
-              <div class="crrav-ss-iname">\ud83c\udfc6 Tr\u00e8s bien not\u00e9e <span class="crrav-ss-ival b1">${fmt1(rated1)}</span></div>
-              <div class="crrav-ss-idesc">Bonus fixe si la note du public atteint <b>${rated1Thr.toFixed(1)}\u2605</b> ou plus.</div>
-              <div class="crrav-ss-ibar"><span class="b1" style="width:${barW(rated1)}%"></span></div>
-            </div>
-          </div>` : ''}
-          ${rated2 > 0 ? `<div class="crrav-ss-ingrow">
-            <span class="crrav-ss-inum">4</span>
-            <span class="crrav-ss-idot b2"></span>
-            <div class="crrav-ss-imain">
-              <div class="crrav-ss-iname">\u2728 Note exceptionnelle <span class="crrav-ss-ival b2">${fmt1(rated2)}</span></div>
-              <div class="crrav-ss-idesc">Bonus suppl\u00e9mentaire si la note atteint <b>${rated2Thr.toFixed(1)}\u2605</b> \u2014 <b>cumulable</b> avec \ud83c\udfc6 tr\u00e8s bien not\u00e9e.</div>
-              <div class="crrav-ss-ibar"><span class="b2" style="width:${barW(rated2)}%"></span></div>
-            </div>
-          </div>` : ''}
-        </div>
-      </div>
-
-      <div class="crrav-ss-sec">
-        <div class="crrav-ss-h">\ud83d\udd0d Trois exemples concrets</div>
-        <div class="crrav-ss-ex">${examples}</div>
-      </div>
-
-      <p class="crrav-scoreschema-note">\ud83d\udca1 Le <b>go\u00fbt net</b> compare la <b>direction</b> des tags/genres, pas leur nombre : une s\u00e9rie qui en a beaucoup n'est pas p\u00e9nalis\u00e9e pour autant. Ton profil m\u00e9lange le <b>volume regard\u00e9</b> et le <b>taux de compl\u00e9tion</b> de chaque s\u00e9rie (r\u00e9glable juste en dessous).</p>
+      <p class="crrav-scoreschema-note">① Le goût net vient d'une similarité cosinus entre le vecteur de tags/genres (pondérés par leur pertinence AniList) de la candidate et ton profil — pas de plafond à régler : une série à beaucoup de tags n'est plus mécaniquement pénalisée, la comparaison se fait sur la DIRECTION du vecteur, pas sa taille. Le profil lui-même mixe volume vu et taux de complétion (réglage ci-dessous).</p>
       ${tasteProfileDetailHtml()}
-      ${live ? `<p class="crrav-scoreschema-live-hint">\ud83d\udc41\ufe0f Aper\u00e7u en direct : bouge les curseurs ci-dessous, ce sch\u00e9ma se redessine aussit\u00f4t. Rien n'est appliqu\u00e9 \u00e0 D\u00e9couverte tant que tu n'as pas cliqu\u00e9 \u00ab Enregistrer et actualiser \u00bb.</p>` : ''}
+      ${live ? `<p class="crrav-scoreschema-live-hint">👁️ Aperçu en direct : bouge les curseurs ci-dessous, ce schéma se redessine aussitôt. Rien n'est appliqué à Découverte tant que tu n'as pas cliqué « Enregistrer et actualiser ».</p>` : ''}
     </div>`;
   }
 
@@ -6423,117 +6348,60 @@
   .crrav-subhead-ico{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;
     width:24px;height:24px;border-radius:8px;font-size:13px;
     background:rgba(var(--subhue,244,117,33),.16);box-shadow:inset 0 0 0 1px rgba(var(--subhue,244,117,33),.4)}
-  /* (32) Schéma « Comment se calcule le score pépite » — refonte pédagogique
-     (voir scoreFormulaSchema) : formule en chips, échelle à zones colorées avec repères
-     Notable/Légendaire réels, détail terme par terme avec mini-barres de levier, et trois
-     exemples chiffrés. Entièrement dynamique ET en direct (voir wireScoreSchemaLive). */
+  /* (32) Schéma du calcul du score pépite (voir scoreFormulaSchema) : une piste horizontale
+     avec un segment dégradé rouge→vert pour le goût (peut être négatif), un segment violet
+     pour le bonus « genre préféré », deux segments dorés pour les bonus de note, et deux
+     « drapeaux » positionnés aux seuils notable/légendaire réellement configurés — pour voir
+     d'un coup d'œil où ils tombent dans l'intervalle possible, pas juste lire un nombre isolé.
+     (33) Entièrement dynamique ET EN DIRECT : se redessine à chaque frappe/glissement d'un
+     curseur concerné (voir wireScoreSchemaLive), sans attendre l'enregistrement. */
   .crrav-scoreschema{margin:0 0 18px;padding:16px 14px 14px;background:rgba(255,255,255,.03);
     border:1px solid rgba(255,255,255,.07);border-radius:12px}
-  .crrav-scoreschema-head{display:flex;flex-direction:column;gap:6px;margin:0 0 18px}
-  .crrav-scoreschema-title{font:800 14px/1.3 system-ui;color:#fff}
-  .crrav-scoreschema-sub{font:500 11.5px/1.6 system-ui;color:#9a9aa4}
-  .crrav-scoreschema-sub b{color:#d5d5dd;font-weight:700}
-  .crrav-ss-sec{margin:0 0 18px}
-  .crrav-ss-sec:last-of-type{margin-bottom:0}
-  .crrav-ss-h{font:800 10.5px/1.2 system-ui;letter-spacing:.04em;text-transform:uppercase;
-    color:#8a8a94;margin:0 0 10px}
-  /* Formule */
-  .crrav-ss-formula{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
-  .crrav-ss-fres{font:800 12px/1 system-ui;color:#fff}
-  .crrav-ss-op{font:800 13px/1 system-ui;color:#6f6f7a}
-  .crrav-ss-fchip{display:inline-flex;align-items:center;gap:5px;padding:5px 9px;border-radius:8px;
-    font:600 11.5px/1 system-ui;color:#e8e8ec;border:1px solid transparent}
-  .crrav-ss-fchip b{font-weight:800;color:#fff}
-  .crrav-ss-fchip.taste{background:rgba(74,222,128,.12);border-color:rgba(74,222,128,.35)}
-  .crrav-ss-fchip.pref{background:rgba(185,139,255,.14);border-color:rgba(185,139,255,.4)}
-  .crrav-ss-fchip.b1{background:rgba(255,209,102,.14);border-color:rgba(255,209,102,.4)}
-  .crrav-ss-fchip.b2{background:rgba(255,179,71,.14);border-color:rgba(255,179,71,.4)}
-  /* Échelle / jauge */
-  .crrav-ss-gauge{margin:0 2px}
-  .crrav-ss-flags{position:relative;height:48px}
-  .crrav-ss-flag{position:absolute;display:flex;flex-direction:column;line-height:1.1;
-    white-space:nowrap;padding:3px 7px;border-radius:7px;background:rgba(18,18,22,.92);
-    border:1px solid var(--fc,#c9c9d2);align-items:center;text-align:center}
-  .crrav-ss-flag.notable{bottom:0;--fc:rgba(159,214,255,.7)}
-  .crrav-ss-flag.legendary{bottom:19px;--fc:rgba(255,179,71,.75)}
-  .crrav-ss-flagname{font:800 8px/1.2 system-ui;letter-spacing:.05em;text-transform:uppercase;color:#9a9aa4}
-  .crrav-ss-flag.notable .crrav-ss-flagname{color:#9fd6ff}
-  .crrav-ss-flag.legendary .crrav-ss-flagname{color:#ffc078}
-  .crrav-ss-flagval{font:800 12px/1.15 system-ui;color:#fff}
-  .crrav-ss-bar{position:relative;height:14px;border-radius:999px;background:rgba(255,255,255,.06)}
-  .crrav-ss-zone{position:absolute;top:0;bottom:0}
-  .crrav-ss-zone.neg{border-radius:999px 0 0 999px;
-    background:repeating-linear-gradient(-45deg,rgba(242,84,91,.34),rgba(242,84,91,.34) 5px,rgba(242,84,91,.15) 5px,rgba(242,84,91,.15) 10px)}
-  .crrav-ss-zone.ok{background:rgba(255,255,255,.1)}
-  .crrav-ss-zone.notable{background:linear-gradient(90deg,rgba(159,214,255,.28),rgba(159,214,255,.44))}
-  .crrav-ss-zone.legend{border-radius:0 999px 999px 0;
-    background:linear-gradient(90deg,rgba(255,209,102,.5),rgba(255,179,71,.74))}
-  .crrav-ss-zero{position:absolute;top:-2px;bottom:-2px;width:2px;transform:translateX(-1px);
-    background:rgba(255,255,255,.55)}
-  .crrav-ss-tick{position:absolute;top:-3px;bottom:-3px;width:2px;transform:translateX(-1px);border-radius:2px}
-  .crrav-ss-tick.notable{background:#9fd6ff;box-shadow:0 0 5px rgba(159,214,255,.85)}
-  .crrav-ss-tick.legend{background:#ffb347;box-shadow:0 0 6px rgba(255,179,71,.95)}
-  .crrav-ss-scale{position:relative;height:13px;margin-top:6px}
-  .crrav-ss-scale span{position:absolute;top:0;font:700 9.5px/1 system-ui;color:#6f6f7a}
-  /* Légende des zones */
-  .crrav-ss-zones{list-style:none;margin:13px 0 0;padding:0;display:grid;
-    grid-template-columns:1fr 1fr;gap:8px 12px}
-  .crrav-ss-zones li{display:flex;align-items:baseline;gap:7px;font:500 11px/1.4 system-ui;color:#b9b9c2}
-  .crrav-ss-zones li b{color:#fff;font-weight:700}
-  .crrav-ss-zones li i{flex:0 0 auto;width:11px;height:11px;border-radius:3px;transform:translateY(1px)}
-  .crrav-ss-zones li.neg i{background:repeating-linear-gradient(-45deg,#f2545b,#f2545b 3px,rgba(242,84,91,.4) 3px,rgba(242,84,91,.4) 6px)}
-  .crrav-ss-zones li.ok i{background:rgba(255,255,255,.35)}
-  .crrav-ss-zones li.notable i{background:#9fd6ff}
-  .crrav-ss-zones li.legend i{background:linear-gradient(135deg,#ffd166,#ffb347)}
-  /* Détail terme par terme */
-  .crrav-ss-ing{display:flex;flex-direction:column;gap:13px}
-  .crrav-ss-ingrow{display:grid;grid-template-columns:auto auto 1fr;gap:9px;align-items:start}
-  .crrav-ss-inum{width:19px;height:19px;border-radius:50%;display:grid;place-items:center;
-    font:800 10px/1 system-ui;color:#0b0b0d;background:#c9c9d2;margin-top:1px}
-  .crrav-ss-idot{width:11px;height:11px;border-radius:50%;margin-top:5px}
-  .crrav-ss-idot.taste{background:linear-gradient(90deg,#f2545b,#4ade80)}
-  .crrav-ss-idot.pref{background:#b98bff}
-  .crrav-ss-idot.b1{background:#ffd166}
-  .crrav-ss-idot.b2{background:#ffb347}
-  .crrav-ss-imain{min-width:0}
-  .crrav-ss-iname{display:flex;align-items:center;gap:8px;flex-wrap:wrap;
-    font:700 12.5px/1.3 system-ui;color:#fff;margin:0 0 3px}
-  .crrav-ss-ival{font:800 11px/1 system-ui;padding:3px 7px;border-radius:6px;color:#fff}
-  .crrav-ss-ival.taste{background:rgba(74,222,128,.18)}
-  .crrav-ss-ival.pref{background:rgba(185,139,255,.22)}
-  .crrav-ss-ival.b1{background:rgba(255,209,102,.22)}
-  .crrav-ss-ival.b2{background:rgba(255,179,71,.22)}
-  .crrav-ss-idesc{font:500 11px/1.55 system-ui;color:#9a9aa4;margin:0 0 6px}
-  .crrav-ss-idesc b{color:#c9c9d2;font-weight:700}
-  .crrav-ss-ibar{position:relative;height:7px;border-radius:999px;background:rgba(255,255,255,.07);overflow:hidden}
-  .crrav-ss-ibar>span{position:absolute;top:0;bottom:0;border-radius:999px;min-width:8px}
-  .crrav-ss-ibar>span.pref{left:0;background:#b98bff}
-  .crrav-ss-ibar>span.b1{left:0;background:#ffd166}
-  .crrav-ss-ibar>span.b2{left:0;background:#ffb347}
-  .crrav-ss-ibar.diverge{box-shadow:inset 0 0 0 1px rgba(255,255,255,.06)}
-  .crrav-ss-ibar.diverge .crrav-ss-ibar-neg{left:0;width:50%;min-width:0;background:linear-gradient(90deg,#f2545b,rgba(242,84,91,.22))}
-  .crrav-ss-ibar.diverge .crrav-ss-ibar-pos{left:50%;width:50%;min-width:0;background:linear-gradient(90deg,rgba(74,222,128,.22),#4ade80)}
-  .crrav-ss-irange{display:flex;justify-content:space-between;margin-top:3px;
-    font:600 9px/1.2 system-ui;color:#6f6f7a}
-  .crrav-ss-irange span:nth-child(2){color:#8a8a94}
-  /* Exemples chiffrés */
-  .crrav-ss-ex{display:flex;flex-direction:column;gap:8px}
-  .crrav-ss-exrow{padding:9px 11px;border-radius:9px;background:rgba(255,255,255,.03);
-    border:1px solid rgba(255,255,255,.07)}
-  .crrav-ss-exhead{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 6px}
-  .crrav-ss-exlbl{font:600 11px/1.35 system-ui;color:#c9c9d2}
-  .crrav-ss-extier{flex:0 0 auto;font:800 9.5px/1 system-ui;padding:4px 8px;border-radius:999px;white-space:nowrap}
-  .crrav-ss-extier.legend{background:linear-gradient(135deg,#ffd166,#ffb347);color:#0b0b0d}
-  .crrav-ss-extier.notable{background:rgba(159,214,255,.92);color:#0b0b0d}
-  .crrav-ss-extier.plain{background:rgba(255,255,255,.14);color:#e8e8ec}
-  .crrav-ss-extier.neg{background:rgba(242,84,91,.85);color:#0b0b0d}
-  .crrav-ss-exform{font:600 11.5px/1.5 system-ui;color:#8a8a94}
-  .crrav-ss-exform i{font-style:normal;color:#5f5f68;padding:0 1px}
-  .crrav-ss-exform b{font-weight:800;color:#fff}
-  .crrav-scoreschema-note{margin:16px 0 0;padding-top:12px;border-top:1px solid rgba(255,255,255,.07);
-    font:500 11px/1.6 system-ui;color:#8a8a94}
-  .crrav-scoreschema-note b{color:#c9c9d2;font-weight:700}
-  .crrav-scoreschema-live-hint{margin:12px 0 0;padding:8px 10px;border-radius:8px;
+  .crrav-scoreschema-head{display:flex;flex-direction:column;gap:4px;margin:0 0 22px}
+  .crrav-scoreschema-title{font:800 13px/1.3 system-ui;color:#fff}
+  .crrav-scoreschema-sub{font:500 11px/1.5 system-ui;color:#8a8a94}
+  .crrav-scoreschema-track{position:relative;height:9px;border-radius:999px;
+    background:rgba(255,255,255,.08);margin:0 4px 6px}
+  .crrav-scoreschema-seg{position:absolute;top:0;bottom:0;border-radius:999px}
+  .crrav-scoreschema-seg.taste{background:linear-gradient(90deg,#f2545b,#8a8a94 50%,#4ade80)}
+  .crrav-scoreschema-seg.pref{background:#b98bff}
+  .crrav-scoreschema-seg.bonus1{background:#ffd166}
+  .crrav-scoreschema-seg.bonus2{background:#ffb347}
+  .crrav-scoreschema-zero{position:absolute;top:-3px;bottom:-3px;width:2px;
+    background:rgba(255,255,255,.45);transform:translateX(-1px)}
+  .crrav-scoreschema-pin{position:absolute;bottom:100%;transform:translateX(-50%);
+    display:flex;flex-direction:column;align-items:center}
+  .crrav-scoreschema-pin::after{content:'';width:2px;height:12px;margin-top:3px;
+    background:var(--pincolor,#c9c9d2)}
+  .crrav-scoreschema-pin.notable{--pincolor:#c9c9d2}
+  .crrav-scoreschema-pin.legendary{--pincolor:#ffb347}
+  .crrav-scoreschema-pinlab{display:flex;flex-direction:column;align-items:center;
+    font:700 9.5px/1.15 system-ui;color:#c9c9d2;white-space:nowrap}
+  .crrav-scoreschema-pinlab b{font:800 11px/1.2 system-ui;color:#fff}
+  .crrav-scoreschema-pin.legendary .crrav-scoreschema-pinlab{color:#ffd48a}
+  .crrav-scoreschema-pin.legendary .crrav-scoreschema-pinlab b{color:#ffb347}
+  .crrav-scoreschema-bounds{display:flex;justify-content:space-between;margin:0 4px 14px;
+    font:700 10px/1 system-ui;color:#6f6f7a}
+  .crrav-scoreschema-legend{list-style:none;margin:0;padding:10px 0 0;display:flex;
+    flex-direction:column;gap:9px;border-top:1px solid rgba(255,255,255,.07)}
+  .crrav-scoreschema-legend li{display:flex;align-items:baseline;gap:8px}
+  .crrav-scoreschema-legnum{flex:0 0 auto;font:800 10px/1 system-ui;color:#6f6f7a;
+    min-width:12px}
+  .crrav-scoreschema-legend .crrav-scoreschema-dot{flex:0 0 auto;margin-top:3px}
+  .crrav-scoreschema-legtxt{flex:1 1 auto;font:600 11.5px/1.4 system-ui;color:#c9c9d2}
+  .crrav-scoreschema-legtxt b{color:#fff}
+  .crrav-scoreschema-legval{flex:0 0 auto;font:800 12px/1.3 system-ui;color:#fff;
+    background:rgba(255,255,255,.08);border-radius:6px;padding:2px 7px;white-space:nowrap}
+  .crrav-scoreschema-dot{display:inline-block;width:9px;height:9px;border-radius:50%;
+    margin-right:2px;vertical-align:middle}
+  .crrav-scoreschema-dot.taste{background:linear-gradient(90deg,#f2545b,#4ade80)}
+  .crrav-scoreschema-dot.pref{background:#b98bff}
+  .crrav-scoreschema-dot.bonus1{background:#ffd166}
+  .crrav-scoreschema-dot.bonus2{background:#ffb347}
+  .crrav-scoreschema-note{margin:10px 0 0;padding-top:10px;border-top:1px solid rgba(255,255,255,.07);
+    font:500 11px/1.5 system-ui;color:#8a8a94}
+  .crrav-scoreschema-note b{color:#c9c9d2;font-weight:800}
+  .crrav-scoreschema-live-hint{margin:10px 0 0;padding:8px 10px;border-radius:8px;
     background:rgba(159,214,255,.08);border:1px solid rgba(159,214,255,.25);
     font:600 10.5px/1.5 system-ui;color:#9fd6ff}
   /* (34) Détail « mon profil de goût » : <details> replié par défaut, imbriqué dans le
@@ -9676,7 +9544,27 @@
 
     const items = [];
 
-    if (anyBusy && progressMsg) {
+    // (fix) Scan Découverte : progression STRUCTURÉE (voir loadDiscover → D.scan) plutôt que
+    // re-parsée d'une longue chaîne. Le TITRE porte l'info utile — combien de pépites déjà
+    // trouvées — et la sous-ligne garde l'avancement par page (barre + % + ETA). Fini le
+    // « page N/M » redondant en haut ET en bas, et le compte de légendaires n'est plus rogné.
+    const dscan = STATE.discover.loading ? STATE.discover.scan : null;
+    if (dscan) {
+      const { page, maxPages, found, target, legendary } = dscan;
+      const nf = found || 0;
+      const title = legendary
+        ? `🎲 Pépites légendaires · ${nf} trouvée${nf > 1 ? 's' : ''} sur ${target} visée${target > 1 ? 's' : ''}`
+        : `🔎 Découverte · ${nf} trouvée${nf > 1 ? 's' : ''} sur ${target}`;
+      items.push({
+        label: title,
+        count: `page ${page}/${maxPages}`,
+        pct: maxPages ? Math.round((page / maxPages) * 100) : null,
+        eta: maxPages ? estimateEta('main', page, maxPages, activityStartedAt) : null,
+        done: false,
+        cancellable: STATE.discover.loading,
+        cancelling: STATE.discover.cancelRequested,
+      });
+    } else if (anyBusy && progressMsg) {
       // Certains messages embarquent un ou plusieurs comptes « i/total » — le préfixe
       // « Étape n/total » qu'ajoute stepLabel EN est un lui-même, potentiellement suivi
       // d'un compteur plus précis (ex. « Étape 4/4 · Analyse des épisodes… 8/29 »).
