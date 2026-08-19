@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      2.188.0
+// @version      2.191.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '2.188.0';
+  const SCRIPT_VERSION = '2.191.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -78,16 +78,16 @@
     // votants très différentes (CR souvent plus généreux/moins de votants), un seuil
     // unique appliqué aux deux était soit trop laxiste sur l'un, soit trop strict sur
     // l'autre. Une note manquante côté source ne bloque toujours pas (voir plus bas).
-    discoverMinRatingCr: 4.5,
-    discoverMinRatingAni: 4.5,
+    discoverMinRatingCr: 4.3,
+    discoverMinRatingAni: 3.5,
     // Seuils 🏆/badge « très bien notée » — désormais UN PAR SOURCE (CR et AniList),
     // FIXES et INDÉPENDANTS des minimums d'entrée ci-dessus (voir discoverSignals).
     // Pour décrocher le bonus, la note CR (si connue) doit dépasser son propre seuil ET
     // la note AniList (si connue) doit dépasser le sien — pas juste l'une des deux.
-    discoverWellRatedThresholdCr: 4.5,
-    discoverWellRatedThresholdAni: 4.5,
-    discoverSuperRatedThresholdCr: 4.8,
-    discoverSuperRatedThresholdAni: 4.8,
+    discoverWellRatedThresholdCr: 4.3,
+    discoverWellRatedThresholdAni: 3.8,
+    discoverSuperRatedThresholdCr: 4.7,
+    discoverSuperRatedThresholdAni: 4.1,
     // Bonus de score ajoutés quand la note franchit ces seuils (voir discoverSignals).
     // Avant, +0.5 fixe et invisible dans le code — désormais réglable au même titre que
     // les seuils eux-mêmes, pour que le poids de la note dans le score soit ajustable.
@@ -141,7 +141,7 @@
     // représentés (badge 🎯) ET que le goût global reste positif. Avant, 🎯 était un badge
     // PUREMENT informatif, sans aucun effet sur le score « pépite ».
     // (fix) Défaut adopté d'après tes essais : 0.7.
-    discoverPrefGenreBonus: 0.7,
+    discoverPrefGenreBonus: 0.8,
     // Pondération du profil de goût (voir buildTasteProfile) entre volume d'écoute brut
     // (nombre d'épisodes vus, 0 = comportement historique) et taux de complétion (part de
     // la série effectivement finie, 1 = seule l'adhésion compte). Une série de 100 épisodes
@@ -149,7 +149,7 @@
     // autant ignorer complètement le volume (une série longue très suivie reste un signal
     // fort). 0.6 = mix penchant vers la complétion.
     discoverCompletionWeight: 0.6,
-    discoverMaxSeasons: 3,     // 3 saisons ou moins accepté (fix : c'était < 3 avant)
+    discoverMaxSeasons: 4,     // 4 saisons ou moins accepté
     discoverExcludeCategories: ['romance', 'hentai'], // genres exclus par défaut de Découverte
                                // ET du Calendrier — bloc Nouveautés (slugs Crunchyroll en
                                // minuscule côté Découverte, noms de genre AniList en minuscule
@@ -1123,6 +1123,12 @@
   }
 
   let inFlight = 0;
+  // Signal d'annulation GLOBAL du scan Découverte. Non-null uniquement pendant un scan
+  // (voir loadDiscover). Quand Interrompre est pressé, on l'abort : les requêtes en vol
+  // (api / anilistQuery) sont annulées CÔTÉ RÉSEAU immédiatement, et leurs boucles de
+  // reprise cessent de réessayer — au lieu d'attendre le timeout (20 s) puis plusieurs
+  // essais successifs, ce qui rendait le bouton Interrompre très lent à prendre effet.
+  let scanAbort = null;
   // Pour distinguer MES appels de ceux de l'application Crunchyroll dans les
   // mesures de performance du navigateur.
   const OUR_URLS = new Set();
@@ -1152,6 +1158,14 @@
     // le scan entier). On abandonne au-delà de 20 s et on réessaie.
     const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
     const timer = ctrl ? setTimeout(() => ctrl.abort(), 20000) : null;
+    // Annulation immédiate sur Interrompre : si le scan Découverte est annulé, on coupe la
+    // requête en vol tout de suite (plutôt que d'attendre son timeout de 20 s).
+    const sa = scanAbort;
+    let onAbort = null;
+    if (sa && ctrl) {
+      if (sa.signal.aborted) ctrl.abort();
+      else { onAbort = () => { try { ctrl.abort(); } catch (_) { /* déjà fini */ } }; sa.signal.addEventListener('abort', onAbort); }
+    }
     try {
       res = await RAW_FETCH(url.toString(), {
         credentials: 'include',
@@ -1159,6 +1173,8 @@
         signal: ctrl ? ctrl.signal : undefined,
       });
     } catch (e) {
+      // Scan annulé : on ne réessaie pas (c'est ce qui faisait traîner Interrompre).
+      if (sa && sa.signal.aborted) throw e;
       // Abandon (timeout) ou erreur réseau : on réessaie quelques fois avant d'abandonner.
       if (attempt < 3) {
         LOG(`requête ${key} échouée (${e.name === 'AbortError' ? 'timeout' : e.message}) — nouvel essai ${attempt + 1}`);
@@ -1168,6 +1184,7 @@
       throw e;
     } finally {
       if (timer) clearTimeout(timer);
+      if (onAbort && sa) sa.signal.removeEventListener('abort', onAbort);
       inFlight--;
       const ms = performance.now() - t0;
       const e = STATS.byEndpoint[key] || (STATS.byEndpoint[key] = { n: 0, ms: 0, max: 0, urlMax: 0 });
@@ -1179,7 +1196,7 @@
       // rien (ou si le 401 persiste après essais), on lève le SIGNAL GLOBAL de session
       // perdue AVANT de propager l'erreur — ainsi, même avalée par une vague parallèle,
       // la reconnexion automatique et la bannière partent quand même. Plus de mort muette.
-      if (attempt < 2) {
+      if (attempt < 2 && !(sa && sa.signal.aborted)) {
         LOG(`401 sur ${key} — renouvellement du token (tentative ${attempt + 1})`);
         token = null; tokenExp = 0;
         const t = await refreshToken();
@@ -1191,7 +1208,7 @@
     if (res.status === 429) {
       STATS.rate429++;
       paceOnThrottle();                     // on lève le pied tout de suite
-      if (attempt < 4) {
+      if (attempt < 4 && !(sa && sa.signal.aborted)) {
         await sleep(800 * Math.pow(2, attempt));
         return api(path, params, attempt + 1);
       }
@@ -2997,9 +3014,16 @@
 
   async function anilistQuery(query, variables) {
     const MAX_ATTEMPTS = 3;                 // 1 essai + jusqu'à 2 reprises, transitoire uniquement
+    const sa = scanAbort;                   // annulation immédiate sur Interrompre (voir api)
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      if (sa && sa.signal.aborted) throw new Error('AniList — scan annulé');
       const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
       const t = ctrl ? setTimeout(() => ctrl.abort(), 12000) : null;
+      let onAbort = null;
+      if (sa && ctrl) {
+        if (sa.signal.aborted) ctrl.abort();
+        else { onAbort = () => { try { ctrl.abort(); } catch (_) { /* déjà fini */ } }; sa.signal.addEventListener('abort', onAbort); }
+      }
       let r = null, transportErr = null;
       try {
         // Double filet : AbortController 12 s (annule côté réseau quand le canal coopère)
@@ -3012,7 +3036,7 @@
           signal: ctrl ? ctrl.signal : undefined,
         }), 16000, 'AniList (réponse)');
       } catch (e) { transportErr = e; }
-      finally { if (t) clearTimeout(t); }
+      finally { if (t) clearTimeout(t); if (onAbort && sa) sa.signal.removeEventListener('abort', onAbort); }
 
       // Succès plein : on renvoie (et on distingue une éventuelle erreur GraphQL applicative).
       if (!transportErr && r && r.ok) {
@@ -3030,7 +3054,7 @@
 
       const status = (!transportErr && r) ? r.status : 0;
       const retryAfterMs = (!transportErr && r && r.getHeader) ? parseRetryAfterMs(r.getHeader('retry-after')) : 0;
-      if (anilistRetryable(status, !!transportErr) && attempt < MAX_ATTEMPTS - 1) {
+      if (anilistRetryable(status, !!transportErr) && attempt < MAX_ATTEMPTS - 1 && !(sa && sa.signal.aborted)) {
         const backoff = retryAfterMs || (600 * Math.pow(2, attempt));   // 600 ms, 1200 ms…
         if (DEBUG) LOG(`AniList ${status || 'réseau'} — reprise dans ${backoff} ms (${attempt + 1}/${MAX_ATTEMPTS - 1})`);
         await sleep(backoff);
@@ -4525,6 +4549,10 @@
     D.warning = null;
     D.shortfallDetail = null;
     D.cancelRequested = false;      // remis à zéro à chaque lancement (voir bouton Interrompre)
+    // Nouveau signal d'annulation pour CE scan : Interrompre l'abort → requêtes en vol coupées
+    // net et boucles de reprise stoppées (voir scanAbort dans api/anilistQuery).
+    try { if (scanAbort) scanAbort.abort(); } catch (_) { /* rien en cours */ }
+    scanAbort = (typeof AbortController !== 'undefined') ? new AbortController() : null;
     // Compteurs de diagnostic : pourquoi tel candidat n'est pas devenu une pépite affichée.
     // Alimentent le rapport détaillé affiché sous les résultats quand le quota visé
     // (CFG.discoverTarget / legendaryTarget) n'est pas atteint (voir buildShortfallReport).
@@ -4763,7 +4791,16 @@
           // MÊME série, une fois enrichie via 🎲 légendaire, obtenait un score positif
           // cohérent. Le fix : lancer cet enrichissement dans les deux modes, pas seulement
           // légendaire, pour que le score affiché repose toujours sur les mêmes données.
-          if (!D.cancelRequested && anilistCooldownRemainingMs() <= 0) {
+          // (fix requêtes) Enrichissement AniList par tranche : RÉSERVÉ au mode légendaire.
+          // Le mode légendaire FILTRE par score (il a besoin des tags de CHAQUE candidat pour
+          // décider s'il est « légendaire »), donc l'enrichissement doit y être sur le chemin
+          // critique. Le mode normal, lui, ne filtre PAS par AniList (seule la note CR décide
+          // de la sélection) : interroger AniList pour chaque candidat de chaque page n'y
+          // servait qu'à l'affichage, mais générait un flot de requêtes (une par tranche, ~7
+          // par page) qui déclenchait vite un 429 → coupe-circuit → PLUS AUCUNE note AniList,
+          // et un scan bien plus lent. En mode normal, on enrichit donc UNIQUEMENT le lot final
+          // réellement affiché, en un seul passage groupé (voir enrichDiscoverFinal plus bas).
+          if (legendary && !D.cancelRequested && anilistCooldownRemainingMs() <= 0) {
             // Genres pauvres OU tags encore inconnus (voir needsAniGenres) : les tags sont
             // le principal levier du goût désormais (tasteScore), donc un candidat avec de
             // bons genres CR mais sans tag profite quand même de ce passage groupé.
@@ -4789,20 +4826,23 @@
             }
           }
 
-          // (fix) Re-vérification du seuil AniList APRÈS cet enrichissement : le filtre de
-          // note plus haut (evaluateDiscoverCandidate) ne connaît que l'AniList déjà en
-          // cache — la plupart des candidats n'ont pas encore été croisés à ce stade, donc
-          // leur note AniList y est encore inconnue et ne pouvait pas bloquer. Une fois
-          // x.aniScore fraîchement rempli ci-dessus, on retombe parfois sous
-          // CFG.discoverMinRatingAni (ex. 3.0★ alors que le réglage exige 4★) — sans ce
-          // second passage, ces candidats passaient tout droit et s'affichaient quand même,
-          // avec une note AniList sous le minimum configuré.
+          // Re-vérification APRÈS l'éventuel enrichissement par tranche (légendaire seulement).
+          // En légendaire, x.aniScore vient d'être rempli ci-dessus et peut retomber sous
+          // CFG.discoverMinRatingAni → on rejette ici. En mode normal, aucun enrichissement par
+          // tranche n'a eu lieu : x.aniScore n'est là que s'il était DÉJÀ en cache (gratuit),
+          // donc ce filtre n'agit que sur les séries déjà croisées — jamais une requête de plus.
+          // Idem pour le GENRE : categoriesRejectedByGenre a déjà tranché en amont, mais un
+          // enrichissement légendaire a pu AJOUTER un genre AniList exclu qu'il faut re-filtrer.
           survivors = survivors.filter((x) => {
             // (fix) Même assouplissement qu'en amont (evaluateDiscoverCandidate) : pas de
             // seuil de note en mode « séries similaires ».
             const minAni = D.similarTo ? 0 : CFG.discoverMinRatingAni;
             if (x.aniScore != null && (x.aniScore / 20) < minAni) {
               REJ.rating++;
+              return false;
+            }
+            if (categoriesRejectedByGenre(x.categories, null, null, STATE.filters.discoverCatsInMode === 'all')) {
+              REJ.genre++;
               return false;
             }
             return true;
@@ -4920,6 +4960,42 @@
       const found = D.similarTo
         ? [...matches].sort((a, b) => tasteScore(b, simProfile) - tasteScore(a, simProfile)).slice(0, target)
         : matches.slice(0, target);
+
+      // (fix requêtes) Enrichissement AniList DIFFÉRÉ, mode normal / similaire uniquement :
+      // on n'interroge AniList que pour les pépites RÉELLEMENT retenues et affichées (≤ target),
+      // en un seul passage groupé (tranches de 8), au lieu d'une requête par tranche de chaque
+      // page comme avant — ce qui saturait l'API (429) puis coupait toute note AniList. Le
+      // mode légendaire a déjà enrichi pendant le scan (il en a besoin pour filtrer par score),
+      // donc `anilistNeedsFetch` y renverra false et ce passage sera un quasi no-op. Les objets
+      // de `found` sont les MÊMES références que celles déjà publiées dans D.series (streaming) :
+      // les muter puis render() fait apparaître note + tags au fil de l'enrichissement.
+      if (!legendary && !D.cancelRequested && CFG.anilistSchedule) {
+        const need = found.filter((x) => x && x.id
+          && ((x.categories || []).length < 2 || !x.tags || !x.tags.length || x.aniScore == null)
+          && anilistNeedsFetch(x.id));
+        for (let i = 0; i < need.length; i += 8) {
+          if (D.cancelRequested || anilistCooldownRemainingMs() > 0) break;
+          const slice = need.slice(i, i + 8);
+          try {
+            const map = await anilistSearchBatch(slice.map((x) => ({ key: x.id, title: x.title })));
+            for (const x of slice) {
+              const r = map.get(x.id);
+              const sLike = { id: x.id, title: x.title, airing: isAiring(x.maxAir),
+                lastAired: x.maxAir ? { air: x.maxAir } : null };
+              const best = r ? aniPickMatch(r.media, sLike) : null;
+              const result = { matched: false, ...EMPTY_ANI, aniId: null, aniTitle: '', av: ANILIST_CACHE_VER };
+              if (best) Object.assign(result, computeAniSchedule(best, sLike),
+                { matched: true, aniId: best.id, aniTitle: aniPrimaryTitle(best) });
+              cacheSet('anilist:' + x.id, result);
+              if (result.genres && result.genres.length) x.categories = mergeGenreLists(x.categories, result.genres);
+              if (result.tags && result.tags.length) x.tags = mergeTagLists(x.tags, result.tags);
+              if (result.meanScore != null) x.aniScore = result.meanScore;
+            }
+          } catch (_) { /* best-effort : sans note AniList, la carte garde sa seule note CR */ }
+          render();   // note + tags apparaissent au fur et à mesure
+        }
+      }
+
       found.forEach((s) => D.excludedIds.add(s.id));
       if (legendary) addLegendaryHistory(found.map((s) => s.id));
 
@@ -4977,6 +5053,7 @@
       console.error('[reste-à-voir] échec découverte', e);
       D.error = e.message || String(e);
     } finally {
+      scanAbort = null;               // fin du scan : plus rien à annuler
       D.loading = false;
       D.scan = null;
       render();
@@ -6377,6 +6454,13 @@
     // les autres réglages du score n'entrent pas dans le profil. Sans override → CFG réel.
     const C = override ? { ...CFG, ...override } : CFG;
     const w = {};
+    // Sous-profil GENRES SEULS, accumulé pour TOUTES tes séries (même celles enrichies en
+    // tags) : sert à noter équitablement une candidate SANS tags AniList (série non trouvée
+    // sur AniList). La comparer au profil principal — dominé par les tags — donnait un cosinus
+    // proche de 0 donc un goût ≈ -1 (gros malus injuste), alors qu'on ignore simplement ses
+    // tags. On la compare plutôt à CE sous-profil (voir tasteScore) : ses genres CR sont jugés
+    // par rapport à ta répartition de genres, base comparable, sans pénalité fantôme.
+    const gw = {};
     const cw = Math.max(0, Math.min(1, C.discoverCompletionWeight ?? 0.6));
     for (const s of STATE.series || []) {
       if (!s || (s.seen || 0) <= 0) continue;
@@ -6397,14 +6481,22 @@
           w[key] = (w[key] || 0) + weight;
         }
       }
+      // Genres accumulés SÉPARÉMENT pour TOUTE série (avec ou sans tags) → sous-profil genres.
+      for (const c of s.categories || []) {
+        const gk = genreKey(c);
+        gw[gk] = (gw[gk] || 0) + weight;
+      }
     }
     const entries = Object.entries(w).sort((a, b) => b[1] - a[1]);
     // Norme euclidienne du vecteur profil, précalculée une fois pour toutes (voir tasteScore,
     // appelé une fois par candidate — inutile de la recalculer à chaque appel).
     const norm = Math.sqrt(entries.reduce((a, [, v]) => a + v * v, 0));
+    const genreNorm = Math.sqrt(Object.values(gw).reduce((a, v) => a + v * v, 0));
     return {
       weights: w,
       norm,
+      genreWeights: gw,       // sous-profil genres seuls (candidate sans tags, voir tasteScore)
+      genreNorm,
       max: entries.length ? entries[0][1] : 0,
       top: entries.slice(0, 3).map(([k]) => k),   // tes 3 tags/genres les plus représentés (clés préfixées)
       size: entries.length,
@@ -6440,7 +6532,13 @@
     const entries = Object.entries(v).sort((a, b) => b[1] - a[1]);
     if (!entries.length) return null;
     const norm = Math.sqrt(entries.reduce((a, [, w]) => a + w * w, 0));
-    return { weights: v, norm, max: entries[0][1], top: entries.slice(0, 3).map(([k]) => k), size: entries.length };
+    // Sous-profil genres seuls de la série source (même rôle qu'en profil agrégé) : une
+    // candidate sans tags AniList est comparée aux GENRES de la série source, pas à ses tags
+    // qu'elle ne peut pas avoir — évite un malus fantôme (voir tasteScore).
+    const gv = {};
+    for (const c of (categories || [])) gv[genreKey(c)] = 1;
+    const genreNorm = Math.sqrt(Object.values(gv).reduce((a, x) => a + x * x, 0));
+    return { weights: v, norm, genreWeights: gv, genreNorm, max: entries[0][1], top: entries.slice(0, 3).map(([k]) => k), size: entries.length };
   }
 
   // Égalité de deux ensembles (insensible à la casse) — sert à détecter si les filtres
@@ -6520,16 +6618,26 @@
     const v = candidateTasteVector(s);
     const keys = Object.keys(v);
     if (!keys.length) return 0;
+    // Candidate SANS tags AniList (série non trouvée sur AniList) : son vecteur ne contient
+    // que des clés « genre: ». La comparer au profil principal — dominé par les tags — donnait
+    // un cosinus ~0 → goût ≈ -1, un gros malus injuste (on ignore ses tags, on ne les lui
+    // reproche pas). On la compare donc au SOUS-PROFIL GENRES SEULS : base comparable (ses
+    // genres vs ta répartition de genres). Sans sous-profil genres (toutes tes séries
+    // enrichies, ou profil « série unique » sans genres) → neutre (0), jamais de malus.
+    const tagless = !(s.tags && s.tags.length);
+    const weights = tagless ? (profile.genreWeights || null) : profile.weights;
+    const pnorm = tagless ? (profile.genreNorm || 0) : profile.norm;
+    if (!weights || !pnorm) return 0;
     let dot = 0, vNormSq = 0;
     for (const k of keys) {
       const cv = v[k];
       vNormSq += cv * cv;
-      const pw = profile.weights[k];
+      const pw = weights[k];
       if (pw) dot += cv * pw;
     }
     const vNorm = Math.sqrt(vNormSq);
     if (!vNorm) return 0;
-    const cos = dot / (vNorm * profile.norm);   // [0, 1] : tous les poids sont ≥ 0
+    const cos = dot / (vNorm * pnorm);   // [0, 1] : tous les poids sont ≥ 0
     // (fix) Avant : cos * 2 - 1, qui place le point neutre (goût = 0) à cos = 0.5. Trop haut
     // dans un espace de tags large et épars, où même un bon match plafonne souvent vers
     // 0.5-0.6 (voir CFG.discoverTasteNeutralCos) — ça écrasait la quasi-totalité des
@@ -6824,9 +6932,9 @@
         <a class="crrav-cover" href="${seriesUrl}">
           ${s.poster ? `<img loading="lazy" crossorigin="anonymous" src="${s.poster}" alt="" onerror="this.removeAttribute(&quot;crossorigin&quot;);this.src=this.src">` : ''}
         </a>
+        <span class="crrav-rating">${ratingLabel(s)}</span>
         ${sig.legendary ? `<span class="crrav-legribbon" title="Score pépite élevé (voir Réglages → Découverte) : une pépite en or">✨ Légendaire</span>`
           : sig.notable ? `<span class="crrav-notaribbon" title="Score pépite au-dessus du seuil « notable » (voir Réglages → Découverte)">◆ Notable</span>` : ''}
-        <span class="crrav-rating">${ratingLabel(s)}</span>
         ${ignoreBtn(s, 'discover')}
         ${addListBtn(s)}
         ${synopsis}
@@ -7176,7 +7284,8 @@
   .crrav-cat.ex{background:rgba(224,87,74,.16);border-color:rgba(224,87,74,.55);color:#ff9a8f;
     text-decoration:line-through}
   .crrav-cats{font:500 10.5px/1.3 system-ui;color:#8a8a94;
-    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+    overflow:hidden;text-overflow:ellipsis}
 
   .crrav-grid{display:grid;gap:16px;padding:20px;grid-template-columns:repeat(auto-fill,minmax(178px,1fr))}
 
@@ -7325,11 +7434,12 @@
   /* (fix) Le pavé de note (CR + AniList, ex. « ★4.9 · AL ★4.2 ») est ancré à gauche et le
      ruban Légendaire/Notable à droite, tous deux top:8px — sur une jaquette étroite, un
      pavé de note large finissait par chevaucher le ruban (le libellé « Légendaire »
-     recouvrait la fin de la note). On empile plutôt le pavé de note SOUS le ruban quand les
-     deux coexistent (sélecteur de fratrie : le ruban est toujours écrit avant la note dans le
-     HTML), ce qui élimine le chevauchement quelle que soit la largeur du texte, au prix d'un
-     décalage vertical du pavé de note.*/
-  .crrav-legribbon ~ .crrav-rating,.crrav-notaribbon ~ .crrav-rating{top:34px}
+     recouvrait la fin de la note). Le pavé de note reste la référence fixe en haut à gauche ;
+     c'est le ruban qu'on décale SOUS lui quand les deux coexistent (sélecteur de fratrie : le
+     ruban est toujours écrit avant la note dans le HTML), ce qui élimine le chevauchement
+     quelle que soit la largeur du texte, au prix d'un décalage vertical du ruban plutôt que
+     de la note.*/
+  .crrav-rating ~ .crrav-legribbon,.crrav-rating ~ .crrav-notaribbon{top:34px}
   .crrav-info{position:absolute;right:8px;bottom:8px;z-index:2;width:32px;height:32px;border-radius:50%;
     background:rgba(10,10,12,.92);border:1px solid rgba(255,255,255,.22);
     color:#f2f2f4;font:700 15px/1 Georgia,serif;cursor:pointer;padding:0;
@@ -12045,10 +12155,13 @@
           return;
         }
         if (act.dataset.act === 'cancel-discover') {
-          // Interruption douce : on lève le drapeau, la boucle de scan sort au prochain
-          // point de contrôle (frontière de page/paquet) et affiche l'acquis. Pas de kill
-          // brutal — les requêtes déjà en vol se terminent, mais plus aucune n'est lancée.
+          // Interruption : on lève le drapeau ET on abort les requêtes en vol. L'abort coupe
+          // net côté réseau et stoppe les boucles de reprise (voir scanAbort), donc la boucle
+          // de scan atteint son point de contrôle quasi immédiatement et affiche l'acquis —
+          // au lieu d'attendre plusieurs timeouts de 20 s. Les réponses arrivées entre-temps
+          // sont simplement ignorées.
           STATE.discover.cancelRequested = true;
+          try { if (scanAbort) scanAbort.abort(); } catch (_) { /* déjà terminé */ }
           render();
           return;
         }
