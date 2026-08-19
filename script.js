@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      2.187.0
+// @version      2.188.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '2.187.0';
+  const SCRIPT_VERSION = '2.188.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -2877,11 +2877,14 @@
   const EMPTY_ANI = { plannedTotal: null, seasonEndTs: null, plannedApprox: false, anilistStatus: null, nextEpTs: null, nextEpNum: null, genres: [], tags: [], studio: null, meanScore: null, popularity: null, duration: null, season: null, seasonYear: null, source: null, format: null };
   // Version du FORMAT du cache AniList : à incrémenter quand la logique de calcul change,
   // pour re-questionner AniList sans vider tout le reste du cache (pas de rescan complet).
-  const ANILIST_CACHE_VER = 7;   // 4 : ajout du repli titre anglais CR (voir enrichAnilistSchedule)
+  const ANILIST_CACHE_VER = 8;   // 4 : ajout du repli titre anglais CR (voir enrichAnilistSchedule)
                                   // 5 : ajout des genres AniList (voir translateAniGenres)
                                   // 6 : ajout des tags AniList pondérés par rank (voir tasteScore)
                                   // 7 : ajout studio/note/popularité/durée/saison/source/format
                                   //     (voir computeStats) — mêmes requêtes, champs en plus.
+                                  // 8 : anilistSearchTerms tente aussi le titre sans diacritiques
+                                  //     (voir stripDiacritics) — corrige les ratés type « Itô »
+                                  //     (CR) vs « Ito » (index de recherche AniList), ou l'inverse.
                                   // → force un nouvel essai des séries jusque-là non matchées.
 
   // Traduit un corps de réponse d'erreur AniList en raison lisible. Un 403 sur
@@ -3059,6 +3062,14 @@
   // 0 résultat. On cherche donc aussi CHAQUE partie séparée par «  - / : / | / ~  » (avec
   // espaces autour, pour ne pas casser « Re:Zero » ou « Re-Zero »). Parties les plus
   // longues d'abord (plus discriminantes). Max 3 → une seule requête groupée.
+  // Enlève les diacritiques (« Itô » → « Ito ») SANS toucher au reste (espaces, ponctuation,
+  // casse) — contrairement à aniNorm, ce n'est pas destiné à la comparaison mais à la
+  // recherche : la recherche AniList (SEARCH_MATCH) ne fait pas elle-même ce repli accentué,
+  // donc un titre CR accentué (« Itô ») peut renvoyer 0 résultat quand la fiche AniList est
+  // indexée sans accent (« Ito »), ou inversement — d'où l'ajout d'une variante dédiée.
+  function stripDiacritics(s) {
+    return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  }
   function anilistSearchTerms(title) {
     const t = String(title || '').trim();
     const terms = [];
@@ -3067,6 +3078,8 @@
       if (x.length >= 2 && !terms.some((y) => y.toLowerCase() === x.toLowerCase())) terms.push(x);
     };
     push(t);
+    const stripped = stripDiacritics(t);
+    if (stripped !== t) push(stripped);
     const parts = t.split(/\s+[-–—:|~]\s+/).map((s) => s.trim()).filter((s) => s.length >= 2);
     parts.sort((a, b) => b.length - a.length);
     for (const part of parts) push(part);
