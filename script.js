@@ -2338,6 +2338,7 @@
       // 429 était une requête HTTP par série ; ici comme dans enrichAnilistSchedule, on
       // regroupe plusieurs séries par requête pour rester sous le radar du rate limit.
       const ANI_BATCH = 6;
+      const noMatch2 = [];   // sans match en titre FR → repli titre anglais (voir plus bas)
       for (let i = 0; i < needAni.length; i += ANI_BATCH) {
         if (anilistCooldownRemainingMs() > 0) break;   // un 429 en cours de route : on s'arrête net
         const batch = needAni.slice(i, i + ANI_BATCH);
@@ -2351,6 +2352,37 @@
           if (best && best.genres && best.genres.length) {
             d.genres = mergeGenreLists(d.genres, translateAniGenres(best.genres));
             changed = true;
+          } else {
+            noMatch2.push(d);
+          }
+        }
+      }
+
+      // ── Phase 2bis : repli titre anglais, groupé — même logique que la Phase 1bis
+      // d'enrichAnilistSchedule. Sans lastAired/airing ici, le garde-fou à 0.6 d'aniPickMatch
+      // (année ou diffusion en cours) ne peut jamais se déclencher : un titre FR dont le
+      // score AniList tombe entre 0.6 et 0.9 (ex. synonyme FR légèrement différent, cas de
+      // « Nina du royaume des/aux étoiles ») serait sinon perdu pour de bon.
+      if (anilistCooldownRemainingMs() === 0 && noMatch2.length) {
+        const enItems = [];
+        for (const d of noMatch2) {
+          const enTitle = await getSeriesEnglishTitle(d.id);
+          if (enTitle && aniNorm(enTitle) !== aniNorm(d.title)) enItems.push({ d, enTitle });
+        }
+        for (let i = 0; i < enItems.length; i += ANI_BATCH) {
+          if (anilistCooldownRemainingMs() > 0) break;
+          const batch = enItems.slice(i, i + ANI_BATCH);
+          let map = null;
+          try {
+            map = await anilistSearchBatch(batch.map(({ d, enTitle }) => ({ key: d.id, title: enTitle })));
+          } catch (_) { /* best-effort */ }
+          if (map) for (const { d, enTitle } of batch) {
+            const r = map.get(d.id);
+            const best = r ? aniPickMatch(r.media, { title: enTitle }) : null;
+            if (best && best.genres && best.genres.length) {
+              d.genres = mergeGenreLists(d.genres, translateAniGenres(best.genres));
+              changed = true;
+            }
           }
         }
       }
