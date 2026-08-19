@@ -74,15 +74,20 @@
                                // masquée par défaut — activable dans les réglages.
 
     // Onglet Découverte : séries populaires jamais vues, hors de toutes tes listes
-    discoverMinRating: 4.5,
-    // Seuils 🏆/badge « très bien notée ». FIXES et INDÉPENDANTS de discoverMinRating
-    // (voir discoverSignals) — avant, wellRated valait max(4.4, discoverMinRating+0.1) :
-    // si tu montais discoverMinRating au-delà de ~4.6, wellRated devenait quasi inatteignable
-    // (ex. ≥4.9) alors que superRated restait fixé à 4.7 et devenait trivialement vrai pour
-    // toute carte affichée (déjà filtrée par discoverMinRating). Les deux seuils sont
-    // désormais stables quel que soit le réglage du filtre d'entrée.
-    discoverWellRatedThreshold: 4.5,
-    discoverSuperRatedThreshold: 4.8,
+    // (fix) Séparé en deux seuils indépendants — CR et AniList notent sur des bases de
+    // votants très différentes (CR souvent plus généreux/moins de votants), un seuil
+    // unique appliqué aux deux était soit trop laxiste sur l'un, soit trop strict sur
+    // l'autre. Une note manquante côté source ne bloque toujours pas (voir plus bas).
+    discoverMinRatingCr: 4.5,
+    discoverMinRatingAni: 4.5,
+    // Seuils 🏆/badge « très bien notée » — désormais UN PAR SOURCE (CR et AniList),
+    // FIXES et INDÉPENDANTS des minimums d'entrée ci-dessus (voir discoverSignals).
+    // Pour décrocher le bonus, la note CR (si connue) doit dépasser son propre seuil ET
+    // la note AniList (si connue) doit dépasser le sien — pas juste l'une des deux.
+    discoverWellRatedThresholdCr: 4.5,
+    discoverWellRatedThresholdAni: 4.5,
+    discoverSuperRatedThresholdCr: 4.8,
+    discoverSuperRatedThresholdAni: 4.8,
     // Bonus de score ajoutés quand la note franchit ces seuils (voir discoverSignals).
     // Avant, +0.5 fixe et invisible dans le code — désormais réglable au même titre que
     // les seuils eux-mêmes, pour que le poids de la note dans le score soit ajustable.
@@ -533,8 +538,11 @@
     { key: 'cacheQuotaEvictPct', label: 'Seuil de purge quota cache', type: 'int', min: 40, max: 98, unit: '%',
       help: 'Au-delà de ce taux, le cache le plus ancien est purgé automatiquement (par petites tranches) pour ne jamais bloquer une écriture. Doit rester au-dessus du seuil d’alerte.',
       impact: 'display' },
-    { key: 'discoverMinRating', label: 'Note minimale', type: 'float', min: 0, max: 5, step: 0.5,
-      help: 'Écarte les séries en dessous de cette note. 0 = aucun filtre de note.',
+    { key: 'discoverMinRatingCr', label: 'Note minimale Crunchyroll', type: 'float', min: 0, max: 5, step: 0.5,
+      help: 'Écarte les séries dont la note Crunchyroll est en dessous. 0 = aucun filtre sur cette note.',
+      impact: 'discover', sub: 'discoverFilters' },
+    { key: 'discoverMinRatingAni', label: 'Note minimale AniList', type: 'float', min: 0, max: 5, step: 0.5,
+      help: 'Écarte les séries dont la note AniList (quand elle est connue) est en dessous. 0 = aucun filtre sur cette note. Sans effet si AniList n\'a pas encore été croisé pour cette série.',
       impact: 'discover', sub: 'discoverFilters' },
     { key: 'discoverMaxSeasons', label: 'Saisons maximum', type: 'int', min: 1, max: 20, unit: 'saisons',
       help: 'Écarte les séries trop longues à rattraper.',
@@ -572,14 +580,20 @@
     { key: 'discoverCompletionWeight', label: 'Poids de la complétion dans le profil', type: 'float', min: 0, max: 1, step: 0.05,
       help: 'Dans le calcul de ton PROFIL de goût (pas dans le score d’une série directement) : 0 = seul le nombre d’épisodes vus compte (comme avant), 1 = seul le taux de complétion compte (finir une série pèse plus que la survoler). Une série de 100 épisodes vue à 20 % vs une série de 12 épisodes terminée — ce curseur arbitre entre les deux. Il ne s’ajoute jamais au score : il change seulement à QUOI chaque candidate est comparée (le goût net = similarité avec ce profil).',
       impact: 'discover', sub: 'discoverScoringTaste' },
-    { key: 'discoverWellRatedThreshold', label: 'Note requise 🏆', type: 'float', min: 3, max: 5, step: 0.1,
-      help: 'Note AniList à partir de laquelle le badge 🏆 s’affiche et le bonus ci-dessous s’applique.',
+    { key: 'discoverWellRatedThresholdCr', label: 'Note requise 🏆 — Crunchyroll', type: 'float', min: 3, max: 5, step: 0.1,
+      help: 'Note Crunchyroll (quand elle est connue) à partir de laquelle le badge 🏆 s’affiche et le bonus ci-dessous s’applique. Si la note AniList est aussi connue, elle doit ELLE AUSSI dépasser son propre seuil (ci-dessous) — les deux sont exigées.',
+      impact: 'discover', sub: 'discoverScoringRating' },
+    { key: 'discoverWellRatedThresholdAni', label: 'Note requise 🏆 — AniList', type: 'float', min: 3, max: 5, step: 0.1,
+      help: 'Note AniList (quand elle est connue) à partir de laquelle le badge 🏆 s’affiche et le bonus ci-dessous s’applique. Si la note Crunchyroll est aussi connue, elle doit ELLE AUSSI dépasser son propre seuil (ci-dessus) — les deux sont exigées.',
       impact: 'discover', sub: 'discoverScoringRating' },
     { key: 'discoverWellRatedBonus', label: 'Bonus « très bien notée » 🏆', type: 'float', min: 0, max: 2, step: 0.1,
-      help: 'Points ajoutés au score quand la note dépasse le seuil ci-dessus.',
+      help: 'Points ajoutés au score quand la ou les notes connues dépassent leurs seuils ci-dessus.',
       impact: 'discover', sub: 'discoverScoringRating' },
-    { key: 'discoverSuperRatedThreshold', label: 'Note requise ✨ (palier supplémentaire)', type: 'float', min: 3, max: 5, step: 0.1,
-      help: 'Note AniList à partir de laquelle un second bonus s’ajoute (cumulable avec le bonus 🏆 ci-dessus).',
+    { key: 'discoverSuperRatedThresholdCr', label: 'Note requise ✨ — Crunchyroll (palier supplémentaire)', type: 'float', min: 3, max: 5, step: 0.1,
+      help: 'Note Crunchyroll à partir de laquelle un second bonus s’ajoute (cumulable avec le bonus 🏆). Même logique que ci-dessus : si l’autre note est connue, elle doit aussi dépasser son propre seuil ✨.',
+      impact: 'discover', sub: 'discoverScoringRating' },
+    { key: 'discoverSuperRatedThresholdAni', label: 'Note requise ✨ — AniList (palier supplémentaire)', type: 'float', min: 3, max: 5, step: 0.1,
+      help: 'Note AniList à partir de laquelle un second bonus s’ajoute (cumulable avec le bonus 🏆). Même logique que ci-dessus : si l’autre note est connue, elle doit aussi dépasser son propre seuil ✨.',
       impact: 'discover', sub: 'discoverScoringRating' },
     { key: 'discoverSuperRatedBonus', label: 'Bonus « note exceptionnelle » ✨', type: 'float', min: 0, max: 2, step: 0.1,
       help: 'Points ajoutés au score quand la note dépasse le seuil ✨ ci-dessus, en plus du bonus 🏆.',
@@ -4096,7 +4110,8 @@
 
   // (D) Onglet Découverte : parcourt le classement popularité de Crunchyroll et
   // ne garde que les séries jamais vues (ni dans une liste, ni dans l'historique),
-  // avec au plus CFG.discoverMaxSeasons saisons et une note >= CFG.discoverMinRating.
+  // avec au plus CFG.discoverMaxSeasons saisons et une note >= CFG.discoverMinRatingCr (CR)
+  // et >= CFG.discoverMinRatingAni (AniList, quand connue).
   // Empreinte stable des filtres de genre live, pour comparer « recherché » vs « actuel ».
   function genreFilterKey() {
     const f = STATE.filters;
@@ -4133,7 +4148,7 @@
       seasonsPreBrowse: 'Trop de saisons (vérification rapide, avant toute requête)',
       seasons: `Trop de saisons (> ${CFG.discoverMaxSeasons}, après vérification précise)`,
       genre: 'Genre exclu ou hors du filtre « garder uniquement » (après fiche complète)',
-      rating: `Note absente ou sous le minimum (${CFG.discoverMinRating}★)`,
+      rating: `Note absente, ou sous le minimum (CR ${CFG.discoverMinRatingCr}★ / AniList ${CFG.discoverMinRatingAni}★)`,
       progressPlayhead: 'Déjà commencée d’après ta progression réelle (filet de sécurité)',
       legendaryScore: `Score « pépite » sous le seuil légendaire (${CFG.discoverLegendaryScore})`,
     };
@@ -4145,7 +4160,7 @@
     const topReason = rows[0] ? rows[0][0] : null;
 
     const activeFilters = [
-      `Note minimale : <b>${CFG.discoverMinRating}★</b>`,
+      `Note minimale : <b>CR ${CFG.discoverMinRatingCr}★</b> / <b>AniList ${CFG.discoverMinRatingAni}★</b>`,
       `Saisons maximum : <b>${CFG.discoverMaxSeasons}</b>`,
       `Genres exclus par défaut : ${CFG.discoverExcludeCategories.length ? '<b>' + CFG.discoverExcludeCategories.map(escapeHtml).join(', ') + '</b>' : '<i>aucun</i>'}`,
       f.discoverCatsIn.length ? `Genres gardés exclusivement (${f.discoverCatsInMode === 'all' ? 'TOUS requis' : 'au moins un'}) : <b>${f.discoverCatsIn.map(escapeHtml).join(', ')}</b>` : null,
@@ -4161,7 +4176,7 @@
       seasonsPreBrowse: `Beaucoup de séries dépassent ${CFG.discoverMaxSeasons} saison${CFG.discoverMaxSeasons > 1 ? 's' : ''}. Monte « Saisons maximum » dans Réglages → Découverte si tu es prêt·e à rattraper des séries plus longues.`,
       seasons: `Beaucoup de séries dépassent ${CFG.discoverMaxSeasons} saison${CFG.discoverMaxSeasons > 1 ? 's' : ''}. Monte « Saisons maximum » dans Réglages → Découverte.`,
       genre: "Le filtre de genre (exclusions par défaut ou chips « garder uniquement ») écarte la majorité des candidats. Assouplis-le dans Réglages → Découverte ou dans les chips sous les résultats.",
-      rating: `La note minimale (${CFG.discoverMinRating}★) élimine la majorité des candidats. Baisse « Note minimale » dans Réglages → Découverte.`,
+      rating: `La note minimale (CR ${CFG.discoverMinRatingCr}★ / AniList ${CFG.discoverMinRatingAni}★) élimine la majorité des candidats. Baisse « Note minimale Crunchyroll »/« Note minimale AniList » dans Réglages → Découverte.`,
       progressPlayhead: "Beaucoup de séries sont déjà entamées d'après ta progression réelle — rien à régler ici, c'est le comportement voulu.",
       legendaryScore: scoreStats
         ? `Beaucoup de candidats passent les filtres mais restent sous le score légendaire (${CFG.discoverLegendaryScore}). Sur ce scan, le score max réellement atteint était de <b>${scoreStats.max.toFixed(2)}</b> — si c'est en-dessous ou tout juste au-dessus du seuil, baisse « Score minimum — légendaire » (par exemple vers ${Math.max(0, scoreStats.top25).toFixed(1)}, la borne des 25% meilleurs candidats de ce scan) ou monte « Poids du goût dans le score final » dans Réglages → Découverte.`
@@ -4186,7 +4201,7 @@
       seasonsPreBrowse: `« Saisons maximum » — actuellement ${CFG.discoverMaxSeasons} (Réglages → Découverte)`,
       seasons: `« Saisons maximum » — actuellement ${CFG.discoverMaxSeasons} (Réglages → Découverte)`,
       genre: 'les filtres de genre (Réglages → Découverte, ou les chips sous les résultats)',
-      rating: `« Note minimale » — actuellement ${CFG.discoverMinRating}★ (Réglages → Découverte)`,
+      rating: `« Note minimale Crunchyroll »/« Note minimale AniList » — actuellement ${CFG.discoverMinRatingCr}★ / ${CFG.discoverMinRatingAni}★ (Réglages → Découverte)`,
       progressPlayhead: 'aucun réglage — séries déjà commencées d’après ta progression réelle',
       legendaryScore: `« Score minimum — légendaire » à BAISSER (actuellement ${CFG.discoverLegendaryScore}) — ou « Poids du goût dans le score final » à monter (Réglages → Découverte)`,
     };
@@ -4342,14 +4357,15 @@
     if (categoriesRejectedByGenre(categories, null, null, STATE.filters.discoverCatsInMode === 'all')) { REJ.genre++; return null; }
     if (D.cancelRequested) return null;
 
-    // 3. note : CR ET AniList (quand connue) doivent TOUTES DEUX dépasser le seuil —
-    // pas juste l'une ou l'autre. La note CR reste requise dans tous les cas (1
-    // requête) ; si AniList n'est pas encore connue pour cette candidate (jamais
-    // croisée), elle ne sert simplement pas à rejeter — seule la note CR décide alors,
-    // comme avant l'ajout de ce filtre.
+    // 3. note : CR ET AniList (quand connue) doivent CHACUNE dépasser SON PROPRE seuil
+    // (discoverMinRatingCr / discoverMinRatingAni) — deux réglages désormais séparés,
+    // les deux notes n'ayant ni la même échelle de votants ni la même générosité
+    // moyenne. La note CR reste requise dans tous les cas (1 requête) ; si AniList
+    // n'est pas encore connue pour cette candidate (jamais croisée), elle ne sert
+    // simplement pas à rejeter — seule la note CR décide alors.
     const rating = await getRating(p.id);
-    if (rating == null || rating < CFG.discoverMinRating) { REJ.rating++; return null; }
-    if (aniScore != null && (aniScore / 20) < CFG.discoverMinRating) { REJ.rating++; return null; }
+    if (rating == null || rating < CFG.discoverMinRatingCr) { REJ.rating++; return null; }
+    if (aniScore != null && (aniScore / 20) < CFG.discoverMinRatingAni) { REJ.rating++; return null; }
     if (D.cancelRequested) return null;
 
     // 4. épisodes + progression : le plus cher, réservé au dernier carré
@@ -5113,8 +5129,10 @@
       return knownTitlesNorm.some((k) => k === nt || k.includes(nt) || nt.includes(k) || aniDice(k, nt) >= 0.82);
     };
 
-    const scoreMin = CFG.discoverMinRating > 0
-      ? Math.round(Math.max(0, Math.min(5, CFG.discoverMinRating)) * 20) : null;
+    // Bassin 100% AniList : c'est la note AniList (discoverMinRatingAni) qui fait foi ici,
+    // pas la note CR (sans rapport avec cette source de candidats).
+    const scoreMin = CFG.discoverMinRatingAni > 0
+      ? Math.round(Math.max(0, Math.min(5, CFG.discoverMinRatingAni)) * 20) : null;
     const maxPages = Math.max(1, CFG.discoverAnilistMaxPages || 5);
     const perPage = Math.min(50, Math.max(10, CFG.discoverPageSize || 50));
     const { accountId, REJ, D } = ctx;
@@ -6394,16 +6412,20 @@
     const isPref = !!(profile && profile.top.some((k) => vec[k]));
     const taste = tasteScore(s, profile);      // -1..1 : similarité cosinus, positif si aligné
     const goodTaste = taste >= CFG.discoverGoodTasteThreshold;   // globalement bien dans tes goûts
-    // Note prise en compte pour 🏆/✨ : CR ET AniList (quand connue) doivent TOUTES
-    // DEUX dépasser le seuil — pas juste l'une ou l'autre. Si l'une des deux est
-    // inconnue, elle ne sert simplement pas à décider (l'autre seule fait foi).
+    // Note prise en compte pour 🏆/✨ : CR ET AniList (quand connue) doivent CHACUNE
+    // dépasser SON PROPRE seuil (un réglage par source, voir CFG) — pas juste l'une
+    // des deux, et pas le même seuil pour les deux. Si l'une des deux est inconnue,
+    // elle ne sert simplement pas à décider (l'autre seule fait foi) ; il faut qu'au
+    // moins une note soit connue pour prétendre au bonus.
     const crRating5 = s.rating != null ? s.rating : null;
     const aniRating5 = s.aniScore != null ? s.aniScore / 20 : null;
-    const knownRatings = [crRating5, aniRating5].filter((v) => v != null);
-    const wellRated = knownRatings.length > 0
-      && knownRatings.every((v) => v >= CFG.discoverWellRatedThreshold);
-    const superRated = knownRatings.length > 0
-      && knownRatings.every((v) => v >= CFG.discoverSuperRatedThreshold);
+    const hasRating = crRating5 != null || aniRating5 != null;
+    const wellRated = hasRating
+      && (crRating5 == null || crRating5 >= CFG.discoverWellRatedThresholdCr)
+      && (aniRating5 == null || aniRating5 >= CFG.discoverWellRatedThresholdAni);
+    const superRated = hasRating
+      && (crRating5 == null || crRating5 >= CFG.discoverSuperRatedThresholdCr)
+      && (aniRating5 == null || aniRating5 >= CFG.discoverSuperRatedThresholdAni);
     const prefBoost = isPref && taste > 0;
 
     const badges = [];
@@ -6455,8 +6477,10 @@
     const prefBonus = C.discoverPrefGenreBonus;
     const rated1 = C.discoverWellRatedBonus;
     const rated2 = C.discoverSuperRatedBonus;
-    const rated1Thr = C.discoverWellRatedThreshold;
-    const rated2Thr = C.discoverSuperRatedThreshold;
+    const rated1ThrCr = C.discoverWellRatedThresholdCr;
+    const rated1ThrAni = C.discoverWellRatedThresholdAni;
+    const rated2ThrCr = C.discoverSuperRatedThresholdCr;
+    const rated2ThrAni = C.discoverSuperRatedThresholdAni;
     const notable = C.discoverNotableScore;
     const legend = C.discoverLegendaryScore;
     const min = -tw, max = tw + prefBonus + rated1 + rated2;
@@ -6586,7 +6610,7 @@
             <span class="crrav-ss-idot b1"></span>
             <div class="crrav-ss-imain">
               <div class="crrav-ss-iname">\ud83c\udfc6 Tr\u00e8s bien not\u00e9e <span class="crrav-ss-ival b1">${fmt1(rated1)}</span></div>
-              <div class="crrav-ss-idesc">Bonus fixe si la note du public atteint <b>${rated1Thr.toFixed(1)}\u2605</b> ou plus.</div>
+              <div class="crrav-ss-idesc">Bonus fixe si CHAQUE note connue du public atteint son propre seuil : Crunchyroll <b>${rated1ThrCr.toFixed(1)}\u2605</b>, AniList <b>${rated1ThrAni.toFixed(1)}\u2605</b> (une note inconnue ne bloque pas).</div>
               <div class="crrav-ss-ibar"><span class="b1" style="width:${barW(rated1)}%"></span></div>
             </div>
           </div>` : ''}
@@ -6595,7 +6619,7 @@
             <span class="crrav-ss-idot b2"></span>
             <div class="crrav-ss-imain">
               <div class="crrav-ss-iname">\u2728 Note exceptionnelle <span class="crrav-ss-ival b2">${fmt1(rated2)}</span></div>
-              <div class="crrav-ss-idesc">Bonus suppl\u00e9mentaire si la note atteint <b>${rated2Thr.toFixed(1)}\u2605</b> \u2014 <b>cumulable</b> avec \ud83c\udfc6 tr\u00e8s bien not\u00e9e.</div>
+              <div class="crrav-ss-idesc">Bonus suppl\u00e9mentaire si CHAQUE note connue atteint son propre seuil : Crunchyroll <b>${rated2ThrCr.toFixed(1)}\u2605</b>, AniList <b>${rated2ThrAni.toFixed(1)}\u2605</b> \u2014 <b>cumulable</b> avec \ud83c\udfc6 tr\u00e8s bien not\u00e9e.</div>
               <div class="crrav-ss-ibar"><span class="b2" style="width:${barW(rated2)}%"></span></div>
             </div>
           </div>` : ''}
@@ -9569,7 +9593,7 @@
     return `
         <p class="crrav-warn" style="background:rgba(159,214,255,.1);border-color:rgba(159,214,255,.3);color:#9fd6ff">
           Séries populaires que tu n'as jamais regardées, absentes de toutes tes listes,
-          avec au plus ${CFG.discoverMaxSeasons} saisons et notées ${CFG.discoverMinRating}★ ou plus
+          avec au plus ${CFG.discoverMaxSeasons} saisons et notées CR ${CFG.discoverMinRatingCr}★ / AniList ${CFG.discoverMinRatingAni}★ ou plus (notes connues uniquement)
           ${CFG.discoverExcludeCategories.length ? `(hors ${CFG.discoverExcludeCategories.join(', ')})` : ''}.
         </p>
         ${simActive ? `
@@ -9799,7 +9823,7 @@
         ${help}</div>`;
     }
     // (31) Note minimale : curseur avec étoiles plutôt qu'un champ à taper.
-    if (f.key === 'discoverMinRating') {
+    if (f.key === 'discoverMinRatingCr' || f.key === 'discoverMinRatingAni') {
       return `<div class="crrav-field crrav-ratingfield">
         <label for="${id}">${escapeHtml(f.label)}</label>
         <div class="crrav-rangewrap">
@@ -11429,7 +11453,8 @@
     // touche jamais CFG ici : uniquement un aperçu (voir l'override de scoreFormulaSchema).
     const SCORE_LIVE_KEYS = ['discoverTasteWeight', 'discoverPrefGenreBonus', 'discoverWellRatedBonus',
       'discoverSuperRatedBonus', 'discoverLegendaryScore', 'discoverNotableScore',
-      'discoverWellRatedThreshold', 'discoverSuperRatedThreshold', 'discoverCompletionWeight'];
+      'discoverWellRatedThresholdCr', 'discoverWellRatedThresholdAni',
+      'discoverSuperRatedThresholdCr', 'discoverSuperRatedThresholdAni', 'discoverCompletionWeight'];
     if (content.querySelector('#crrav-scoreschema-live')) {
       const updateScoreSchemaLive = () => {
         const override = {};
