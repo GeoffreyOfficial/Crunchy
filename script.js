@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      2.191.0
+// @version      2.192.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '2.191.0';
+  const SCRIPT_VERSION = '2.192.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -136,7 +136,10 @@
     // Seuil de goût net (tasteScore, -1..1) à partir duquel le badge 💚 « dans tes goûts »
     // s'affiche. N'affecte QUE le badge, pas le score.
     // (fix) Réglé à 0.4 (défaut adopté d'après tes essais).
-    discoverGoodTasteThreshold: 0.4,
+    discoverGoodTasteThreshold: 0.15,
+    // Affiche le détail chiffré du score « pépite » sur chaque carte Découverte (goût net ×
+    // poids + bonus = total). false par défaut : réservé à qui veut comprendre/régler le score.
+    discoverShowScoreDetail: false,
     // Bonus de score ajouté quand la série contient un de tes 3 tags/genres les plus
     // représentés (badge 🎯) ET que le goût global reste positif. Avant, 🎯 était un badge
     // PUREMENT informatif, sans aucun effet sur le score « pépite ».
@@ -201,7 +204,6 @@
     newPremieresUpcomingDays: 7,  // « à venir » : épisode 1 prévu dans moins de … jours (pas
                                    // encore diffusé) — les deux cas cohabitent dans le bloc,
                                    // visuellement distingués (voir newPremiereCard)
-    historyMaxEntries: 8000,     // plafond d'entrées d'historique scannées (l'API en sert ~100/requête)
     historyGenreEnrichMax: 80,   // Stats : nb max de séries hors-listes dont on va chercher les
                                // genres au panel complet (watch-history ne les porte pas).
                                // (pré-filtre rapide mais partiel ; le filet de sécurité,
@@ -577,7 +579,10 @@
       help: 'Valeur de similarité cosinus (0 à 1, avant conversion en goût net -1..+1) considérée comme « neutre ». En-dessous → goût négatif, au-dessus → goût positif. Baisse-la si le score moyen/médian de tes scans reste négatif (2bis dans le rapport « Pourquoi seulement X pépites ») : ça veut dire que le cosinus réel plafonne bien en-dessous de l’ancien neutre théorique de 0.5, typique d’un espace de tags large et épars.',
       impact: 'discover', sub: 'discoverScoringTaste' },
     { key: 'discoverGoodTasteThreshold', label: 'Seuil du badge 💚 « dans tes goûts »', type: 'float', min: -1, max: 1, step: 0.05,
-      help: 'Goût net (-1 à +1) à partir duquel le badge 💚 s’affiche. N’affecte que le badge, pas le score lui-même.',
+      help: 'Goût net (-1 à +1) à partir duquel le badge 💚 s’affiche. N’affecte que le badge, pas le score. Dans l’espace de tags AniList (large et épars), même un bon match dépasse rarement +0,4 de goût net : au-delà de ~0,3 le badge devient très rare. Défaut 0,15 = « nettement au-dessus de la moyenne de tes goûts ».',
+      impact: 'discover', sub: 'discoverScoringTaste' },
+    { key: 'discoverShowScoreDetail', label: 'Afficher le détail du score sur les cartes', type: 'bool',
+      help: 'Affiche sous chaque pépite le calcul chiffré de son score : goût net × poids, puis les bonus 🎯/🏆/✨, et le total. Utile pour comprendre pourquoi une série est (ou n’est pas) notable/légendaire, et pour régler les seuils. Désactivé par défaut.',
       impact: 'discover', sub: 'discoverScoringTaste' },
     { key: 'discoverPrefGenreBonus', label: 'Bonus « genre préféré » 🎯', type: 'float', min: 0, max: 2, step: 0.1,
       help: 'Points ajoutés directement au score quand la série contient un de tes 3 tags/genres les plus représentés ET que le goût global reste positif. 0 = 🎯 reste un badge purement informatif, sans effet sur le score.',
@@ -631,10 +636,6 @@
     { key: 'newPremieresTarget', label: 'Nouveautés — nombre de cartes affichées',
       type: 'int', min: 1, max: 60, unit: 'cartes',
       impact: 'newpremieres' },
-    { key: 'historyMaxEntries', label: 'Historique — entrées maximum scannées',
-      type: 'int', min: 100, max: 20000, step: 100,
-      help: 'L\'API sert ~100 entrées par requête. 8000 entrées ≈ 80 requêtes. Plus haut = plus complet mais plus long.',
-      impact: 'history' },
   ];
   const SETTINGS_KEYS = SETTINGS_SCHEMA.map((s) => s.key);
   const CFG_DEFAULTS = { ...CFG };
@@ -656,6 +657,21 @@
     persistState(APP_STATE);
     Object.assign(CFG, CFG_DEFAULTS);
   }
+  // Migration de RECALIBRAGE : « Enregistrer » fige TOUTES les clés (collectSettings), donc
+  // l'ancien défaut d'un réglage recalibré resterait imposé. Ici, si la valeur sauvegardée
+  // vaut EXACTEMENT l'ancien défaut (donc jamais personnalisée), on adopte le nouveau. Une
+  // valeur réglée à la main sur autre chose est respectée. Idempotent.
+  function migrateRecalibratedDefaults() {
+    const saved = APP_STATE.settings;
+    if (!saved || typeof saved !== 'object') return;
+    const recal = { discoverGoodTasteThreshold: [0.4, 0.15] };  // 💚 quasi jamais atteint à 0.4
+    let changed = false;
+    for (const [k, [oldD, newD]] of Object.entries(recal)) {
+      if (saved[k] !== undefined && saved[k] === oldD) { saved[k] = newD; changed = true; }
+    }
+    if (changed) persistState(APP_STATE);
+  }
+  migrateRecalibratedDefaults();
   applySettings();
 
   // ─── Séries ignorées (masquées sans être marquées vues) ─────
@@ -2133,9 +2149,9 @@
   }
 
   async function getWatchedSeriesIds(accountId, onProgress, force) {
-    // (fix) Cache court : sans lui, on rescannait tout l'historique — jusqu'à
-    // historyMaxEntries entrées (~100 par requête) — à CHAQUE ouverture de l'onglet
-    // Découverte. C'était une cause majeure de lenteur.
+    // (fix) Cache court : sans lui, on rescannait TOUT l'historique (~100 entrées par
+    // requête) à CHAQUE ouverture de l'onglet Découverte. C'était une cause majeure de
+    // lenteur. Le scan est désormais complet (plus de plafond), d'où l'importance du cache.
     // `force` : on IGNORE le cache frais et on relance un scan (incrémental, donc 1-2
     // requêtes : il s'arrête au repère du dernier scan). Utilisé quand tu relances /
     // demandes « 30 autres » : de quoi capter ce que tu viens de regarder à l'instant.
@@ -2223,8 +2239,11 @@
     addFrom(firstData);
     let scanned = firstData.length;
 
-    const cap = Math.max(100, CFG.historyMaxEntries || 8000);
-    const maxEntries = total !== null ? Math.min(total, cap) : cap;
+    // Plus de plafond réglable : on scanne TOUT l'historique (mis en cache ensuite, donc
+    // non répété). `total` est quasi toujours fourni par l'API dès la 1re page → on couvre
+    // toutes les pages ; s'il manque, un repli large suffit, la boucle s'arrêtant de toute
+    // façon sur la 1re page partielle (fin réelle de l'historique).
+    const maxEntries = total !== null ? total : 1000000;
     const lastPage = Math.max(1, Math.ceil(maxEntries / PAGE_SIZE));
 
     let reachedEnd = firstData.length < PAGE_SIZE || lastPage <= 1;
@@ -2260,11 +2279,9 @@
         if (onProgress) onProgress({ done: doneReq, total: totalReq, series: ids.size, scanned });
       }
       // On n'a atteint la VRAIE fin de l'historique que si une page partielle est apparue
-      // (stop). Si la boucle s'est arrêtée parce que le plafond historyMaxEntries était
-      // atteint, le scan est INCOMPLET : le déclarer « complet » faisait sauter le filet
-      // de sécurité playheads de Découverte, qui proposait alors des séries déjà finies
-      // situées au-delà de la fenêtre scannée. (Le cas « total réellement atteint » reste
-      // couvert par la clause scanned >= total juste en dessous.)
+      // (stop). Le scan étant désormais complet (plus de plafond), ce cas correspond à la
+      // fin réelle de l'historique — le filet de sécurité playheads de Découverte reste
+      // couvert. (Le cas « total réellement atteint » reste couvert par scanned >= total.)
       reachedEnd = stop;
     }
 
@@ -6705,15 +6722,22 @@
     // l'augmente pas ». Tag/genre préféré + note ajoutent des bonus configurables.
     // Seuils : voir CFG.discoverLegendaryScore / discoverNotableScore.
     const tw = CFG.discoverTasteWeight;
-    let score = Math.max(-tw, Math.min(tw, taste * tw));   // goût : gros poids, positif ET négatif
-    if (prefBoost) score += CFG.discoverPrefGenreBonus;
-    if (wellRated) score += CFG.discoverWellRatedBonus;
-    if (superRated) score += CFG.discoverSuperRatedBonus;
+    const tasteContrib = Math.max(-tw, Math.min(tw, taste * tw));   // goût : gros poids, positif ET négatif
+    const prefBonusVal = prefBoost ? CFG.discoverPrefGenreBonus : 0;
+    const wellBonusVal = wellRated ? CFG.discoverWellRatedBonus : 0;
+    const superBonusVal = superRated ? CFG.discoverSuperRatedBonus : 0;
+    const score = tasteContrib + prefBonusVal + wellBonusVal + superBonusVal;
 
     const lead = prefBoost ? 'pref' : goodTaste ? 'aff' : wellRated ? 'rated' : '';
     const legendary = score >= CFG.discoverLegendaryScore;
     const notable = !legendary && score >= CFG.discoverNotableScore;
-    return { badges, lead, legendary, notable, score };
+    // Décomposition chiffrée du score, pour l'affichage détaillé optionnel (voir
+    // scoreDetailHtml / CFG.discoverShowScoreDetail) : chaque terme réellement appliqué.
+    const parts = {
+      taste, tasteWeight: tw, tasteContrib,
+      prefBonus: prefBonusVal, wellBonus: wellBonusVal, superBonus: superBonusVal,
+    };
+    return { badges, lead, legendary, notable, score, parts };
   }
 
   // (32) Schéma horizontal du calcul du score « pépite », affiché en haut du sous-groupe
@@ -6918,6 +6942,22 @@
     return `<span class="crrav-scorechip${cls}" title="Score pépite obtenu — légendaire ≥ ${CFG.discoverLegendaryScore}, notable ≥ ${CFG.discoverNotableScore} (réglable dans Réglages → Découverte)">${signed}</span>`;
   }
 
+  // Détail chiffré du score « pépite » d'une carte (option CFG.discoverShowScoreDetail).
+  function scoreDetailHtml(sig) {
+    if (!CFG.discoverShowScoreDetail || !sig.parts) return '';
+    const p = sig.parts;
+    const fs = (v) => (v >= 0 ? '+' : '\u2212') + Math.abs(v).toFixed(1);
+    const chips = [
+      `<span class="crrav-scd-term" title="Goût net ${p.taste.toFixed(2)} × poids ${p.tasteWeight.toFixed(1)}">Goût ${p.taste >= 0 ? '+' : '\u2212'}${Math.abs(p.taste).toFixed(2)}×${p.tasteWeight.toFixed(1)} = <b>${fs(p.tasteContrib)}</b></span>`,
+    ];
+    if (p.prefBonus) chips.push(`<span class="crrav-scd-term" title="Bonus genre/tag préféré">🎯 ${fs(p.prefBonus)}</span>`);
+    if (p.wellBonus) chips.push(`<span class="crrav-scd-term" title="Bonus très bien notée">🏆 ${fs(p.wellBonus)}</span>`);
+    if (p.superBonus) chips.push(`<span class="crrav-scd-term" title="Bonus note exceptionnelle">✨ ${fs(p.superBonus)}</span>`);
+    const tier = sig.legendary ? '✨ Légendaire' : sig.notable ? '◆ Notable' : sig.score >= 0 ? 'Ordinaire' : '✕ Hors goûts';
+    return `<div class="crrav-scoredetail">${chips.join('<span class="crrav-scd-op">+</span>')}
+      <span class="crrav-scd-op">=</span><span class="crrav-scd-total ${sig.legendary ? 'legendary' : sig.notable ? 'notable' : ''}">${fs(sig.score)} · ${tier}</span></div>`;
+  }
+
   function discoverCard(s, profile) {
     const sig = discoverSignals(s, profile);
     const seriesUrl = crSeriesUrl(s.id, s.slug);
@@ -6943,6 +6983,7 @@
         <a class="crrav-title" href="${seriesUrl}">${escapeHtml(s.title)}</a>
         <div class="crrav-sigs">${sig.badges.map(([ic, lbl]) =>
           `<span class="crrav-sig-dot" title="${lbl}">${ic}</span>`).join('')}${scoreChip(sig)}</div>
+        ${scoreDetailHtml(sig)}
         <div class="crrav-meta"><span>${info}</span></div>
         ${(s.categories || []).length
           ? `<div class="crrav-cats" title="${escapeHtml((s.categories || []).join(', '))}"
@@ -6980,6 +7021,7 @@
              <div class="crrav-syn"><p>${escapeHtml(s.synopsis)}</p></div>` : ''}
         </div>
         <div class="crrav-meta"><span title="${escapeHtml(metaLine)}">${escapeHtml(metaLine)}</span></div>
+        ${scoreDetailHtml(sig)}
         ${s.synopsis ? `<p class="crrav-lsyn-preview">${escapeHtml(s.synopsis)}</p>` : ''}
       </div>
       <div class="crrav-lactions">
@@ -7336,6 +7378,17 @@
      plus bas) — au lieu d'un gris quasi neutre qui se distinguait à peine du chip par défaut. */
   .crrav-scorechip.notable{background:rgba(159,214,255,.16);border-color:rgba(159,214,255,.5);color:#9fd6ff}
   .crrav-scorechip.legendary{background:rgba(255,179,71,.18);border-color:rgba(255,179,71,.55);color:#ffd48a}
+  /* Détail chiffré du score (option) : puces fines sous les badges */
+  .crrav-scoredetail{display:flex;flex-wrap:wrap;align-items:center;gap:3px 5px;margin-top:6px;
+    font:600 10px/1.4 system-ui;font-variant-numeric:tabular-nums;color:#9a9aa6}
+  .crrav-scd-term{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);
+    border-radius:6px;padding:2px 5px;white-space:nowrap}
+  .crrav-scd-term b{color:#d6d6de}
+  .crrav-scd-op{color:#6a6a75;font-weight:800}
+  .crrav-scd-total{background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.16);
+    border-radius:6px;padding:2px 6px;color:#d6d6de;font-weight:800}
+  .crrav-scd-total.notable{background:rgba(159,214,255,.16);border-color:rgba(159,214,255,.5);color:#9fd6ff}
+  .crrav-scd-total.legendary{background:rgba(255,179,71,.18);border-color:rgba(255,179,71,.55);color:#ffd48a}
   .crrav-card.crrav-sig::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;z-index:3;background:var(--sig)}
   .crrav-lrow-discover.crrav-sig::before{background:var(--sig);transform:scaleY(1)}
   /* (fix) Une seule ligne, ENTIÈREMENT visible même sur écran étroit (Z Fold plié…) :
@@ -7573,24 +7626,23 @@
   /* (8) ignorer une série */
   .crrav-ignore{position:absolute;left:8px;bottom:8px;z-index:2;width:32px;height:32px;border-radius:50%;
     background:rgba(10,10,12,.92);border:1px solid rgba(255,255,255,.22);
-    color:#c9c9d2;font:700 14px/1 system-ui;cursor:pointer;padding:0;opacity:0;transition:opacity .15s}
-  .crrav-thumb:hover .crrav-ignore,.crrav-ignore:focus-visible,.crrav-ignore.on{opacity:1}
+    color:#c9c9d2;font:700 14px/1 system-ui;cursor:pointer;padding:0;opacity:1;transition:opacity .15s}
+  /* Toujours visibles (PC compris) : le survol seul les cachait sur ordinateur. */
+  .crrav-ignore:focus-visible,.crrav-ignore.on{opacity:1}
   .crrav-ignore:hover{background:#e0574a;color:#fff;border-color:#e0574a}
   .crrav-ignore.on{background:#5ce6a0;color:#12120f;border-color:#5ce6a0}
-  @media (hover:none){.crrav-ignore{opacity:1}}
   .crrav-airing{left:8px}
 
   /* ajout direct à une Crunchylist depuis Découverte */
   .crrav-addlist{position:absolute;right:8px;bottom:48px;z-index:2;width:32px;height:32px;border-radius:50%;
     background:rgba(10,10,12,.92);border:1px solid rgba(255,255,255,.22);
-    color:#c9c9d2;font:700 16px/1 system-ui;cursor:pointer;padding:0;opacity:0;transition:opacity .15s,background .15s}
+    color:#c9c9d2;font:700 16px/1 system-ui;cursor:pointer;padding:0;opacity:1;transition:opacity .15s,background .15s}
   .crrav-addlist::before{content:'';position:absolute;inset:-6px;border-radius:50%}
-  .crrav-thumb:hover .crrav-addlist,.crrav-addlist:focus-visible{opacity:1}
+  .crrav-addlist:focus-visible{opacity:1}
   .crrav-addlist:hover{background:#f47521;color:#12120f;border-color:#f47521}
   .crrav-addlist.done{opacity:1;background:#5ce6a0;color:#12120f;border-color:#5ce6a0;pointer-events:none}
   .crrav-addlist.busy{opacity:1;pointer-events:none}
   .crrav-addlist[disabled]{opacity:.5;pointer-events:none}
-  @media (hover:none){.crrav-addlist{opacity:1}}
   .crrav-listpicker{position:fixed;inset:0;z-index:60;display:flex;align-items:flex-end;justify-content:center;
     background:rgba(6,6,8,.7)}
   .crrav-listpicker-sheet{width:100%;max-width:420px;background:#141419;border:1px solid rgba(255,255,255,.1);
@@ -9749,7 +9801,7 @@
         ${h.hasHistory && !h.complete ? '<span class="crrav-estim">historique partiel</span>' : ''}</h2>
       <p class="crrav-schedhint">Séries où tu as commencé au moins un épisode.${
         h.hasHistory && !h.complete
-          ? ' Historique partiel : augmente le plafond d\'entrées dans les réglages.'
+          ? ' Historique partiel pour le moment — il se complètera au prochain scan.'
           : ''}</p>
       <div class="crrav-biggrid">
         ${bigStat(h.total, 'séries vues au total')}
