@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.3.0
+// @version      3.3.1
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.3.0';
+  const SCRIPT_VERSION = '3.3.1';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -5891,7 +5891,8 @@
     // ── Mode SIMILAIRE 🪄 : pool = recommandations AniList curées de la série source ──
     // Les VRAIS similaires (votés par la communauté), au lieu du tag_in générique qui
     // remontait des shōnen sans rapport. Repli sur le pool tag_in si la source n'a pas de
-    // recommandations exploitables (ou si aucune ne se résout vers Crunchyroll).
+    // recommandations exploitables, si aucune ne se résout vers Crunchyroll, OU si le quota
+    // visé n'est pas atteint après avoir épuisé les recommandations (voir fix ci-dessous).
     if (D.similarTo && D.similarTo.title) {
       const recMedia = await fetchAnilistSimilar(D.similarTo);
       if (recMedia && recMedia.length) {
@@ -5906,8 +5907,14 @@
           await processMedia(recMedia[i]);
         }
         found.considered = considered;
-        if (found.length) return found;   // recommandations exploitées : on s'y tient
-        // sinon (aucune reco résolue vers CR) → repli tag_in ci-dessous
+        // (fix) Avant : `if (found.length) return found;` — s'arrêtait dès la PREMIÈRE
+        // trouvaille, même à 6/30. AniList ne fournit qu'un nombre FIXE de recommandations
+        // par série (25 ici, jamais plus, ce n'est pas paginable) : si elles ne suffisent pas
+        // à remplir le quota visé, il faut continuer sur le repli tag_in (recherche par tags
+        // + popularité, potentiellement des centaines de candidats) plutôt que de s'arrêter
+        // net avec un quota loin d'être atteint.
+        if (found.length >= target) return found;   // quota déjà atteint par les recos : inutile d'aller plus loin
+        // sinon (recos épuisées mais quota pas atteint) → repli tag_in ci-dessous, EN PLUS
       }
     }
 
