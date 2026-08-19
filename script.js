@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      2.184.0
+// @version      2.186.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '2.184.0';
+  const SCRIPT_VERSION = '2.186.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -538,10 +538,10 @@
     { key: 'cacheQuotaEvictPct', label: 'Seuil de purge quota cache', type: 'int', min: 40, max: 98, unit: '%',
       help: 'Au-delà de ce taux, le cache le plus ancien est purgé automatiquement (par petites tranches) pour ne jamais bloquer une écriture. Doit rester au-dessus du seuil d’alerte.',
       impact: 'display' },
-    { key: 'discoverMinRatingCr', label: 'Note minimale Crunchyroll', type: 'float', min: 0, max: 5, step: 0.5,
+    { key: 'discoverMinRatingCr', label: 'Note minimale Crunchyroll', type: 'float', min: 0, max: 5, step: 0.1,
       help: 'Écarte les séries dont la note Crunchyroll est en dessous. 0 = aucun filtre sur cette note.',
       impact: 'discover', sub: 'discoverFilters' },
-    { key: 'discoverMinRatingAni', label: 'Note minimale AniList', type: 'float', min: 0, max: 5, step: 0.5,
+    { key: 'discoverMinRatingAni', label: 'Note minimale AniList', type: 'float', min: 0, max: 5, step: 0.1,
       help: 'Écarte les séries dont la note AniList (quand elle est connue) est en dessous. 0 = aucun filtre sur cette note. Sans effet si AniList n\'a pas encore été croisé pour cette série.',
       impact: 'discover', sub: 'discoverFilters' },
     { key: 'discoverMaxSeasons', label: 'Saisons maximum', type: 'int', min: 1, max: 20, unit: 'saisons',
@@ -4634,7 +4634,7 @@
             (p) => evaluateDiscoverCandidate(p, { accountId, REJ, D }),
             CFG.concurrency, undefined, () => D.cancelRequested);
 
-          const survivors = got.filter(Boolean);
+          let survivors = got.filter(Boolean);
 
           // (fix) 4bis. Le score de goût (tasteScore) exige des tags/genres — sans eux, un
           // candidat plafonne mécaniquement à « notable » et ne peut JAMAIS devenir
@@ -4685,6 +4685,22 @@
               } catch (_) { /* best-effort : les survivants gardent leurs seuls genres CR (et pas de tags) */ }
             }
           }
+
+          // (fix) Re-vérification du seuil AniList APRÈS cet enrichissement : le filtre de
+          // note plus haut (evaluateDiscoverCandidate) ne connaît que l'AniList déjà en
+          // cache — la plupart des candidats n'ont pas encore été croisés à ce stade, donc
+          // leur note AniList y est encore inconnue et ne pouvait pas bloquer. Une fois
+          // x.aniScore fraîchement rempli ci-dessus, on retombe parfois sous
+          // CFG.discoverMinRatingAni (ex. 3.0★ alors que le réglage exige 4★) — sans ce
+          // second passage, ces candidats passaient tout droit et s'affichaient quand même,
+          // avec une note AniList sous le minimum configuré.
+          survivors = survivors.filter((x) => {
+            if (x.aniScore != null && (x.aniScore / 20) < CFG.discoverMinRatingAni) {
+              REJ.rating++;
+              return false;
+            }
+            return true;
+          });
 
           const finalResults = [];
           for (const x of survivors) {
@@ -8160,17 +8176,36 @@
   .crrav-avgnote{margin:14px 0 0;font:500 12px/1.4 system-ui;color:#9a9aa4}
   .crrav-avgnote b{color:#ffcf55}
 
-  /* (v7) Chronologie par décennie — mini schéma en barres horizontales, même famille
-     visuelle que .crrav-gbar mais échelle par décennie et étiquette centrée. */
+  /* (v7) Chronologie par ANNÉE — mini schéma en barres horizontales, même famille
+     visuelle que .crrav-gbar mais échelle par année et étiquette centrée.
+     (fix) Passé de décennie à année : bien plus de colonnes possibles (jusqu'à 30-40
+     pour un historique ancien) — d'où le wrapper .crrav-timelinewrap qui ajoute un
+     défilement horizontal fluide avec un léger fondu sur les bords (indique qu'il y a
+     plus à voir sans empiéter sur le contenu), et le mode compact ci-dessous pour que
+     ça reste lisible au doigt sur téléphone plutôt que des barres écrasées à l'infini. */
+  .crrav-timelinewrap{position:relative}
+  .crrav-timelinewrap.scrollable{
+    -webkit-mask-image:linear-gradient(90deg,transparent 0,#000 18px,#000 calc(100% - 18px),transparent 100%);
+    mask-image:linear-gradient(90deg,transparent 0,#000 18px,#000 calc(100% - 18px),transparent 100%)}
   .crrav-timeline{display:flex;align-items:flex-end;gap:6px;height:120px;padding:10px 4px 0;
-    overflow-x:auto}
+    overflow-x:auto;scroll-snap-type:x proximity;scroll-padding:0 4px;
+    scrollbar-width:thin}
   .crrav-tlbar{flex:1 1 auto;min-width:34px;display:flex;flex-direction:column;
-    align-items:center;justify-content:flex-end;gap:6px;height:100%}
+    align-items:center;justify-content:flex-end;gap:6px;height:100%;scroll-snap-align:start}
   .crrav-tlbar-fill{width:100%;border-radius:6px 6px 3px 3px;
     background:linear-gradient(180deg,#ffb347,#f47521);min-height:4px;
     transition:height .25s ease}
   .crrav-tlbar-n{font:800 11px/1 system-ui;color:#f2f2f4;font-variant-numeric:tabular-nums}
   .crrav-tlbar-l{font:700 10px/1 system-ui;color:#9a9aa4;white-space:nowrap}
+  /* Petit écran : de nombreuses colonnes annuelles ne tiennent plus en largeur fixe —
+     on les resserre (barres plus étroites, espacement réduit, texte plus petit) pour
+     limiter le défilement nécessaire, sans jamais les rendre illisibles au doigt. */
+  @media(max-width:600px){
+    .crrav-timeline{gap:4px;height:104px;padding:8px 3px 0}
+    .crrav-tlbar{min-width:26px;gap:4px}
+    .crrav-tlbar-n{font-size:10px}
+    .crrav-tlbar-l{font-size:9px}
+  }
 
   /* (v7) Tableaux réels (comparaison de notes, tops) — plus lisibles qu'une liste de
      lignes quand plusieurs colonnes de chiffres doivent s'aligner. */
@@ -8189,10 +8224,17 @@
   .crrav-tdown{color:#ff8a8a}
 
   /* (v7) Activité récente — mini-liste chronologique, même style que .crrav-toprow */
+  /* (fix) Renommé crrav-actrow → crrav-actitem : ce nom était réutilisé par erreur
+     pour DEUX composants sans rapport (celui-ci et la ligne Reprendre+baguette
+     magique d'une carte, voir .crrav-actrow plus haut). Comme les deux définitions
+     vivaient dans la même feuille de style globale, la seconde (align-items:center,
+     gap:10px, padding:7px 0…) écrasait silencieusement la première (align-items:
+     stretch, gap:6px) sur les cartes — c'est ce qui empêchait le bouton 🪄 de
+     s'étirer à la même hauteur que le bouton Reprendre. */
   .crrav-activity{display:flex;flex-direction:column}
-  .crrav-actrow{display:flex;align-items:center;gap:10px;padding:7px 0;text-decoration:none;
+  .crrav-actitem{display:flex;align-items:center;gap:10px;padding:7px 0;text-decoration:none;
     color:inherit;border-bottom:1px solid rgba(255,255,255,.06)}
-  .crrav-actrow:last-child{border-bottom:0}
+  .crrav-actitem:last-child{border-bottom:0}
   .crrav-actdot{flex:0 0 7px;width:7px;height:7px;border-radius:50%;background:#f47521}
   .crrav-acttitle{flex:1;min-width:0;font:600 12.5px/1.3 system-ui;overflow:hidden;
     text-overflow:ellipsis;white-space:nowrap}
@@ -8592,19 +8634,18 @@
     const sourceBreakdown = count(seenAll, 'aniSource', ANI_SOURCE_FR);
     const knownAniFields = seenAll.filter((s) => s.aniStudio || s.aniFormat || s.aniSource).length;
 
-    // Décennie de sortie, depuis aniSeasonYear (repli sur lastAired si absent). Regroupé
-    // par décennie plutôt que par année pour rester lisible même avec peu de séries.
-    const decadeOf = (s) => {
-      const y = s.aniSeasonYear || (s.lastAired ? new Date(s.lastAired.air).getFullYear() : null);
-      return y ? Math.floor(y / 10) * 10 : null;
-    };
-    const decadeCounts = {};
+    // Année de sortie, depuis aniSeasonYear (repli sur lastAired si absent). Auparavant
+    // regroupé par DÉCENNIE pour rester lisible avec peu de séries — repassé en année
+    // pleine à la demande, avec un rendu responsive (défilement horizontal + barres plus
+    // fines sur mobile, voir .crrav-timeline) pour absorber le nombre de colonnes en plus.
+    const yearOf = (s) => s.aniSeasonYear || (s.lastAired ? new Date(s.lastAired.air).getFullYear() : null);
+    const yearCounts = {};
     for (const s of seenAll) {
-      const d = decadeOf(s);
-      if (d) decadeCounts[d] = (decadeCounts[d] || 0) + 1;
+      const y = yearOf(s);
+      if (y) yearCounts[y] = (yearCounts[y] || 0) + 1;
     }
-    const timeline = Object.entries(decadeCounts)
-      .map(([d, n]) => [Number(d), n])
+    const timeline = Object.entries(yearCounts)
+      .map(([y, n]) => [Number(y), n])
       .sort((a, b) => a[0] - b[0]);
 
     // Activité récente : dernière date de visionnage par série (lastWatchedTs), déjà en
@@ -8944,24 +8985,28 @@
       </div>` : `<p class="crrav-schedempty">Studios/formats/sources apparaîtront ici une fois
         l'enrichissement AniList passé sur tes séries (Réglages → AniList).</p>`;
 
-    // — (v7) Chronologie par décennie — mini schéma en barres, 0 requête (aniSeasonYear déjà
-    // en cache, repli sur la date de dernier épisode connu si absente).
+    // — (v7) Chronologie par ANNÉE — mini schéma en barres, 0 requête (aniSeasonYear déjà
+    // en cache, repli sur la date de dernier épisode connu si absente). Peut compter
+    // beaucoup plus de colonnes qu'avant (une par décennie) : défilement horizontal avec
+    // indicateur de bord + barres resserrées sur petit écran (voir .crrav-timeline).
     const maxDecade = st.timeline.length ? Math.max(...st.timeline.map(([, n]) => n)) : 1;
     const timelineBlock = st.timeline.length ? `
-      <div class="crrav-timeline">
-        ${st.timeline.map(([decade, n]) => `<div class="crrav-tlbar">
-          <span class="crrav-tlbar-n">${n}</span>
-          <div class="crrav-tlbar-fill" style="height:${Math.max(6, Math.round((n / maxDecade) * 92))}%"></div>
-          <span class="crrav-tlbar-l">${decade}s</span>
-        </div>`).join('')}
+      <div class="crrav-timelinewrap${st.timeline.length > 6 ? ' scrollable' : ''}">
+        <div class="crrav-timeline">
+          ${st.timeline.map(([year, n]) => `<div class="crrav-tlbar">
+            <span class="crrav-tlbar-n">${n}</span>
+            <div class="crrav-tlbar-fill" style="height:${Math.max(6, Math.round((n / maxDecade) * 92))}%"></div>
+            <span class="crrav-tlbar-l">${year}</span>
+          </div>`).join('')}
+        </div>
       </div>
-      <p class="crrav-schedhint" style="margin-top:10px">Décennie de sortie de tes séries vues (année AniList, ou date du dernier épisode connu à défaut).</p>`
+      <p class="crrav-schedhint" style="margin-top:10px">Année de sortie de tes séries vues (année AniList, ou date du dernier épisode connu à défaut)${st.timeline.length > 6 ? ' · fais glisser horizontalement pour voir toutes les années' : ''}.</p>`
       : `<p class="crrav-schedempty">Chronologie disponible une fois l'enrichissement AniList passé sur tes séries.</p>`;
 
     // — (v7) Activité récente — dernière date de visionnage par série, aucune requête.
     const activityBlock = st.recentActivity.length ? `
       <div class="crrav-activity">
-        ${st.recentActivity.map((s) => `<a class="crrav-actrow" href="${escapeHtml(seriesUrl(s.id, s.slug))}">
+        ${st.recentActivity.map((s) => `<a class="crrav-actitem" href="${escapeHtml(seriesUrl(s.id, s.slug))}">
           <span class="crrav-actdot"></span>
           <span class="crrav-acttitle">${escapeHtml(s.title)}</span>
           <span class="crrav-acttime">${fmtRelDay(s.ts)}</span>
@@ -11402,6 +11447,14 @@
         const id = el.dataset.acc;
         if (el.open) statsAccordionOpen.add(id); else statsAccordionOpen.delete(id);
       });
+    });
+
+    // Chronologie par année (voir buildStats) : si elle déborde (beaucoup d'années
+    // différentes), on démarre le défilement horizontal sur les années les plus
+    // RÉCENTES plutôt que sur les plus anciennes — c'est généralement ce qui intéresse
+    // le plus en premier coup d'œil. Sans effet si tout tient déjà dans la largeur.
+    content.querySelectorAll('.crrav-timeline').forEach((tl) => {
+      if (tl.scrollWidth > tl.clientWidth) tl.scrollLeft = tl.scrollWidth;
     });
 
     // (30) Recherche interne aux Réglages (filtre les champs à la volée, sans re-render).
