@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      2.178.0
+// @version      2.180.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '2.178.0';
+  const SCRIPT_VERSION = '2.180.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -4330,6 +4330,11 @@
     // requête, juste une lecture localStorage (voir mergeGenreLists).
     const cachedAni = readAnilistCached(p.id);
     categories = mergeGenreLists(categories, cachedAni.genres);
+    // Note communauté AniList (0-100, voir computeAniSchedule) déjà en cache si cette
+    // série a été croisée ailleurs (Suivi, Hors listes, un scan Découverte précédent,
+    // ou le second bassin AniList) — zéro requête. Complétée plus tard pour les
+    // survivants qui n'ont pas encore été enrichis (voir anilistSearchBatch plus bas).
+    let aniScore = cachedAni.meanScore ?? null;
     // Tags déjà en cache, sans requête (voir plus bas : complétés en mode légendaire
     // pour les survivants qui n'en ont toujours pas, via anilistSearchBatch).
     let tags = cachedAni.tags || [];
@@ -4382,7 +4387,7 @@
     // Retourne un candidat INTERMÉDIAIRE (categories/tags pas encore complétés par
     // AniList en mode légendaire — voir juste après le pool()). p est repris pour
     // les étapes suivantes (titre, id, popRank…).
-    return { p, seasons, categories, tags, rating, episodes, secTotal, maxAir };
+    return { p, seasons, categories, tags, rating, aniScore, episodes, secTotal, maxAir };
   }
 
   async function loadDiscover(onProgress, opts) {
@@ -4398,13 +4403,21 @@
     // long : il faut brasser plus de popularité pour tomber sur d'authentiques pépites (le
     // scan va désormais jusqu'au bout du classement au besoin, cf. POPULAR_SCAN_SAFETY_CAP).
     const legendary = !!(opts && opts.legendary);
+    // 🎲 Dé légendaire : chaque tirage REMPLACE l'affichage précédent, même en mode « encore
+    // des légendaires » (more=true côté exclusion/curseur, pour continuer à chercher des
+    // pépites jamais montrées). Sans ça, avec le tri actif, les nouvelles pépites se mêlaient
+    // aux anciennes sans qu'on puisse distinguer ce qui vient d'être trouvé. `more` continue
+    // de piloter l'historique d'exclusion et la reprise du curseur (ci-dessous) : seul
+    // l'affichage (D.series) est toujours réinitialisé pour ce mode.
+    const freshDisplay = legendary || !!(opts && opts.freshDisplay);
     const D = STATE.discover;
     D.loading = true;
     // (streaming) Scan frais : on vide la grille tout de suite pour que le PREMIER rendu
     // montre des squelettes propres (et non les résultats du scan précédent qui clignoteraient
-    // avant d'être remplacés). En mode « autres pépites » (more), on garde au contraire ce qui
-    // est affiché : les nouvelles pépites viendront s'y ajouter au fil du scan.
-    if (!more) D.series = [];
+    // avant d'être remplacés). En mode « autres pépites » (more) hors 🎲 légendaire, on garde
+    // au contraire ce qui est affiché : les nouvelles pépites viendront s'y ajouter au fil du
+    // scan.
+    if (!more || freshDisplay) D.series = [];
     D.error = null;
     D.warning = null;
     D.shortfallDetail = null;
@@ -4535,7 +4548,7 @@
       // nouvelles s'y ajoutent, sans risque de doublon (les ids déjà montrés sont dans
       // D.excludedIds, donc jamais re-proposés). `extra` = les pépites de la tranche en cours
       // pas encore fusionnées dans `matches`, pour un affichage à la candidate près.
-      const prevSeries = more ? [...D.series] : [];
+      const prevSeries = (more && !freshDisplay) ? [...D.series] : [];
       const publishFound = (extra) => {
         D.series = (extra && extra.length)
           ? [...prevSeries, ...matches, ...extra]
@@ -4647,6 +4660,7 @@
                   cacheSet('anilist:' + x.p.id, result);
                   if (result.genres && result.genres.length) x.categories = mergeGenreLists(x.categories, result.genres);
                   if (result.tags && result.tags.length) x.tags = mergeTagLists(x.tags, result.tags);
+                  if (result.meanScore != null) x.aniScore = result.meanScore;
                 }
               } catch (_) { /* best-effort : les survivants gardent leurs seuls genres CR (et pas de tags) */ }
             }
@@ -4662,7 +4676,7 @@
               poster: posterOf(x.p),
               synopsis: x.p.description || '',
               rating: x.rating, seasons: x.seasons,
-              categories: x.categories, tags: x.tags,
+              categories: x.categories, tags: x.tags, aniScore: x.aniScore ?? null,
               episodes: x.episodes, secTotal: x.secTotal, maxAir: x.maxAir,
               order: seenCandidate.size,
             };
@@ -4712,7 +4726,7 @@
             id: x.p.id, title: x.p.title, slug: x.p.slug_title, poster: posterOf(x.p),
             synopsis: x.p.description || '',
             rating: x.rating, seasons: x.seasons,
-            categories: x.categories, tags: x.tags,
+            categories: x.categories, tags: x.tags, aniScore: x.aniScore ?? null,
             episodes: x.episodes, secTotal: x.secTotal, maxAir: x.maxAir,
             order: seenCandidate.size,
           };
@@ -6043,12 +6057,22 @@
       + ` aria-label="Découvrir des séries similaires à ${escapeHtml(s.title)}">🪄</button>`;
   }
 
+  // Note Crunchyroll ET note communauté AniList (meanScore 0-100, ramenée sur 5 ★ comme
+  // en Stats) affichées côte à côte quand les deux sont connues — l'une des deux peut
+  // manquer (AniList pas encore croisée, ou CR sans note) sans empêcher l'affichage de
+  // l'autre.
+  function ratingLabel(s) {
+    const cr = s.rating != null ? `★ ${s.rating.toFixed(1)}` : '';
+    const ani = s.aniScore != null ? `AL ★ ${(s.aniScore / 20).toFixed(1)}` : '';
+    return [cr, ani].filter(Boolean).join(' · ');
+  }
+
   function card(s) {
     if (STATE.filters.view === 'list') return listRow(s);
     const seriesUrl = crSeriesUrl(s.id, s.slug);
     const done = s.remaining === 0;
-    const rating = s.rating != null
-      ? `<span class="crrav-rating">★ ${s.rating.toFixed(1)}</span>` : '';
+    const rating = (s.rating != null || s.aniScore != null)
+      ? `<span class="crrav-rating">${ratingLabel(s)}</span>` : '';
     // (10) l'anneau dit « fini », mais pas si d'autres épisodes sont encore à venir.
     const state = done && s.airing ? '<span class="crrav-airing">À jour</span>'
       : !done && s.airing ? '<span class="crrav-airing">En diffusion</span>' : '';
@@ -6098,7 +6122,7 @@
           <a class="crrav-ltitle" href="${seriesUrl}">${escapeHtml(s.title)}</a>
           ${s.isNew ? '<span class="crrav-lnew">nouveau</span>' : ''}
           ${s.airing ? `<span class="crrav-ltag">${done ? 'à jour' : 'en diffusion'}</span>` : ''}
-          ${s.rating != null ? `<span class="crrav-lrating">★ ${s.rating.toFixed(1)}</span>` : ''}
+          ${(s.rating != null || s.aniScore != null) ? `<span class="crrav-lrating">${ratingLabel(s)}</span>` : ''}
         </div>
         ${ticks(s)}
         <div class="crrav-meta">
@@ -6599,7 +6623,7 @@
         </a>
         ${sig.legendary ? `<span class="crrav-legribbon" title="Score pépite élevé (voir Réglages → Découverte) : une pépite en or">✨ Légendaire</span>`
           : sig.notable ? `<span class="crrav-notaribbon" title="Score pépite au-dessus du seuil « notable » (voir Réglages → Découverte)">◆ Notable</span>` : ''}
-        <span class="crrav-rating">★ ${s.rating.toFixed(1)}</span>
+        <span class="crrav-rating">${ratingLabel(s)}</span>
         ${ignoreBtn(s, 'discover')}
         ${addListBtn(s)}
         ${synopsis}
@@ -6639,7 +6663,7 @@
       <div class="crrav-lmain">
         <div class="crrav-lhead">
           <a class="crrav-ltitle" href="${seriesUrl}">${escapeHtml(s.title)}</a>
-          <span class="crrav-lrating">★ ${s.rating.toFixed(1)}</span>
+          <span class="crrav-lrating">${ratingLabel(s)}</span>
           ${sigMarkup(sig)}${scoreChip(sig)}
           ${s.synopsis ? `<button class="crrav-info" aria-expanded="false" aria-label="Lire le synopsis en entier">i</button>
              <div class="crrav-syn"><p>${escapeHtml(s.synopsis)}</p></div>` : ''}
@@ -7084,7 +7108,7 @@
   /* Pas de backdrop-filter sur les badges : multiplié par le nombre de cartes, le flou
      coûtait cher sur mobile pour un rendu quasi identique à un fond opaque. */
   .crrav-rating{position:absolute;top:8px;left:8px;background:rgba(10,10,12,.92);
-    border:1px solid rgba(255,255,255,.16);border-radius:8px;padding:4px 7px;
+    border:1px solid rgba(255,255,255,.16);border-radius:8px;padding:4px 7px;white-space:nowrap;
     font:800 11.5px/1 system-ui;font-variant-numeric:tabular-nums;color:#ffcf55}
   .crrav-info{position:absolute;right:8px;bottom:8px;z-index:2;width:32px;height:32px;border-radius:50%;
     background:rgba(10,10,12,.92);border:1px solid rgba(255,255,255,.22);
@@ -7291,7 +7315,7 @@
   .crrav-ltitle{flex:1 1 100%;font:700 13px/1.25 system-ui;color:#f2f2f4;text-decoration:none;
     display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;max-width:100%}
   .crrav-ltitle:hover{color:var(--prog)}
-  .crrav-lrating{font:700 10.5px/1 system-ui;color:#ffcf55}
+  .crrav-lrating{font:700 10.5px/1 system-ui;color:#ffcf55;white-space:nowrap}
   .crrav-ltag{font:700 9.5px/1 system-ui;color:#9fd6ff;border:1px solid rgba(159,214,255,.4);
     border-radius:5px;padding:2px 5px}
   .crrav-lnew{font:800 9.5px/1 system-ui;background:#9fd6ff;color:#08131c;border-radius:5px;padding:2px 5px}
@@ -8527,21 +8551,6 @@
       .map(([d, n]) => [Number(d), n])
       .sort((a, b) => a[0] - b[0]);
 
-    // Comparaison de notes : ta note (1-5 ★) vs la moyenne communauté AniList
-    // (meanScore 0-100, ramenée sur 5 pour être comparable). Uniquement les séries où
-    // TU as noté ET où AniList a matché — comparaison honnête, pas d'extrapolation.
-    const compared = all.filter((s) => s.rating != null && s.aniScore != null)
-      .map((s) => ({ title: s.title, id: s.id, slug: s.slug, mine: s.rating, ani: s.aniScore / 20 }));
-    const scoreCompare = compared.length ? {
-      n: compared.length,
-      avgMine: compared.reduce((a, x) => a + x.mine, 0) / compared.length,
-      avgAni: compared.reduce((a, x) => a + x.ani, 0) / compared.length,
-      // Plus grands écarts dans un sens et dans l'autre (dépassant tes propres goûts /
-      // au contraire, sous-noté par toi par rapport au consensus).
-      harshest: [...compared].sort((a, b) => (a.mine - a.ani) - (b.mine - b.ani)).slice(0, 3),
-      kindest: [...compared].sort((a, b) => (b.mine - b.ani) - (a.mine - a.ani)).slice(0, 3),
-    } : null;
-
     // Activité récente : dernière date de visionnage par série (lastWatchedTs), déjà en
     // mémoire (voir buildSeriesEntry) — pur tri, aucune requête.
     const recentActivity = all
@@ -8596,7 +8605,7 @@
       // (v7) données AniList gratuites (voir plus haut) — undefined proprement géré en
       // rendu (blocs masqués tant que l'enrichissement AniList n'a pas encore tourné).
       topStudios, formatBreakdown, sourceBreakdown, knownAniFields,
-      timeline, scoreCompare, recentActivity, avgAniDuration,
+      timeline, recentActivity, avgAniDuration,
       highlights: {
         mostWatched: mostWatched ? { title: mostWatched.s.title, id: mostWatched.s.id, slug: mostWatched.s.slug, sec: mostWatched.sec } : null,
         longest: longest && longest.total ? { title: longest.title, id: longest.id, slug: longest.slug, total: longest.total } : null,
@@ -8893,41 +8902,6 @@
       <p class="crrav-schedhint" style="margin-top:10px">Décennie de sortie de tes séries vues (année AniList, ou date du dernier épisode connu à défaut).</p>`
       : `<p class="crrav-schedempty">Chronologie disponible une fois l'enrichissement AniList passé sur tes séries.</p>`;
 
-    // — (v7) Toi vs AniList — comparaison de notes, uniquement sur ce que TU as noté ET
-    // qu'AniList a matché (pas d'extrapolation). meanScore/20 pour ramener sur 5 ★.
-    const sc = st.scoreCompare;
-    const deltaCell = (mine, ani) => {
-      const d = mine - ani;
-      const cls = d > 0.15 ? 'crrav-tup' : d < -0.15 ? 'crrav-tdown' : '';
-      const sign = d > 0 ? '+' : '';
-      return `<td class="crrav-tnum ${cls}">${sign}${d.toFixed(1)}</td>`;
-    };
-    const scoreRows = sc ? (() => {
-      const seen = new Set();
-      const rows = [];
-      for (const x of [...sc.harshest, ...sc.kindest]) {
-        if (seen.has(x.id)) continue;
-        seen.add(x.id); rows.push(x);
-      }
-      return rows;
-    })() : [];
-    const scoreBlock = sc ? `
-      <p class="crrav-schedhint">Comparé sur <b>${sc.n}</b> série${sc.n > 1 ? 's' : ''} à la fois notée${sc.n > 1 ? 's' : ''}
-        par toi et reconnue${sc.n > 1 ? 's' : ''} par AniList. Ta moyenne : <b>★ ${sc.avgMine.toFixed(2)}</b>
-        — moyenne AniList (ramenée sur 5) : <b>★ ${sc.avgAni.toFixed(2)}</b>.</p>
-      <table class="crrav-table">
-        <thead><tr><th>Titre</th><th class="crrav-tnum">Toi</th><th class="crrav-tnum">AniList</th><th class="crrav-tnum">Écart</th></tr></thead>
-        <tbody>
-          ${scoreRows.map((x) => `<tr>
-            <td class="crrav-ttitle"><a href="${escapeHtml(seriesUrl(x.id, x.slug))}">${escapeHtml(x.title)}</a></td>
-            <td class="crrav-tnum">★ ${x.mine.toFixed(1)}</td>
-            <td class="crrav-tnum">★ ${x.ani.toFixed(1)}</td>
-            ${deltaCell(x.mine, x.ani)}
-          </tr>`).join('')}
-        </tbody>
-      </table>` : `<p class="crrav-schedempty">Note au moins une série que tu suis pour voir comment
-        tes notes se comparent à la moyenne AniList.</p>`;
-
     // — (v7) Activité récente — dernière date de visionnage par série, aucune requête.
     const activityBlock = st.recentActivity.length ? `
       <div class="crrav-activity">
@@ -8999,8 +8973,6 @@
         ${accordion('studios', '🎬', 'Studios, formats & sources', studiosBlock)}
 
         ${accordion('chronologie', '🕰️', 'Chronologie', timelineBlock)}
-
-        ${accordion('scorecompare', '⚖️', 'Toi vs AniList', scoreBlock)}
 
         ${accordion('faits', '🏆', 'Faits marquants', `
         <div class="crrav-hlgrid">${hlCards}${factCards}</div>
