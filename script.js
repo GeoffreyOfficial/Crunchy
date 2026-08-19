@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.1.0
+// @version      3.2.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.1.0';
+  const SCRIPT_VERSION = '3.2.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -166,6 +166,22 @@
     // plus rien, cf. stopReason 'exhausted'), que ce soit en Découverte normale ou en
     // dé légendaire. Voir POPULAR_SCAN_SAFETY_CAP (hors CFG, non réglable) pour le seul
     // filet de sécurité anti-boucle-infinie qui subsiste.
+    // (fix) Le classement popularité (/discover/browse) ne changeait quasiment jamais
+    // d'une session à l'autre, mais chaque page était retéléchargée en réseau à CHAQUE
+    // scan (~2,1 s/page, jamais mise en cache jusqu'ici — contrairement à la note, aux
+    // saisons ou aux données AniList par série, déjà cachées). En dé légendaire, qui
+    // peut brasser des centaines de pages, ça pesait lourd sur des pages déjà vues.
+    // Chaque page est désormais cachée cette durée (le bouton « Actualiser » l'ignore
+    // et retélécharge quand même — voir `force` dans loadDiscover/fetchBrowsePage).
+    discoverBrowseCacheHours: 24 * 7,
+    // (fix) Verdict « pépite » (score + légendaire/notable) mémorisé PAR CANDIDATE, pour
+    // qu'un candidat déjà rejeté lors d'un scan légendaire précédent (note/genre ok mais
+    // score sous le seuil) soit sauté d'emblée au prochain passage — sans repayer même le
+    // calcul (déjà bon marché grâce au cache par série existant, mais répété par centaines
+    // de candidats à chaque scan). Rattaché à une empreinte (voir discoverScoreFingerprint)
+    // qui combine tous les réglages de scoring ET ton profil de goût : le verdict cache est
+    // ignoré (jamais faussé) dès que l'un des deux change, pas seulement expiré par la durée.
+    discoverScoreCacheHours: 24 * 14,
     discoverTarget: 30,        // nombre de résultats visés
     // Second bassin de candidats Découverte, EN COMPLÉMENT du classement popularité
     // Crunchyroll ci-dessus (voir scanAnilistPopularity) : interrogé UNIQUEMENT si le
@@ -183,13 +199,6 @@
     // s'arrêter à un plafond de pages réglable — c'est justement ce qui permet de puiser
     // plus profond à chaque lancement plutôt que de retomber sur les mêmes candidats.
     legendaryTarget: 10,       // 🎲 dé légendaire : nombre de LÉGENDAIRES visées (pas de candidats bruts)
-    // Historique des pépites légendaires déjà montrées (persisté en cache, pas un simple
-    // Set en mémoire) : sans ça, un scan qui va « jusqu'au bout » retombe presque toujours
-    // sur les mêmes séries en tête de popularité d'un lancement à l'autre, puisque le
-    // classement Crunchyroll bouge peu d'un jour à l'autre. Ces séries restent exclues
-    // pendant cette fenêtre, ce qui force le scan à aller chercher plus loin des pépites
-    // réellement nouvelles ; elles redeviennent proposables une fois la fenêtre passée.
-    legendaryHistoryDays: 30,
 
     // Onglet Calendrier : bloc « Nouveautés » — épisodes 1 tout juste sortis, repérés
     // via AniList (voir loadNewPremieres — AniList plutôt que Crunchyroll : source fiable
@@ -534,6 +543,7 @@
     discoverScoringRating: { icon: '🏆', label: 'Note — bonus', hue: '255,209,102' },
     discoverScoringSeuils: { icon: '✨', label: 'Seuils légendaire & notable', hue: '255,179,71' },
     discoverLists: { icon: '➕', label: 'Ajout aux listes', hue: '93,180,255' },
+    discoverCache: { icon: '🗄️', label: 'Cache Découverte', hue: '150,150,150' },
   };
 
   const SETTINGS_SCHEMA = [
@@ -608,6 +618,12 @@
     { key: 'discoverAnilistEnabled', label: 'Second bassin AniList (en complément de Crunchyroll)', type: 'bool',
       help: 'Cible AniList (via les tags les plus représentatifs de ton profil de goût) pour compléter le classement popularité Crunchyroll quand celui-ci ne suffit pas à atteindre le nombre de pépites visées. Filtré côté requête AniList (tags, note minimale, format, contenu adulte exclu) : coût marginal faible. Sans effet tant que ton profil de goût ne contient aucun tag AniList (regarde d’abord quelques séries dans « Reste à voir »).',
       impact: 'discover', sub: 'discoverFilters' },
+    { key: 'discoverBrowseCacheHours', label: 'Cache du classement popularité', type: 'int', min: 0, max: 24 * 30, unit: 'h',
+      help: 'Durée avant de retélécharger une page déjà vue du classement popularité Crunchyroll (/discover/browse). Le classement bouge peu d’un jour à l’autre : une semaine (168 h) est un bon défaut. 0 = jamais caché (chaque page toujours retéléchargée). Le bouton « Actualiser » ignore ce cache et retélécharge quand même.',
+      impact: 'discover', sub: 'discoverCache' },
+    { key: 'discoverScoreCacheHours', label: 'Cache du verdict pépite par candidate', type: 'int', min: 0, max: 24 * 60, unit: 'h',
+      help: 'Durée avant de réévaluer le score « pépite » d’une candidate déjà croisée en dé légendaire. Invalidé automatiquement (avant même cette durée) si tu changes un réglage de scoring ci-dessous ou si ton profil de goût évolue — donc jamais un verdict périmé silencieusement. 0 = toujours réévalué.',
+      impact: 'discover', sub: 'discoverCache' },
     // (fix) Réglage « profondeur de scan » supprimé : comme le bassin popularité Crunchyroll
     // (voir POPULAR_SCAN_SAFETY_CAP), le second bassin AniList va maintenant TOUJOURS au bout
     // (plafond de sécurité interne non réglable, jamais atteint en usage normal) — tu peux
@@ -1168,6 +1184,10 @@
   // se déclenchent. C'est ce qui supprime le « ça ne marche plus mais rien ne le montre ».
   let sessionLost = false;
   let recovering = false;
+  // Files d'attente de toute action mise en pause par une session perdue (scan Découverte,
+  // écriture de liste, rafraîchissement…) — voir waitForRecovery. Résolues ou rejetées en bloc
+  // par startRecoveryLoop dès que la reconnexion réussit ou est définitivement abandonnée.
+  let recoveryWaiters = [];
 
   function markSessionLost() {
     if (sessionLost) return;
@@ -1179,8 +1199,33 @@
     startRecoveryLoop();
   }
 
+  // Met une action en attente de la reconnexion au lieu de la faire échouer tout de suite :
+  // c'est ce qui permet à N'IMPORTE QUELLE action en cours (pas seulement le dé légendaire)
+  // de reprendre toute seule une fois la session rétablie, plutôt que d'afficher une erreur
+  // qui oblige à tout relancer à la main. `sa` (AbortController d'un scan, optionnel) permet
+  // d'arrêter l'attente immédiatement si l'action est annulée (bouton Interrompre) pendant
+  // qu'elle patiente.
+  function waitForRecovery(sa) {
+    return new Promise((resolve, reject) => {
+      if (!sessionLost) { resolve(); return; }
+      const entry = { resolve, reject };
+      if (sa) {
+        const onAbort = () => {
+          const i = recoveryWaiters.indexOf(entry);
+          if (i >= 0) recoveryWaiters.splice(i, 1);
+          reject(new Error('interrompu pendant la reconnexion'));
+        };
+        if (sa.signal.aborted) { onAbort(); return; }
+        sa.signal.addEventListener('abort', onAbort, { once: true });
+        entry.cleanup = () => sa.signal.removeEventListener('abort', onAbort);
+      }
+      recoveryWaiters.push(entry);
+    });
+  }
+
   // Boucle de reconnexion : réessaie de revalider le token jusqu'à ce que ça remarche, puis
-  // relance ce qui était affiché. C'est ce qui supprime le « je dois recharger la page ».
+  // relance ce qui était affiché ET toute action mise en pause par waitForRecovery. C'est ce
+  // qui supprime le « je dois recharger la page » ET le « je dois relancer mon action ».
   // Backoff plafonné, en pause tant que l'onglet est en arrière-plan, bascule en erreur
   // dure (avec bouton recharger) seulement après épuisement des tentatives.
   async function startRecoveryLoop() {
@@ -1198,6 +1243,8 @@
           LOG('session rétablie automatiquement après', tries, 'tentative(s)');
           safeCall(render, undefined, 'recovery:render');
           if (root && root.style.display !== 'none') safeCall(refreshActive, undefined, 'recovery:refresh');
+          const waiters = recoveryWaiters.splice(0);
+          waiters.forEach((w) => { if (w.cleanup) w.cleanup(); w.resolve(); });
           return;
         }
         await sleep(Math.min(1000 * tries, 5000));
@@ -1206,6 +1253,9 @@
         STATE.reconnecting = false;
         STATE.error = 'Session Crunchyroll perdue. Touche « Recharger la page » pour te reconnecter.';
         safeCall(render, undefined, 'recovery:giveup');
+        const waiters = recoveryWaiters.splice(0);
+        const err = new Error('reconnexion impossible après plusieurs tentatives');
+        waiters.forEach((w) => { if (w.cleanup) w.cleanup(); w.reject(err); });
       }
     } finally { recovering = false; }
   }
@@ -1215,7 +1265,8 @@
     const t = await refreshToken();
     if (t) return t;
     markSessionLost();   // signal global + reconnexion auto : jamais d'échec muet
-    throw new Error('Session Crunchyroll introuvable. Reconnexion automatique en cours…');
+    await waitForRecovery(scanAbort);   // on patiente au lieu d'abandonner l'action en cours
+    return ensureToken(force);
   }
 
   // Regroupe les URL variables sous un nom stable, pour agréger les temps.
@@ -1313,8 +1364,13 @@
         const t = await refreshToken();
         if (t) return api(path, params, attempt + 1);
       }
+      if (sa && sa.signal.aborted) throw new Error(`401 (session) sur ${path}`);
       markSessionLost();
-      throw new Error(`401 (session) sur ${path}`);
+      // On patiente jusqu'à la reconnexion au lieu d'abandonner CETTE requête : l'action qui
+      // l'a déclenchée (scan Découverte, rafraîchissement…) reprend automatiquement dès que
+      // la session est rétablie, sans qu'il faille la relancer à la main.
+      await waitForRecovery(sa);
+      return api(path, params, 0);
     }
     if (res.status === 429) {
       STATS.rate429++;
@@ -1382,7 +1438,10 @@
         if (t) return apiWrite(path, body, attempt + 1);
       }
       markSessionLost();
-      throw new Error(`401 (session) sur ${path}`);
+      // Même logique que api() : on patiente jusqu'à la reconnexion plutôt que de faire
+      // échouer l'écriture (ajout à une liste, note…) en cours.
+      await waitForRecovery();
+      return apiWrite(path, body, 0);
     }
     if (res.status === 429) {
       if (attempt < 3) { await sleep(800 * Math.pow(2, attempt)); return apiWrite(path, body, attempt + 1); }
@@ -1830,7 +1889,7 @@
   // (fix) 'watchedids:' et 'anilist:' inclus : ce sont les entrées les plus volumineuses
   // (historique de visionnage détaillé, et schedule/genres/tags par série) — sans elles,
   // la purge tapait sur des entrées bien plus légères en épargnant les grosses.
-  const EVICTABLE = ['rating:', 'series:', 'series-en:', 'seasoncount:', 'snapshot', 'crmatch:', 'watchedids:', 'anilist:', 'discep:'];
+  const EVICTABLE = ['rating:', 'series:', 'series-en:', 'seasoncount:', 'snapshot', 'crmatch:', 'watchedids:', 'anilist:', 'discep:', 'discbrowse:', 'nugget:'];
   function evictOldest(fraction) {
     let evicted = eps3EvictOldest(fraction);
     const entries = Object.keys(BIGCACHE)
@@ -1904,33 +1963,6 @@
   // pas besoin d'être réactif à la milliseconde, le filet de bigCacheAttemptFlush couvre
   // déjà l'urgence (échec d'écriture en cours de scan).
   setInterval(() => checkStorageQuota(false), QUOTA_CHECK_MIN_INTERVAL);
-
-  // ─── Historique des pépites LÉGENDAIRES déjà montrées ───────────────────────────
-  // (fix) Une seule clé de cache (blob {id: timestamp}), PAS une clé par pépite : le
-  // volume reste minuscule (quelques centaines d'octets même avec des milliers d'entrées)
-  // et ça ne pèse donc pas sur le quota localStorage (voir evictOldest/checkQuota) — pas
-  // de risque d'« exploser » le cache. Les entrées plus vieilles que
-  // CFG.legendaryHistoryDays sont purgées à chaque lecture, donc une pépite finit
-  // toujours par redevenir proposable.
-  const LEGENDARY_HISTORY_KEY = 'legendaryShown';
-  function loadLegendaryHistory() {
-    const raw = cacheReadRaw(LEGENDARY_HISTORY_KEY);
-    const obj = (raw && raw.v && typeof raw.v === 'object') ? raw.v : {};
-    const cutoff = Date.now() - CFG.legendaryHistoryDays * DAY;
-    let changed = false;
-    for (const id of Object.keys(obj)) {
-      if (!obj[id] || obj[id] < cutoff) { delete obj[id]; changed = true; }
-    }
-    if (changed) cacheSet(LEGENDARY_HISTORY_KEY, obj);
-    return obj;
-  }
-  function addLegendaryHistory(ids) {
-    if (!ids || !ids.length) return;
-    const obj = loadLegendaryHistory();
-    const now = Date.now();
-    for (const id of ids) obj[id] = now;
-    cacheSet(LEGENDARY_HISTORY_KEY, obj);
-  }
 
   // ─── Curseur de reprise du scan popularité pour le dé légendaire ────────────────
   // (fix) Sans ça, un scan qui va « jusqu'au bout » repartait de la page 0 à CHAQUE
@@ -4784,6 +4816,11 @@
       // pas à ton goût agrégé habituel.
       const simProfile = activeSimilarProfile();
       const tasteProfile = legendary ? (simProfile || buildTasteProfile()) : null;
+      // Empreinte de scoring courante (voir discoverScoreFingerprint) : sert de clé de
+      // validité au verdict pépite mis en cache par candidate ('nugget:', voir plus bas) —
+      // un verdict caché sous une AUTRE empreinte (réglage de scoring ou profil de goût
+      // différent) est traité comme absent, jamais utilisé à tort.
+      const scoreFp = legendary ? discoverScoreFingerprint(tasteProfile) : null;
 
 
       // Séries déjà connues via la watchlist / les listes personnalisées.
@@ -4828,14 +4865,7 @@
           "Découverte n'exclut que les séries de tes listes.";
       }
 
-      // 🎲 Dé légendaire : sans ça, un lancement « frais » (pas « 30 autres ») repart d'un
-      // historique d'exclusion vide et retombe quasi toujours sur les MÊMES pépites en tête
-      // du classement popularité (qui bouge peu d'un jour à l'autre) — l'historique persisté
-      // (voir loadLegendaryHistory) force le scan à aller chercher plus loin des pépites
-      // réellement nouvelles à chaque nouveau lancement, tout en les laissant redevenir
-      // proposables passé CFG.legendaryHistoryDays.
-      const legendaryHistoryIds = legendary ? Object.keys(loadLegendaryHistory()) : [];
-      const excluded = new Set([...knownIds, ...watchedIds, ...D.excludedIds, ...legendaryHistoryIds]);
+      const excluded = new Set([...knownIds, ...watchedIds, ...D.excludedIds]);
       const seenCandidate = new Set();
       const matches = [];
 
@@ -4916,12 +4946,43 @@
       // Un seul niveau d'avance suffit : le traitement d'une page dépasse quasi toujours la
       // durée d'un aller-retour réseau, donc empiler un 2e niveau n'apporterait rien de plus
       // tout en compliquant l'arrêt propre (annulation/exhausted).
-      const fetchBrowsePage = (s) => api('/content/v2/discover/browse', {
-        sort_by: 'popularity', n: CFG.discoverPageSize, start: s,
-        locale: CFG.locale, type: 'series',
-      });
+      // (fix) Le classement popularité change peu d'un jour à l'autre (voir CFG.discoverBrowseCacheHours)
+      // mais chaque page était retéléchargée en réseau à CHAQUE scan, même une page déjà vue lors
+      // d'un scan précédent (contrairement à la note/saisons/AniList par série, déjà cachées) —
+      // le vrai poste de coût d'un dé légendaire qui rebalaye des centaines de pages. Chaque page
+      // est maintenant cachée sous 'discbrowse:<start>:<taille>' (clé indépendante du curseur :
+      // deux scans qui retombent sur le même `start` partagent le même cache). `force` (bouton
+      // Actualiser/Relancer) l'ignore volontairement, pour retélécharger si tu veux être sûr
+      // d'avoir le tout dernier classement.
+      const fetchBrowsePage = async (s) => {
+        const bkey = 'discbrowse:' + s + ':' + CFG.discoverPageSize;
+        const cached = (!force && CFG.discoverBrowseCacheHours > 0)
+          ? cacheGet(bkey, CFG.discoverBrowseCacheHours * 3600e3) : null;
+        if (cached) return { data: cached };
+        const r = await api('/content/v2/discover/browse', {
+          sort_by: 'popularity', n: CFG.discoverPageSize, start: s,
+          locale: CFG.locale, type: 'series',
+        });
+        cacheSet(bkey, r.data || []);
+        return r;
+      };
       let pendingPage = !D.similarTo ? fetchBrowsePage(start) : null;
-      for (let page = 0; !D.similarTo && page < maxPages && matches.length < target; page++) {
+      // (fix) Le curseur légendaire (`start`) reprend à une position ABSOLUE dans le
+      // classement popularité (voir loadLegendaryCursor) — mais la variable `page` de
+      // cette boucle repartait toujours de 0, donc l'affichage (D.scan.page ci-dessous,
+      // et pagesScanned dans le rapport final) montrait « page 1, 2, 3… » comme si le
+      // scan recommençait au début du classement, alors qu'il reprenait en réalité bien
+      // plus loin (ex. reprise à start=750 avec discoverPageSize=50 → en réalité page 16
+      // du classement, affiché à tort « page 1 »). `startPage` donne la page réelle
+      // correspondant à `start`. On garde en revanche `i` comme compteur d'ITÉRATIONS de
+      // CETTE session, borné par `maxPages` (le filet anti-boucle-infinie) : si on avait
+      // simplement fait démarrer la boucle à `startPage`, le plafond de 400 itérations se
+      // serait mis à rétrécir à chaque relance (400 - startPage), jusqu'à finir par bloquer
+      // le scan une fois le curseur suffisamment avancé — alors que ce plafond doit rester
+      // un nombre de PAGES PAR SESSION, jamais un plafond absolu dans le classement.
+      const startPage = legendary ? Math.floor(start / CFG.discoverPageSize) : 0;
+      for (let i = 0; !D.similarTo && i < maxPages && matches.length < target; i++) {
+        const page = startPage + i;
         if (D.cancelRequested) { stopReason = 'cancelled'; break; }
         // Progression du scan en état STRUCTURÉ plutôt qu'en chaîne à re-parser : le bandeau
         // (voir renderActivityBar) affiche alors le NOMBRE de pépites trouvées en titre et
@@ -4943,7 +5004,7 @@
         // cette seule ligne déplacée qui fait chevaucher réseau et calcul. Inutile de la
         // lancer si on sort de la boucle au prochain tour (maxPages atteint) : ce garde-fou
         // n'est en pratique jamais actif (POPULAR_SCAN_SAFETY_CAP), mais évite un fetch perdu.
-        pendingPage = (page + 1 < maxPages) ? fetchBrowsePage(start) : null;
+        pendingPage = (i + 1 < maxPages) ? fetchBrowsePage(start) : null;
 
         pagesScanned = page + 1;
         const candidates = data
@@ -4964,6 +5025,22 @@
             // puis on le jetait. C'était la cause des « plusieurs minutes ».
             const ns = panelSeasons(p);       // calculé une seule fois
             if (ns != null && ns > CFG.discoverMaxSeasons) { REJ.seasonsPreBrowse++; return false; }
+            // (fix) Verdict pépite déjà connu pour cette candidate (voir 'nugget:' plus bas
+            // et discoverScoreFingerprint) : un scan légendaire précédent, SOUS LA MÊME
+            // empreinte de scoring/goût, l'a déjà rejetée pour score insuffisant — inutile de
+            // repayer note + genres + AniList pour retomber exactement sur le même verdict.
+            // Gratuit : simple lecture BIGCACHE, pas de requête. Un verdict LÉGENDAIRE en
+            // cache n'est PAS court-circuité ici : il faut quand même repasser par l'évaluation
+            // (déjà bon marché grâce au cache par série) pour obtenir les données d'AFFICHAGE
+            // complètes (poster, synopsis, épisodes…) qu'un simple verdict ne contient pas.
+            if (legendary && CFG.discoverScoreCacheHours > 0) {
+              const cachedVerdict = cacheGet('nugget:' + p.id, CFG.discoverScoreCacheHours * 3600e3);
+              if (cachedVerdict && cachedVerdict.fp === scoreFp && !cachedVerdict.legendary) {
+                scoreSamples.push(cachedVerdict.score);
+                REJ.legendaryScore++;
+                return false;
+              }
+            }
             return true;
           });
         candidates.forEach((p) => seenCandidate.add(p.id));
@@ -5083,6 +5160,11 @@
                 { categories: x.categories, tags: x.tags, rating: x.rating, aniScore: x.aniScore },
                 tasteProfile);
               scoreSamples.push(sig.score);
+              // (fix) Verdict enregistré pour la PROCHAINE fois que cette candidate est
+              // croisée (voir le skip précoce plus haut) — qu'elle soit retenue ou non.
+              if (CFG.discoverScoreCacheHours > 0) {
+                cacheSet('nugget:' + x.p.id, { legendary: sig.legendary, notable: sig.notable, score: sig.score, fp: scoreFp });
+              }
               if (!sig.legendary) { REJ.legendaryScore++; continue; }
               kept.push(x);
             }
@@ -5172,6 +5254,11 @@
           if (legendary) {
             const sig = discoverSignals(candidate, aniProfile);
             scoreSamples.push(sig.score);
+            // (fix) Même enregistrement de verdict que pour le bassin CR (voir plus haut) :
+            // profite au prochain scan si cette candidate ressort un jour via le bassin CR.
+            if (CFG.discoverScoreCacheHours > 0) {
+              cacheSet('nugget:' + candidate.id, { legendary: sig.legendary, notable: sig.notable, score: sig.score, fp: scoreFp });
+            }
             if (!sig.legendary) { REJ.legendaryScore++; continue; }
           }
           matches.push(candidate);
@@ -5247,7 +5334,6 @@
       }
 
       found.forEach((s) => D.excludedIds.add(s.id));
-      if (legendary) addLegendaryHistory(found.map((s) => s.id));
 
       // Rapport détaillé (voir buildDiscoverShortfallReport) : dès que le quota visé n'est
       // pas atteint, peu importe la raison (interruption, relance à sec, dé légendaire à
@@ -6976,6 +7062,26 @@
   // (discoverWellRatedBonus/discoverSuperRatedBonus) vivent dans CFG (Réglages → Découverte →
   // ✨ Score légendaire & notable) et le schéma visuel (scoreFormulaSchema) se recalcule
   // en direct dessus.
+  // Empreinte courte (pas un hash cryptographique, juste un discriminant compact) qui combine
+  // TOUS les réglages influençant discoverSignals + une signature du profil de goût. Sert de
+  // clé de validité au cache du verdict pépite par candidate (voir 'nugget:' dans loadDiscover) :
+  // si un seul de ces réglages change, ou si le profil de goût évolue (nouvelle série vue…),
+  // l'empreinte change et les verdicts cachés sous l'ancienne sont ignorés d'eux-mêmes — jamais
+  // besoin de les purger à la main, jamais de verdict silencieusement périmé.
+  function discoverScoreFingerprint(profile) {
+    const raw = [
+      CFG.discoverTasteWeight, CFG.discoverTasteNeutralCos, CFG.discoverGoodTasteThreshold,
+      CFG.discoverPrefGenreBonus,
+      CFG.discoverWellRatedThresholdCr, CFG.discoverWellRatedThresholdAni, CFG.discoverWellRatedBonus,
+      CFG.discoverSuperRatedThresholdCr, CFG.discoverSuperRatedThresholdAni, CFG.discoverSuperRatedBonus,
+      CFG.discoverLegendaryScore, CFG.discoverNotableScore,
+      profile ? profile.size : 0, profile ? (profile.top || []).join(',') : '',
+    ].join('|');
+    let h = 0;
+    for (let i = 0; i < raw.length; i++) h = (Math.imul(31, h) + raw.charCodeAt(i)) | 0;
+    return h.toString(36);
+  }
+
   function discoverSignals(s, profile) {
     const vec = candidateTasteVector(s);
     const isPref = !!(profile && profile.top.some((k) => vec[k]));
