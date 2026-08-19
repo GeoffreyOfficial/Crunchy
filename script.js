@@ -171,7 +171,10 @@
     // (sinon zéro requête — rien à cibler). Filtré côté requête AniList (tags du
     // profil, note minimale, format, contenu adulte exclu) pour rester économe.
     discoverAnilistEnabled: true,
-    discoverAnilistMaxPages: 5,   // garde-fou : profondeur de scan de ce second bassin
+    // (fix) discoverAnilistMaxPages supprimé : ce second bassin va désormais TOUJOURS au bout
+    // du classement AniList disponible (comme le bassin CR, voir POPULAR_SCAN_SAFETY_CAP plus
+    // bas dans le fichier) — plus de profondeur de scan réglable, plus de course à celui qui
+    // épuise son quota de pages avant d'avoir vraiment cherché. Interruptible à tout moment.
     // (fix) legendaryMaxPages supprimé : le dé légendaire scanne maintenant tout le
     // classement popularité Crunchyroll disponible (jusqu'à épuisement réel), au lieu de
     // s'arrêter à un plafond de pages réglable — c'est justement ce qui permet de puiser
@@ -557,9 +560,11 @@
     { key: 'discoverAnilistEnabled', label: 'Second bassin AniList (en complément de Crunchyroll)', type: 'bool',
       help: 'Cible AniList (via les tags les plus représentatifs de ton profil de goût) pour compléter le classement popularité Crunchyroll quand celui-ci ne suffit pas à atteindre le nombre de pépites visées. Filtré côté requête AniList (tags, note minimale, format, contenu adulte exclu) : coût marginal faible. Sans effet tant que ton profil de goût ne contient aucun tag AniList (regarde d’abord quelques séries dans « Reste à voir »).',
       impact: 'discover', sub: 'discoverFilters' },
-    { key: 'discoverAnilistMaxPages', label: 'Second bassin AniList — profondeur de scan', type: 'int', min: 1, max: 20, unit: 'pages',
-      help: 'Nombre de pages AniList scannées au maximum — seulement si le bassin Crunchyroll seul n’a pas suffi à atteindre le quota visé.',
-      impact: 'discover', sub: 'discoverFilters' },
+    // (fix) Réglage « profondeur de scan » supprimé : comme le bassin popularité Crunchyroll
+    // (voir POPULAR_SCAN_SAFETY_CAP), le second bassin AniList va maintenant TOUJOURS au bout
+    // (plafond de sécurité interne non réglable, jamais atteint en usage normal) — tu peux
+    // interrompre à tout moment via le bouton Interrompre du bandeau d'activité si tu veux
+    // arrêter avant.
     { key: 'legendaryTarget', label: 'Nombre visé', type: 'int', min: 3, max: 50,
       help: 'Combien de pépites LÉGENDAIRES (score ≥ CFG.discoverLegendaryScore, réglable ci-dessous) viser quand tu lances le dé légendaire.',
       impact: 'discover', sub: 'discoverDice' },
@@ -2360,7 +2365,16 @@
       }
     } finally {
       enrichingHistoryGenres = false;
-      STATE.historyGenreProgress = null;
+      // (fix) Le pendant historyProgress passe par un état « terminé » bref (setTimeout +
+      // forceRender) avant de se vider — ici on se contentait de remettre le state à null
+      // SANS jamais redemander de rendu, donc la barre restait figée sur son dernier état
+      // connu (ex. 3/3, spinner qui tourne) tant qu'aucun autre événement ne redessinait
+      // l'UI. On aligne sur le même schéma : coche « terminé » un instant, puis disparition.
+      if (STATE.historyGenreProgress) {
+        STATE.historyGenreProgress = { ...STATE.historyGenreProgress, done: STATE.historyGenreProgress.total };
+      }
+      render();
+      setTimeout(() => { STATE.historyGenreProgress = null; forceRender(); }, 1200);
     }
   }
 
@@ -2471,15 +2485,23 @@
     STATE.filters.discoverQ = '';
     STATE.filters.showIgnoredDiscover = false;
     STATE.filters.discoverCatsEx = [];
-    // Genres de la série source comme pré-filtre STRICT (ET : tous les genres de la
-    // source doivent s'y retrouver) — combiné à la similarité fine de tags plus bas
-    // (activeSimilarProfile) pour de vrais résultats proches, pas juste « partage un
-    // genre au hasard » (ex. un Sport qui ne recoupe que « Action » avec la source).
+    // (fix) Genres de la série source comme pré-filtre SOUPLE (OU : au moins un genre en
+    // commun) — le mode 'all' (ET strict) exigeait que TOUS les genres de la source se
+    // retrouvent chez la candidate, ce qu'une série avec 3-4 genres larges (ex. Action,
+    // Fantastique, Drame, Aventure) ne remplit presque jamais : résultat, « aucune série
+    // similaire trouvée » quasi systématique. La vraie précision vient de la similarité
+    // cosinus sur les tags AniList (activeSimilarProfile, tri « relevance ») — les genres
+    // ne servent plus qu'à écarter le hors-sujet total, pas à exiger une correspondance
+    // parfaite.
     STATE.filters.discoverCatsIn = genres.slice();
-    STATE.filters.discoverCatsInMode = 'all';
+    STATE.filters.discoverCatsInMode = 'any';
     STATE.filters.discoverSort = 'relevance';
     STATE.discover.similarTo = { id, title: title || '', genres, tags };
     STATE.discover.similarProfile = buildSingleSeriesProfile(tags, genres);
+    // (fix) Séries déjà croisées lors du dernier scan Découverte (peu importe son mode) :
+    // recyclées à coût nul par loadDiscover (voir opts.knownPool) pour un premier lot de
+    // résultats instantané, avant même la première requête CR/AniList de CETTE recherche.
+    const knownPool = STATE.discover.series.filter((s) => s && s.id !== id);
     STATE.discover.series = [];
     // On bascule et on affiche TOUT DE SUITE (squelettes) : le tri fin par tags peut demander
     // une requête AniList, mais l'onglet ne doit pas rester figé sur l'ancien contenu.
@@ -2514,7 +2536,7 @@
     // genre, mais l'historique de visionnage reste servi par son cache — inutile de le refaire.
     // Lancé APRÈS la récupération des tags pour que les candidats soient triés dès le premier
     // rendu avec le bon profil (cosinus tags), sans double passe de scoring.
-    refreshDiscover();
+    refreshDiscover({ knownPool });
   }
 
   // Même série (même series_id Crunchyroll), titre en anglais plutôt que dans la locale
@@ -4363,9 +4385,19 @@
     // moyenne. La note CR reste requise dans tous les cas (1 requête) ; si AniList
     // n'est pas encore connue pour cette candidate (jamais croisée), elle ne sert
     // simplement pas à rejeter — seule la note CR décide alors.
+    // (fix) En mode « séries similaires » (🪄, voir discoverSimilarTo), le seuil de note
+    // configuré pour la Découverte générale (souvent élevé, ex. 4.5★) écartait la quasi-
+    // totalité des candidats : on cherche ici une PROXIMITÉ de contenu avec une série
+    // précise, pas une garantie de qualité — une pépite peu notée mais très proche en tags
+    // reste plus utile qu'aucun résultat. Seuil ramené à 0 (aucun filtre) dans ce mode ; la
+    // note reste affichée sur la carte et le tri par pertinence continue de faire remonter
+    // les meilleures correspondances en premier.
+    const isSimilarMode = !!STATE.discover.similarTo;
+    const minRatingCr = isSimilarMode ? 0 : CFG.discoverMinRatingCr;
+    const minRatingAni = isSimilarMode ? 0 : CFG.discoverMinRatingAni;
     const rating = await getRating(p.id);
-    if (rating == null || rating < CFG.discoverMinRatingCr) { REJ.rating++; return null; }
-    if (aniScore != null && (aniScore / 20) < CFG.discoverMinRatingAni) { REJ.rating++; return null; }
+    if (rating == null || rating < minRatingCr) { REJ.rating++; return null; }
+    if (aniScore != null && (aniScore / 20) < minRatingAni) { REJ.rating++; return null; }
     if (D.cancelRequested) return null;
 
     // 4. épisodes + progression : le plus cher, réservé au dernier carré
@@ -4539,6 +4571,26 @@
       const excluded = new Set([...knownIds, ...watchedIds, ...D.excludedIds, ...legendaryHistoryIds]);
       const seenCandidate = new Set();
       const matches = [];
+
+      // (fix) Mode « similaire » (🪄) : on recycle D'ABORD les séries déjà croisées lors d'un
+      // précédent scan Découverte (opts.knownPool, voir discoverSimilarTo) — déjà entièrement
+      // évaluées (saisons/genres/note/tags), donc AUCUNE requête pour les récupérer. Ça évite
+      // de dépendre uniquement du classement popularité Crunchyroll ou d'un nouveau scan
+      // AniList pour un premier lot de résultats : coût nul, immédiat, puis complété par les
+      // bassins CR/AniList ci-dessous pour aller plus loin que ce pool déjà connu.
+      const knownPool = (opts && opts.knownPool) || [];
+      if (knownPool.length) {
+        for (const c of knownPool) {
+          if (!c || !c.id || excluded.has(c.id) || seenCandidate.has(c.id)) continue;
+          seenCandidate.add(c.id);
+          if (c.seasons != null && c.seasons > CFG.discoverMaxSeasons) continue;
+          if (categoriesRejectedByGenre(c.categories, null, null, STATE.filters.discoverCatsInMode === 'all')) continue;
+          matches.push(c);
+        }
+        // Affichage immédiat de ce premier lot gratuit, avant même la première page CR/AniList
+        // (D.series reste par ailleurs vide/squelettes tant que rien d'autre n'est publié).
+        if (matches.length) { D.series = matches.slice(); render(); }
+      }
       // (fix) Le scan légendaire reprend là où le précédent s'est arrêté (voir
       // loadLegendaryCursor) au lieu de toujours repartir de la page 0 — Découverte
       // normale, elle, repart bien de 0 à chaque fois (cible modeste, atteinte vite,
@@ -4695,7 +4747,10 @@
           // second passage, ces candidats passaient tout droit et s'affichaient quand même,
           // avec une note AniList sous le minimum configuré.
           survivors = survivors.filter((x) => {
-            if (x.aniScore != null && (x.aniScore / 20) < CFG.discoverMinRatingAni) {
+            // (fix) Même assouplissement qu'en amont (evaluateDiscoverCandidate) : pas de
+            // seuil de note en mode « séries similaires ».
+            const minAni = D.similarTo ? 0 : CFG.discoverMinRatingAni;
+            if (x.aniScore != null && (x.aniScore / 20) < minAni) {
               REJ.rating++;
               return false;
             }
@@ -4739,25 +4794,36 @@
       }
 
       // Second bassin AniList (voir scanAnilistPopularity), EN COMPLÉMENT du classement
-      // popularité Crunchyroll ci-dessus — lancé uniquement si celui-ci n'a pas suffi à
-      // atteindre le quota visé et que le scan n'a pas été interrompu (ordre le plus
-      // économe en requêtes des deux possibles). `seenCandidate` est le MÊME Set que
-      // celui déjà rempli par le scan CR ci-dessus (jamais un second) : il couvre donc
-      // les deux sources et empêche tout doublon d'affichage entre elles.
-      if (!D.cancelRequested && matches.length < target && CFG.discoverAnilistEnabled) {
+      // popularité Crunchyroll ci-dessus. Hors mode « similaire » : lancé uniquement si le
+      // bassin CR n'a pas suffi à atteindre le quota visé (ordre le plus économe en requêtes).
+      // (fix) En mode « similaire » (🪄) : TOUJOURS lancé en plus, même si le bassin CR a déjà
+      // atteint le quota — le but n'est plus seulement d'atteindre un nombre de résultats mais
+      // de ratisser large pour de vraies proximités de contenu ; se limiter au classement
+      // popularité Crunchyroll (trié par popularité générale, pas par genre/tag) passe à côté
+      // de séries proches mais peu populaires, que seule une requête AniList ciblée sur les
+      // tags de la source peut faire remonter. `seenCandidate` est le MÊME Set que celui déjà
+      // rempli par le scan CR ci-dessus (jamais un second) : il couvre donc les deux sources
+      // et empêche tout doublon d'affichage entre elles.
+      if (!D.cancelRequested && CFG.discoverAnilistEnabled && (matches.length < target || D.similarTo)) {
         const aniProfile = tasteProfile || simProfile || buildTasteProfile();
         // Titres déjà suivis, pour le pré-filtre local LÉGER de scanAnilistPopularity
         // (même logique que isKnown() dans loadNewPremieres) — évite de dépenser une
         // résolution Crunchyroll pour un titre déjà repéré comme connu.
         const knownTitlesNorm = STATE.series.map((s) => aniNorm(s.title)).filter(Boolean);
         onProgress(stepLabel(3, 3, 'Découverte : second bassin AniList…'));
+        // (fix) En mode « similaire », le bassin CR peut déjà avoir atteint `target` — on
+        // demande quand même un lot plein (`target`, pas juste le reliquat) pour que ce
+        // second bassin, plus pertinent par tags que par popularité générale, ait de quoi
+        // remonter des candidats qui remplaceront avantageusement les moins pertinents du
+        // bassin CR au tri final (voir matches.slice(0, target) plus bas).
+        const aniTarget = D.similarTo ? target : (target - matches.length);
         const aniFound = await scanAnilistPopularity(
-          aniProfile, excluded, seenCandidate, knownTitlesNorm, target - matches.length,
+          aniProfile, excluded, seenCandidate, knownTitlesNorm, aniTarget,
           { accountId, REJ, D },
           (page, maxP) => onProgress(stepLabel(3, 3, `AniList ${page}/${maxP}`)),
         );
         for (const x of aniFound) {
-          if (matches.length >= target) break;
+          if (!D.similarTo && matches.length >= target) break;
           const candidate = {
             id: x.p.id, title: x.p.title, slug: x.p.slug_title, poster: posterOf(x.p),
             synopsis: x.p.description || '',
@@ -4793,7 +4859,16 @@
         saveLegendaryCursor(nextStart);
       }
 
-      const found = matches.slice(0, target);
+      // (fix) En mode « similaire », `matches` peut désormais dépasser `target` (bassin CR +
+      // bassin AniList systématique, voir plus haut) — un simple slice(0, target) gardait
+      // alors les candidats dans leur ORDRE DE DÉCOUVERTE (bassin CR d'abord), ce qui pouvait
+      // couper net les candidats AniList potentiellement bien plus proches par tags avant même
+      // qu'ils aient une chance d'être vus. On trie par similarité réelle (même fonction que
+      // l'affichage, tasteScore/similarProfile) avant de tronquer, pour garder les meilleurs
+      // peu importe leur bassin d'origine.
+      const found = D.similarTo
+        ? [...matches].sort((a, b) => tasteScore(b, simProfile) - tasteScore(a, simProfile)).slice(0, target)
+        : matches.slice(0, target);
       found.forEach((s) => D.excludedIds.add(s.id));
       if (legendary) addLegendaryHistory(found.map((s) => s.id));
 
@@ -5145,13 +5220,19 @@
       return knownTitlesNorm.some((k) => k === nt || k.includes(nt) || nt.includes(k) || aniDice(k, nt) >= 0.82);
     };
 
-    // Bassin 100% AniList : c'est la note AniList (discoverMinRatingAni) qui fait foi ici,
-    // pas la note CR (sans rapport avec cette source de candidats).
-    const scoreMin = CFG.discoverMinRatingAni > 0
-      ? Math.round(Math.max(0, Math.min(5, CFG.discoverMinRatingAni)) * 20) : null;
-    const maxPages = Math.max(1, CFG.discoverAnilistMaxPages || 5);
-    const perPage = Math.min(50, Math.max(10, CFG.discoverPageSize || 50));
     const { accountId, REJ, D } = ctx;
+    // Bassin 100% AniList : c'est la note AniList (discoverMinRatingAni) qui fait foi ici,
+    // pas la note CR (sans rapport avec cette source de candidats). (fix) Sans seuil du tout
+    // en mode « séries similaires » — voir evaluateDiscoverCandidate pour la raison.
+    const minRatingAni = D.similarTo ? 0 : CFG.discoverMinRatingAni;
+    const scoreMin = minRatingAni > 0
+      ? Math.round(Math.max(0, Math.min(5, minRatingAni)) * 20) : null;
+    // (fix) Plus de plafond réglable (discoverAnilistMaxPages supprimé) : ce bassin va
+    // maintenant au bout du classement AniList disponible, comme le bassin CR — même
+    // garde-fou anti-boucle-infinie (jamais atteint en usage normal), interruptible via
+    // le bouton Interrompre.
+    const maxPages = POPULAR_SCAN_SAFETY_CAP;
+    const perPage = Math.min(50, Math.max(10, CFG.discoverPageSize || 50));
 
     let page = 1, hasNext = true;
     while (hasNext && page <= maxPages && found.length < target) {
@@ -7182,6 +7263,14 @@
   .crrav-rating{position:absolute;top:8px;left:8px;background:rgba(10,10,12,.92);
     border:1px solid rgba(255,255,255,.16);border-radius:8px;padding:4px 7px;white-space:nowrap;
     font:800 11.5px/1 system-ui;font-variant-numeric:tabular-nums;color:#ffcf55}
+  /* (fix) Le pavé de note (CR + AniList, ex. « ★4.9 · AL ★4.2 ») est ancré à gauche et le
+     ruban Légendaire/Notable à droite, tous deux top:8px — sur une jaquette étroite, un
+     pavé de note large finissait par chevaucher le ruban (le libellé « Légendaire »
+     recouvrait la fin de la note). On empile plutôt le pavé de note SOUS le ruban quand les
+     deux coexistent (sélecteur de fratrie : le ruban est toujours écrit avant la note dans le
+     HTML), ce qui élimine le chevauchement quelle que soit la largeur du texte, au prix d'un
+     décalage vertical du pavé de note.*/
+  .crrav-legribbon ~ .crrav-rating,.crrav-notaribbon ~ .crrav-rating{top:34px}
   .crrav-info{position:absolute;right:8px;bottom:8px;z-index:2;width:32px;height:32px;border-radius:50%;
     background:rgba(10,10,12,.92);border:1px solid rgba(255,255,255,.22);
     color:#f2f2f4;font:700 15px/1 Georgia,serif;cursor:pointer;padding:0;
@@ -11237,12 +11326,16 @@
 
     const gp = STATE.historyGenreProgress;
     if (gp) {
+      const gpFinished = gp.total && gp.done >= gp.total;
+      if (gpFinished) etaSmoothing.delete('historyGenre');
       items.push({
-        label: `🧬 Genres hors listes (AniList + Crunchyroll)… ${gp.done}/${gp.total} série${gp.total > 1 ? 's' : ''}`,
+        label: gpFinished
+          ? '🧬 Genres hors listes — enrichissement terminé'
+          : `🧬 Genres hors listes (AniList + Crunchyroll)… ${gp.done}/${gp.total} série${gp.total > 1 ? 's' : ''}`,
         count: `${gp.done}/${gp.total} séries`,
         pct: gp.total ? Math.round((gp.done / gp.total) * 100) : null,
-        eta: estimateEta('historyGenre', gp.done, gp.total, gp.startedAt),
-        done: false,
+        eta: gpFinished ? null : estimateEta('historyGenre', gp.done, gp.total, gp.startedAt),
+        done: gpFinished,
       });
     } else {
       etaSmoothing.delete('historyGenre');
@@ -11622,7 +11715,7 @@
   }
 
   const refresh = () => loadAll((m) => { progressMsg = m; render(); });
-  const refreshDiscover = () => loadDiscover((m) => { progressMsg = m; render(); });
+  const refreshDiscover = (opts) => loadDiscover((m) => { progressMsg = m; render(); }, opts);
   // Relance explicite : on force la fraîcheur (historique + ajouts récents en liste).
   const relaunchDiscover = () => loadDiscover((m) => { progressMsg = m; render(); }, { force: true });
   const refreshMoreDiscover = () => loadDiscover((m) => { progressMsg = m; render(); }, { more: true, force: true });
