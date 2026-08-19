@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      2.180.0
+// @version      2.183.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '2.180.0';
+  const SCRIPT_VERSION = '2.183.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -2457,11 +2457,12 @@
     STATE.filters.discoverQ = '';
     STATE.filters.showIgnoredDiscover = false;
     STATE.filters.discoverCatsEx = [];
-    // Genres de la série source comme pré-filtre SOUPLE (au moins un en commun) — la
-    // vraie précision vient du tri par similarité de tags (voir activeSimilarProfile),
-    // pas d'un AND strict qui écarterait des séries pourtant très proches dans le fond.
+    // Genres de la série source comme pré-filtre STRICT (ET : tous les genres de la
+    // source doivent s'y retrouver) — combiné à la similarité fine de tags plus bas
+    // (activeSimilarProfile) pour de vrais résultats proches, pas juste « partage un
+    // genre au hasard » (ex. un Sport qui ne recoupe que « Action » avec la source).
     STATE.filters.discoverCatsIn = genres.slice();
-    STATE.filters.discoverCatsInMode = 'any';
+    STATE.filters.discoverCatsInMode = 'all';
     STATE.filters.discoverSort = 'relevance';
     STATE.discover.similarTo = { id, title: title || '', genres, tags };
     STATE.discover.similarProfile = buildSingleSeriesProfile(tags, genres);
@@ -4341,11 +4342,14 @@
     if (categoriesRejectedByGenre(categories, null, null, STATE.filters.discoverCatsInMode === 'all')) { REJ.genre++; return null; }
     if (D.cancelRequested) return null;
 
-    // 3. note : 1 requête, seulement pour les survivants (candidats jamais vus ⇒
-    // jamais en cache : contrairement à Suivi/Hors listes, on ne peut pas se
-    // contenter du cache ici, sous peine de rejeter systématiquement tout le monde).
+    // 3. note : CR ET AniList (quand connue) doivent TOUTES DEUX dépasser le seuil —
+    // pas juste l'une ou l'autre. La note CR reste requise dans tous les cas (1
+    // requête) ; si AniList n'est pas encore connue pour cette candidate (jamais
+    // croisée), elle ne sert simplement pas à rejeter — seule la note CR décide alors,
+    // comme avant l'ajout de ce filtre.
     const rating = await getRating(p.id);
     if (rating == null || rating < CFG.discoverMinRating) { REJ.rating++; return null; }
+    if (aniScore != null && (aniScore / 20) < CFG.discoverMinRating) { REJ.rating++; return null; }
     if (D.cancelRequested) return null;
 
     // 4. épisodes + progression : le plus cher, réservé au dernier carré
@@ -5612,7 +5616,18 @@
       list = list.filter((s) => s.title.toLowerCase().includes(needle));
     }
 
-    const profile = activeSimilarProfile() || buildTasteProfile();
+    const simProfile = activeSimilarProfile();
+    const profile = simProfile || buildTasteProfile();
+    // Baguette magique 🪄 uniquement : le filtre genre (ET strict, ci-dessus) ne suffit
+    // pas à lui seul à garantir des séries VRAIMENT proches — deux séries peuvent
+    // recouper tous leurs genres larges tout en étant très différentes dans le fond.
+    // On écarte donc ici, en plus du tri, les candidates dont la similarité de tags
+    // (cosinus, voir tasteScore) tombe sous le seuil « bon goût » : un simple tri ne
+    // suffisait pas puisqu'une candidate mal assortie pouvait quand même apparaître
+    // faute de mieux.
+    if (simProfile) {
+      list = list.filter((s) => tasteScore(s, simProfile) >= CFG.discoverGoodTasteThreshold);
+    }
     const sigScore = (s) => discoverSignals(s, profile).score;
     const sorters = {
       // Meilleur score « pépite » d'abord (goût net + note + popularité), note en
@@ -6379,8 +6394,16 @@
     const isPref = !!(profile && profile.top.some((k) => vec[k]));
     const taste = tasteScore(s, profile);      // -1..1 : similarité cosinus, positif si aligné
     const goodTaste = taste >= CFG.discoverGoodTasteThreshold;   // globalement bien dans tes goûts
-    const wellRated = s.rating != null && s.rating >= CFG.discoverWellRatedThreshold;
-    const superRated = s.rating != null && s.rating >= CFG.discoverSuperRatedThreshold;
+    // Note prise en compte pour 🏆/✨ : CR ET AniList (quand connue) doivent TOUTES
+    // DEUX dépasser le seuil — pas juste l'une ou l'autre. Si l'une des deux est
+    // inconnue, elle ne sert simplement pas à décider (l'autre seule fait foi).
+    const crRating5 = s.rating != null ? s.rating : null;
+    const aniRating5 = s.aniScore != null ? s.aniScore / 20 : null;
+    const knownRatings = [crRating5, aniRating5].filter((v) => v != null);
+    const wellRated = knownRatings.length > 0
+      && knownRatings.every((v) => v >= CFG.discoverWellRatedThreshold);
+    const superRated = knownRatings.length > 0
+      && knownRatings.every((v) => v >= CFG.discoverSuperRatedThreshold);
     const prefBoost = isPref && taste > 0;
 
     const badges = [];
@@ -6995,10 +7018,19 @@
   .crrav-card:hover{transform:translateY(-5px);border-color:transparent}
   .crrav-card:hover::after{opacity:1}
   .crrav-thumb{position:relative;aspect-ratio:2/3;background:#1d1d24;display:block}
-  .crrav-similar{flex:0 0 auto;width:36px;border-radius:9px;border:1px solid rgba(255,255,255,.14);
-    background:rgba(255,255,255,.05);color:#e6e7ea;font-size:16px;line-height:1;display:inline-flex;
-    align-items:center;justify-content:center;cursor:pointer;padding:0;-webkit-tap-highlight-color:transparent}
-  .crrav-similar:hover{background:rgba(244,117,33,.18);border-color:rgba(244,117,33,.5)}
+  /* Baguette magique 🪄 : violet cohérent avec la pastille 🎯 (--sig-pref), pour une
+     identité visuelle propre à « découvrir du proche » plutôt qu'un simple bouton gris
+     parmi d'autres. Dégradé doux + léger halo au survol, sans backdrop-filter (coût). */
+  .crrav-similar{flex:0 0 auto;width:36px;border-radius:9px;
+    border:1px solid rgba(185,139,255,.38);
+    background:linear-gradient(135deg,rgba(185,139,255,.24),rgba(120,80,255,.10));
+    color:#d9c6ff;font-size:16px;line-height:1;display:inline-flex;
+    align-items:center;justify-content:center;cursor:pointer;padding:0;-webkit-tap-highlight-color:transparent;
+    transition:transform .15s ease,box-shadow .15s ease,border-color .15s ease,background .15s ease}
+  .crrav-similar:hover{background:linear-gradient(135deg,rgba(185,139,255,.36),rgba(120,80,255,.18));
+    border-color:rgba(185,139,255,.7);transform:translateY(-1px);
+    box-shadow:0 5px 16px -5px rgba(185,139,255,.6)}
+  .crrav-similar:active{transform:translateY(0) scale(.94)}
   .crrav-lactions .crrav-similar{width:32px;height:32px}
   /* Coloration Découverte : pastilles de signaux + liseré coloré (couleur = signal dominant) */
   .crrav-sigs{display:flex;gap:5px;margin:3px 0 2px;font-size:13px;line-height:1;min-height:15px}
