@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      2.174.0
+// @version      2.178.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '2.174.0';
+  const SCRIPT_VERSION = '2.178.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -51,7 +51,21 @@
     watchedRatio: 0.9,         // (1) épisode dépassé à 90 % = vu, même sans flag Crunchyroll
     airingWindowDays: 21,      // (3)(10) dernier épisode plus récent que ça = série en diffusion
     cacheHoursAiring: 1,       // (3) cache court pour les séries en cours
-    cacheHoursFinished: 48,    // (3) cache long pour les séries terminées
+    // (fix) 48h → 24*30 (30 j) : les épisodes d'une série TERMINÉE ne changent plus jamais
+    // — un cache de 2 jours seulement la faisait retélécharger en pure perte à chaque
+    // poignée de visites. Plafond réglage remonté à 24*180 (6 mois) pour qui veut pousser
+    // encore plus loin (voir SETTINGS_SCHEMA). La garde-fou n'est plus la durée mais le
+    // quota IndexedDB (cacheQuotaEvictPct ci-dessous) : au-delà, evictOldest() purge les
+    // entrées les plus anciennes en premier, peu importe leur TTL nominal.
+    cacheHoursFinished: 24 * 30,
+    // (fix) Nouveau : au lieu d'attendre un ÉCHEC d'écriture IndexedDB pour purger (ancien
+    // comportement, voir bigCacheAttemptFlush), on surveille maintenant PROACTIVEMENT le
+    // taux de remplissage réel du quota du navigateur (navigator.storage.estimate(), voir
+    // checkStorageQuota) et on purge AVANT d'atteindre la limite. Ça permet de garder tout
+    // ce qui est statique en cache aussi longtemps que la place le permet, sans jamais
+    // laisser le quota déborder ni bloquer une écriture en plein scan.
+    cacheQuotaWarnPct: 70,     // % du quota navigateur : au-delà, simple bandeau d'info
+    cacheQuotaEvictPct: 85,    // % du quota navigateur : au-delà, purge proactive (evictOldest)
     playheadBatch: 500,        // GUID par requête /playheads — 500 validé par probeBatch()
                                // (résultats identiques aux lots de 100, 5× moins de requêtes)
     hideMovies: false,         // Crunchyroll range les films dans une « série » à 1 épisode.
@@ -510,8 +524,14 @@
     { key: 'cacheHoursAiring', label: 'Cache des séries en cours', type: 'int', min: 0, max: 72, unit: 'h',
       help: 'Durée avant de retélécharger les infos des séries en diffusion.',
       impact: 'display' },
-    { key: 'cacheHoursFinished', label: 'Cache des séries terminées', type: 'int', min: 1, max: 720, unit: 'h',
-      help: 'Elles ne changent presque plus : un cache long est sûr et économe en requêtes.',
+    { key: 'cacheHoursFinished', label: 'Cache des séries terminées', type: 'int', min: 1, max: 24 * 180, unit: 'h',
+      help: 'Elles ne changent presque plus : un cache long (des semaines, des mois) est sûr et économe en requêtes. La vraie limite n’est plus cette durée mais la place disponible (voir seuils de quota ci-dessous) — au-delà, les entrées les plus anciennes sont purgées automatiquement.',
+      impact: 'display' },
+    { key: 'cacheQuotaWarnPct', label: 'Seuil d’alerte quota cache', type: 'int', min: 30, max: 95, unit: '%',
+      help: 'Au-delà de ce taux de remplissage du quota IndexedDB du navigateur, un bandeau t’informe — rien n’est encore purgé.',
+      impact: 'display' },
+    { key: 'cacheQuotaEvictPct', label: 'Seuil de purge quota cache', type: 'int', min: 40, max: 98, unit: '%',
+      help: 'Au-delà de ce taux, le cache le plus ancien est purgé automatiquement (par petites tranches) pour ne jamais bloquer une écriture. Doit rester au-dessus du seuil d’alerte.',
       impact: 'display' },
     { key: 'discoverMinRating', label: 'Note minimale', type: 'float', min: 0, max: 5, step: 0.5,
       help: 'Écarte les séries en dessous de cette note. 0 = aucun filtre de note.',
@@ -669,6 +689,27 @@
     return n;
   }
 
+  // Ignore EN BLOC toute une liste de séries (bouton « Tout ignorer » de Découverte), en
+  // une SEULE écriture de stockage plutôt qu'une par série. À l'échelle de centaines
+  // d'ignorés, appeler toggleIgnored en boucle réécrirait tout le blob localStorage
+  // (JSON.stringify de tout APP_STATE) à CHAQUE série — ici on mute la Map en mémoire puis
+  // on persiste une fois. On capture jaquette + résumé au passage (les séries sont sous les
+  // yeux, déjà chargées) : la vue « Ignorées » les affiche alors sans aucun backfill réseau.
+  // Renvoie le nombre réellement ajouté (celles déjà ignorées ne comptent pas deux fois).
+  function ignoreAll(seriesList, source) {
+    let added = 0;
+    for (const s of (seriesList || [])) {
+      if (!s || s.id == null || IGNORED.has(s.id)) continue;
+      IGNORED.set(s.id, {
+        title: s.title || '', source: source || 'discover',
+        poster: s.poster || '', synopsis: s.synopsis || '',
+      });
+      added++;
+    }
+    if (added) saveIgnored();   // UNE seule écriture, quel que soit le nombre de séries
+    return added;
+  }
+
   // ─── Backfill jaquette/résumé pour les séries ignorées avant la 2.87 ────────
   // Avant cette version, IGNORED ne gardait que { title, source } : passée cette mise
   // à jour, jaquette et résumé restent vides pour les entrées déjà ignorées tant
@@ -680,9 +721,16 @@
   //   pas les autres, et n'est pas retenté dans la même session (BACKFILL_TRIED).
   const BACKFILL_TRIED = new Set();
   let backfillRunning = false;
+  // Plafond par passage : borne le nombre de fiches /cms/series retéléchargées d'un coup
+  // quand la vue « Ignorées » s'ouvre avec beaucoup d'entrées sans jaquette (centaines
+  // d'ignorés). Le reste sera complété au prochain affichage de la vue — jamais toutes
+  // les requêtes en rafale. BACKFILL_TRIED garde la trace des tentatives déjà faites.
+  const BACKFILL_MAX_PER_PASS = 60;
   async function backfillIgnoredMeta() {
     if (backfillRunning) return;
-    const missing = [...IGNORED.entries()].filter(([id, v]) => !v.poster && !BACKFILL_TRIED.has(id));
+    const missing = [...IGNORED.entries()]
+      .filter(([id, v]) => !v.poster && !BACKFILL_TRIED.has(id))
+      .slice(0, BACKFILL_MAX_PER_PASS);
     if (!missing.length) return;
     backfillRunning = true;
     try {
@@ -1535,6 +1583,10 @@
         BIGCACHE[k] = v;
       }
     }
+    // Premier contrôle de quota juste après le chargement du cache existant : sur une
+    // grosse base déjà accumulée avec les nouveaux TTL longs (voir cacheHoursFinished), on
+    // veut savoir tout de suite si on part déjà proche du seuil, pas seulement après 5 min.
+    checkStorageQuota(true);
   }
   initBigCache();
 
@@ -1654,6 +1706,57 @@
     markDirty(key);
     return true;
   }
+
+  // ─── Surveillance PROACTIVE du quota de stockage ───────────────────────────────
+  // (fix) Avant, la seule purge existante (evictOldest) était réactive : elle n'était
+  // déclenchée qu'APRÈS un échec d'écriture IndexedDB (quota déjà dépassé, requête put()
+  // déjà en échec — voir bigCacheAttemptFlush). Ça marchait mais dans l'urgence, pile
+  // pendant un flush. Ici : on interroge directement le quota réel accordé par le
+  // navigateur à cette origine (navigator.storage.estimate() — Chrome/Firefox/Edge, pas
+  // Safari qui n'implémente pas cette API : dégradation silencieuse, aucune purge
+  // proactive mais l'ancien filet réactif reste actif) et on purge PAR ANTICIPATION dès
+  // qu'un seuil configurable est franchi (CFG.cacheQuotaEvictPct), par petites tranches
+  // (12,5 %) plutôt qu'un gros coup d'un quart comme le fait le filet réactif — pas besoin
+  // d'être agressif quand on a de la marge pour anticiper. C'est ce mécanisme qui permet de
+  // pousser les TTL "statiques" très haut (cacheHoursFinished, séries terminées, tags
+  // AniList…) sans risque réel de saturer le stockage : la durée nominale n'est plus la
+  // seule garde-fou, la place disponible l'est aussi.
+  let quotaCheckInFlight = false;
+  let lastQuotaCheckTs = 0;
+  const QUOTA_CHECK_MIN_INTERVAL = 5 * 60e3;   // pas plus d'un vrai contrôle toutes les 5 min
+  async function checkStorageQuota(force) {
+    if (quotaCheckInFlight) return;
+    const now = Date.now();
+    if (!force && now - lastQuotaCheckTs < QUOTA_CHECK_MIN_INTERVAL) return;
+    if (!(navigator.storage && navigator.storage.estimate)) return;   // Safari, etc. : pas d'API
+    quotaCheckInFlight = true;
+    try {
+      const { usage, quota } = await navigator.storage.estimate();
+      if (!quota) return;
+      lastQuotaCheckTs = now;
+      const pct = (usage / quota) * 100;
+      STATE.cacheQuotaPct = pct;   // dispo si besoin ailleurs ; le diagnostic complet
+                                    // (computeStorageDiag, bouton dédié) fait son propre
+                                    // calcul à la demande, plus détaillé (répartition par
+                                    // préfixe de clé)
+      if (pct >= CFG.cacheQuotaEvictPct) {
+        // Tranches successives de 12,5 % jusqu'à repasser sous le seuil, plafonnées pour ne
+        // jamais purger la totalité d'un coup même sur un quota anormalement petit.
+        const n = evictOldest(0.125);
+        LOG(`quota cache à ${pct.toFixed(0)}% (seuil ${CFG.cacheQuotaEvictPct}%) — purge proactive de ${n} entrées.`);
+        STATE.quotaWarning = null;   // la purge vient de tourner, pas la peine d'alarmer en plus
+        forceRender();
+      } else if (pct >= CFG.cacheQuotaWarnPct) {
+        STATE.quotaWarning = `Cache IndexedDB à ${pct.toFixed(0)}% du quota navigateur (purge auto à ${CFG.cacheQuotaEvictPct}%).`;
+        forceRender();
+      }
+    } catch (e) { safeCall.log(e, 'checkStorageQuota'); }
+    finally { quotaCheckInFlight = false; }
+  }
+  // Un premier contrôle après le chargement initial du cache, puis un contrôle périodique —
+  // pas besoin d'être réactif à la milliseconde, le filet de bigCacheAttemptFlush couvre
+  // déjà l'urgence (échec d'écriture en cours de scan).
+  setInterval(() => checkStorageQuota(false), QUOTA_CHECK_MIN_INTERVAL);
 
   // ─── Historique des pépites LÉGENDAIRES déjà montrées ───────────────────────────
   // (fix) Une seule clé de cache (blob {id: timestamp}), PAS une clé par pépite : le
@@ -2161,7 +2264,7 @@
   // d'historique pour ne pas refetcher au prochain affichage.
   // Complément AniList (voir CFG.anilistSchedule) : le panel CR ne donne souvent que 1-2
   // genres génériques, parfois aucun — quand c'est le cas, on interroge AniList par titre
-  // (même appariement que fetchAnilistSchedule) et on fusionne (jamais ne remplace), pour
+  // (même appariement que enrichAnilistSchedule) et on fusionne (jamais ne remplace), pour
   // que ce bloc reflète tes VRAIS genres les plus regardés, listes comprises.
   let enrichingHistoryGenres = false;
   const historyGenreTried = new Set();   // évite de reréessayer en boucle une série sans genre
@@ -2305,8 +2408,14 @@
     if (n) LOG(`cache allégé : ${n} fiche(s) série compactée(s), ~${fmtBytes(reclaimed)} récupérés.`);
   }
 
+  // (fix) 7 j → 180 j : genres/nb de saisons/description bougent rarement, et quand ils
+  // bougent (nouvelle saison annoncée sur une série suivie), le pipeline Découverte/Suivi
+  // retélécharge de toute façon le panel complet dès qu'un signal le justifie (seasons
+  // manquantes, etc.) — voir evaluateDiscoverCandidate. La vraie garde-fou contre un cache
+  // qui grossit trop n'est plus la durée mais checkStorageQuota() (purge proactive par
+  // quota, voir plus haut).
   async function getSeriesPanel(seriesId) {
-    const cached = cacheGet('series:' + seriesId, 7 * DAY);
+    const cached = cacheGet('series:' + seriesId, 180 * DAY);
     if (cached) return cached;
     const r = await api(`/content/v2/cms/series/${seriesId}`, { locale: CFG.locale });
     const panel = (r.data || [])[0];
@@ -2318,18 +2427,25 @@
     return slim;
   }
 
-  // Depuis une carte « Reste à voir » : bascule sur Découverte pré-filtrée par les genres
-  // de CETTE série. On ne réinvente pas de moteur — on réutilise tout le pipeline Découverte
-  // (pool populaire, note minimale, exclusion des séries vues/listées), en posant simplement
-  // le filtre « garder uniquement ces genres ». Résultat : des séries du même genre,
-  // populaires et bien notées, que l'utilisateur n'a pas vues. Un re-scan (force) est lancé
-  // pour repêcher les bons candidats dans le pool, comme le fait un changement de filtre genre.
-  async function discoverSimilarTo(id, title, knownCats) {
-    // On fait confiance en priorité aux genres déjà connus (posés sur la carte d'origine,
-    // via s.categories) — pas besoin de retaper l'API, et ça évite le faux « introuvables »
-    // quand ce second appel échoue ou ne remonte rien pour ce titre précis. Le fetch reste
-    // en filet de sécurité pour les cas où aucun genre n'était encore connu.
+  // Depuis une carte « Reste à voir » : bascule sur Découverte en mode « séries proches »
+  // de CETTE série. La précision vient désormais du profil à SA SEULE série (voir
+  // buildSingleSeriesProfile, comparaison par tags AniList fins) — les genres larges ne
+  // servent plus qu'à un pré-filtre SOUPLE (au moins un en commun, mode 'any'), pour ne
+  // plus écarter à tort une série qui partage le fond mais pas TOUS les genres larges.
+  async function discoverSimilarTo(id, title, knownCats, knownTags) {
+    // On fait confiance en priorité aux genres/tags déjà connus (posés sur la carte
+    // d'origine, via s.categories/s.tags) — pas besoin de retaper l'API, et ça évite le
+    // faux « introuvables » quand ce second appel échoue ou ne remonte rien pour ce
+    // titre précis. Le fetch reste en filet de sécurité pour les cas où rien n'était
+    // encore connu.
     let genres = Array.isArray(knownCats) ? knownCats.filter(Boolean) : [];
+    let tags = Array.isArray(knownTags) ? knownTags.filter((t) => t && t.name) : [];
+    // Repli tags GRATUIT : le cache AniList (rempli par enrichAnilistSchedule) peut déjà
+    // connaître cette série même si la carte d'origine n'a pas transmis ses tags — aucune
+    // requête ici, juste une lecture de cache.
+    if (!tags.length) {
+      try { tags = readAnilistCached(id).tags || []; } catch (_) { /* cache absent, tant pis */ }
+    }
     if (!genres.length) {
       try {
         const panel = await getSeriesPanel(id);
@@ -2341,17 +2457,48 @@
     STATE.filters.discoverQ = '';
     STATE.filters.showIgnoredDiscover = false;
     STATE.filters.discoverCatsEx = [];
-    // Genres de la série source comme filtre « garder uniquement ». Si aucun genre n'a pu
-    // être résolu, on NE pose PAS de filtre (sinon ce serait tout le pool) et on le signale
-    // honnêtement via le bandeau (similarTo.genres vide) plutôt que de prétendre « similaire ».
+    // Genres de la série source comme pré-filtre SOUPLE (au moins un en commun) — la
+    // vraie précision vient du tri par similarité de tags (voir activeSimilarProfile),
+    // pas d'un AND strict qui écarterait des séries pourtant très proches dans le fond.
     STATE.filters.discoverCatsIn = genres.slice();
-    STATE.filters.discoverCatsInMode = 'all';
-    STATE.discover.similarTo = { id, title: title || '', genres };
+    STATE.filters.discoverCatsInMode = 'any';
+    STATE.filters.discoverSort = 'relevance';
+    STATE.discover.similarTo = { id, title: title || '', genres, tags };
+    STATE.discover.similarProfile = buildSingleSeriesProfile(tags, genres);
     STATE.discover.series = [];
+    // On bascule et on affiche TOUT DE SUITE (squelettes) : le tri fin par tags peut demander
+    // une requête AniList, mais l'onglet ne doit pas rester figé sur l'ancien contenu.
+    STATE.discover.loading = true;
+    STATE.discover.similarFetching = !tags.length;
     render();
+    // (4bis) Cœur de la baguette magique : comparer par similarité COSINUS sur le vecteur de
+    // tags AniList de CETTE seule série — bien plus fin que les genres larges. Si la carte
+    // n'a transmis aucun tag ET que le cache est vide, on va les CHERCHER à la demande (au
+    // lieu de retomber silencieusement sur les ~20 genres, incapables de distinguer deux
+    // séries d'un même genre). Le repli genres ne subsiste que si AniList est indisponible
+    // ou ne connaît pas la série.
+    if (!tags.length) {
+      try {
+        const fetched = await fetchSeriesAniTags(id, title);
+        if (fetched.tags && fetched.tags.length) {
+          tags = fetched.tags;
+          // Les genres AniList peuvent compléter le pré-filtre souple si CR n'en donnait pas.
+          if (!genres.length && fetched.genres && fetched.genres.length) {
+            genres = fetched.genres.slice();
+            STATE.filters.discoverCatsIn = genres.slice();
+          }
+          STATE.discover.similarTo = { id, title: title || '', genres, tags };
+          STATE.discover.similarProfile = buildSingleSeriesProfile(tags, genres);
+        }
+      } catch (e) { safeCall.log(e, 'discoverSimilarTo/fetchTags'); }
+      STATE.discover.similarFetching = false;
+      render();
+    }
     ensureMyListsLoaded();
     // refresh (pas relaunch) : on re-scanne le pool popularité pour repêcher les candidats du
     // genre, mais l'historique de visionnage reste servi par son cache — inutile de le refaire.
+    // Lancé APRÈS la récupération des tags pour que les candidats soient triés dès le premier
+    // rendu avec le bon profil (cosinus tags), sans double passe de scoring.
     refreshDiscover();
   }
 
@@ -2363,8 +2510,10 @@
   // titre AniList (romaji/anglais) que le titre français affiché, d'où un bien meilleur
   // taux de match. Coût : 1 requête de plus, UNIQUEMENT quand le titre fr-FR n'a rien
   // donné — et mise en cache longue durée (le titre anglais d'une série ne change pas).
+  // (fix) 30 j → 365 j : un titre anglais de série ne change essentiellement jamais —
+  // repli quasi permanent, purge par quota (checkStorageQuota) plutôt que par âge.
   async function getSeriesEnglishTitle(seriesId) {
-    const cached = cacheGet('series-en:' + seriesId, 30 * DAY);
+    const cached = cacheGet('series-en:' + seriesId, 365 * DAY);
     if (cached != null) return cached || null;
     try {
       const r = await api(`/content/v2/cms/series/${seriesId}`, { locale: 'en-US' });
@@ -2380,8 +2529,12 @@
   // récupérer les notes en ligne coûtait 1 requête PAR SÉRIE sur le chemin critique,
   // alors qu'elles ne servent qu'à l'affichage et au filtre « Notées 4★+ ». Les
   // manquantes sont complétées en tâche de fond après le premier affichage.
+  // (fix) 7 j → 21 j : une note moyenne dérive lentement (accumulation d'avis), surtout sur
+  // les séries pas toute fraîches — recharger toutes les semaines pour une valeur qui bouge
+  // de 0,0X était surtout du gaspillage de requêtes sur des séries déjà croisées.
+  const RATING_TTL = 21 * DAY;
   function getRatingCached(seriesId) {
-    const c = cacheGet('rating:' + seriesId, 7 * DAY);
+    const c = cacheGet('rating:' + seriesId, RATING_TTL);
     return (c && 'r' in c) ? c.r : null;
   }
 
@@ -2389,7 +2542,7 @@
   let ratingPassRunning = false;
   async function fillMissingRatings(list) {
     if (ratingPassRunning) return;
-    const todo = (list || []).filter((s) => s && s.id && cacheGet('rating:' + s.id, 7 * DAY) == null);
+    const todo = (list || []).filter((s) => s && s.id && cacheGet('rating:' + s.id, RATING_TTL) == null);
     if (!todo.length) return;
     ratingPassRunning = true;
     try {
@@ -2404,7 +2557,7 @@
   }
 
   async function getRating(seriesId) {
-    const c = cacheGet('rating:' + seriesId, 7 * DAY);
+    const c = cacheGet('rating:' + seriesId, RATING_TTL);
     if (c && 'r' in c) return c.r;
     try {
       const r = await api(`/content-reviews/v2/rating/series/${seriesId}`);
@@ -2472,8 +2625,11 @@
     return seasons;
   }
 
+  // (fix) 30 j → 90 j — même logique que getSeriesPanel : le risque (une saison annoncée
+  // pas vue pendant 3 mois sur une série qu'on ne suit même pas encore) est mineur et
+  // rattrapable, le gain (moins de requêtes /seasons répétées) l'emporte largement.
   async function getSeasonCount(seriesId) {
-    const c = cacheGet('seasoncount:' + seriesId, 30 * DAY);
+    const c = cacheGet('seasoncount:' + seriesId, 90 * DAY);
     if (c !== null) return c;
     try {
       const seasons = await fetchSeasonsRaw(seriesId);
@@ -2681,12 +2837,14 @@
       }
     }
   }`;
-  const EMPTY_ANI = { plannedTotal: null, seasonEndTs: null, plannedApprox: false, anilistStatus: null, nextEpTs: null, nextEpNum: null, genres: [], tags: [] };
+  const EMPTY_ANI = { plannedTotal: null, seasonEndTs: null, plannedApprox: false, anilistStatus: null, nextEpTs: null, nextEpNum: null, genres: [], tags: [], studio: null, meanScore: null, popularity: null, duration: null, season: null, seasonYear: null, source: null, format: null };
   // Version du FORMAT du cache AniList : à incrémenter quand la logique de calcul change,
   // pour re-questionner AniList sans vider tout le reste du cache (pas de rescan complet).
-  const ANILIST_CACHE_VER = 6;   // 4 : ajout du repli titre anglais CR (voir fetchAnilistSchedule)
+  const ANILIST_CACHE_VER = 7;   // 4 : ajout du repli titre anglais CR (voir enrichAnilistSchedule)
                                   // 5 : ajout des genres AniList (voir translateAniGenres)
                                   // 6 : ajout des tags AniList pondérés par rank (voir tasteScore)
+                                  // 7 : ajout studio/note/popularité/durée/saison/source/format
+                                  //     (voir computeStats) — mêmes requêtes, champs en plus.
                                   // → force un nouvel essai des séries jusque-là non matchées.
 
   // Traduit un corps de réponse d'erreur AniList en raison lisible. Un 403 sur
@@ -2833,6 +2991,11 @@
   // Media.tags n'en accepte aucun (un `sort: RANK_DESC` fait échouer toute la requête avec
   // une 400 « Unknown argument "sort" ») — on trie par rank décroissant côté client, voir
   // cleanAniTags.
+  // (v7) studios/meanScore/popularity/duration/season/source : champs AJOUTÉS à cette
+  // même requête groupée déjà émise pour le planning/genres/tags — zéro requête HTTP
+  // en plus (un seul aller-retour GraphQL, juste quelques champs de plus dans la
+  // sélection), utilisés par Stats pour enrichir gratuitement studios/format/décennie/
+  // source/comparaison de notes (voir computeStats).
   const ANILIST_FRAGMENT = `fragment F on Media {
     id
     title { romaji english native }
@@ -2843,6 +3006,12 @@
     genres
     tags { name rank isMediaSpoiler }
     startDate { year }
+    season
+    duration
+    meanScore
+    popularity
+    source
+    studios(isMain: true) { nodes { name } }
     nextAiringEpisode { episode airingAt }
     airingSchedule(perPage: 60) { nodes { episode airingAt } }
   }`;
@@ -2911,6 +3080,9 @@
   //     vraiment besoin du calendrier pour dater la fin de saison). computeAniSchedule sait
   //     déjà se passer d'airingSchedule (extrapolation via nextAiringEpisode) pour le reste.
   // Résultat : ~5 à 8× moins de requêtes AniList pour un même passage d'enrichissement.
+  // (v7) mêmes champs supplémentaires que ANILIST_FRAGMENT (voir son commentaire) —
+  // c'est CE fragment léger qui sert au vrai passage automatique groupé
+  // (anilistSearchBatch → enrichAnilistSchedule), donc c'est ici que le gain est réel.
   const ANILIST_FRAGMENT_LIGHT = `fragment FL on Media {
     id
     title { romaji english native }
@@ -2921,6 +3093,12 @@
     genres
     tags { name rank isMediaSpoiler }
     startDate { year }
+    season
+    duration
+    meanScore
+    popularity
+    source
+    studios(isMain: true) { nodes { name } }
     nextAiringEpisode { episode airingAt }
   }`;
 
@@ -3153,14 +3331,29 @@
       // Tags AniList { name, rank } (voir cleanAniTags) — laissés en anglais (jamais
       // affichés bruts), fusionnés dans s.tags. Cœur du profil de goût (voir tasteScore).
       tags: cleanAniTags(m.tags || []),
+      // (v7) Champs gratuits (même requête) exploités par Stats — voir computeStats.
+      studio: (m.studios && m.studios.nodes && m.studios.nodes[0] && m.studios.nodes[0].name) || null,
+      meanScore: Number.isFinite(m.meanScore) ? m.meanScore : null,   // note communauté AniList, 0-100
+      popularity: Number.isFinite(m.popularity) ? m.popularity : null,
+      duration: Number.isFinite(m.duration) ? m.duration : null,      // minutes par épisode (déclaré AniList)
+      season: m.season || null,                                       // WINTER/SPRING/SUMMER/FALL
+      seasonYear: (m.startDate && m.startDate.year) || null,
+      source: m.source || null,                                       // MANGA/LIGHT_NOVEL/ORIGINAL/…
+      format: m.format || null,                                       // TV/MOVIE/OVA/ONA/SPECIAL/…
     };
   }
 
   // Durée de vie du cache AniList : court pour une série en cours (le calendrier bouge),
   // long sinon et pour les non-matchs (évite de re-questionner en boucle une série
   // qu'AniList ne connaît pas). Un match récent et frais n'est jamais re-téléchargé.
+  // (fix) Branche « terminée » 7 j → 90 j : les tags/genres/planning AniList d'un anime FINI
+  // ne changent plus (contrairement à 'RELEASING', qui garde son cache court de 12 h — c'est
+  // la seule donnée ici qui bouge vraiment, semaine après semaine de diffusion). Les tags
+  // étant désormais le cœur du score « pépite » de Découverte (voir tasteScore), un cache
+  // plus long ici, c'est aussi moins de scans Découverte qui retéléchargent en boucle les
+  // mêmes séries croisées plusieurs fois.
   function anilistTtlMs(v) {
-    return ((v && v.anilistStatus === 'RELEASING') ? 12 : 24 * 7) * 3600e3;
+    return ((v && v.anilistStatus === 'RELEASING') ? 12 : 24 * 90) * 3600e3;
   }
   function readAnilistCached(seriesId) {
     const o = cacheReadRaw('anilist:' + seriesId);
@@ -3175,53 +3368,20 @@
       nextEpNum: o.v.nextEpNum ?? null,
       genres: Array.isArray(o.v.genres) ? o.v.genres : [],
       tags: Array.isArray(o.v.tags) ? o.v.tags : [],
+      studio: o.v.studio ?? null,
+      meanScore: o.v.meanScore ?? null,
+      popularity: o.v.popularity ?? null,
+      duration: o.v.duration ?? null,
+      season: o.v.season ?? null,
+      seasonYear: o.v.seasonYear ?? null,
+      source: o.v.source ?? null,
+      format: o.v.format ?? null,
     };
   }
   function anilistNeedsFetch(seriesId) {
     const o = cacheReadRaw('anilist:' + seriesId);
     if (!o || !o.v || o.v.av !== ANILIST_CACHE_VER) return true;   // ancien format = à refaire
     return Date.now() - o.ts > anilistTtlMs(o.v);
-  }
-
-  // Interroge AniList pour UNE série et met le résultat en cache. Un échec réseau ne met
-  // rien en cache (on réessaiera) ; un non-match, lui, est mis en cache (négatif) pour ne
-  // pas re-questionner à chaque affichage.
-  // Repli titre anglais : le titre affiché (s.title) est dans la locale du compte
-  // (souvent fr-FR), qui colle rarement au titre AniList. Si la recherche avec ce titre
-  // ne donne AUCUN match sûr, on redemande la MÊME série à Crunchyroll en anglais (même
-  // series_id, juste `locale=en-US`) et on retente avec CE titre — nettement plus proche
-  // des titres romaji/anglais d'AniList. Un seul aller-retour de plus, et seulement pour
-  // les séries qui en ont besoin.
-  async function fetchAnilistSchedule(s) {
-    let media = null, searchedTitle = s.title;
-    try {
-      const res = await anilistSearch(s.title);
-      media = res.media;
-    } catch (e) {
-      safeCall.log(e, 'fetchAnilistSchedule');
-      return { error: (e && (e.message || String(e))) || 'requête échouée' };
-    }
-    let best = aniPickMatch(media, s);
-    if (!best) {
-      const enTitle = await getSeriesEnglishTitle(s.id);
-      if (enTitle && aniNorm(enTitle) !== aniNorm(s.title)) {
-        try {
-          const res2 = await anilistSearch(enTitle);
-          // Fusionne avec les candidats déjà vus (dédoublonnés par id) : la recherche FR
-          // a pu manquer la bonne fiche, ou la retrouver sans le score suffisant.
-          const seen = new Set(media.map((m) => m.id));
-          for (const m of res2.media) if (!seen.has(m.id)) { seen.add(m.id); media.push(m); }
-          searchedTitle = enTitle;
-          best = aniPickMatch(media, { ...s, title: enTitle });
-        } catch (e) { safeCall.log(e, 'fetchAnilistSchedule (repli EN)'); }
-      }
-    }
-    const result = { matched: false, ...EMPTY_ANI, aniId: null, aniTitle: '', av: ANILIST_CACHE_VER };
-    if (best) Object.assign(result, computeAniSchedule(best, s),
-      { matched: true, aniId: best.id, aniTitle: aniPrimaryTitle(best) });
-    result.searchedTitle = searchedTitle;   // diagnostic : quel titre a permis le match, s'il y en a un
-    cacheSet('anilist:' + s.id, result);
-    return result;
   }
 
   // Série dont les genres CR sont trop pauvres pour être exploitables telles quelles
@@ -3357,6 +3517,16 @@
         s.anilistStatus = result.anilistStatus;
         s.aniNextTs = result.nextEpTs;
         s.aniNextNum = result.nextEpNum;
+        // (v7) Champs gratuits (voir computeAniSchedule) — mis à jour ici aussi pour que
+        // Stats reflète l'enrichissement en tâche de fond sans attendre un rechargement complet.
+        s.aniStudio = result.studio;
+        s.aniScore = result.meanScore;
+        s.aniPopularity = result.popularity;
+        s.aniDuration = result.duration;
+        s.aniSeason = result.season;
+        s.aniSeasonYear = result.seasonYear;
+        s.aniSource = result.source;
+        s.aniFormat = result.format;
         // Fusion (jamais remplacement) : les genres Crunchyroll déjà posés restent en tête,
         // AniList complète ce qui manque (voir mergeGenreLists). Alimente les tops genres
         // des Stats et le profil de goût de Découverte, qui lisent s.categories.
@@ -3387,6 +3557,55 @@
       if (changed) { LOG(`AniList : ${changed} série(s) enrichie(s) (total prévu / fin de saison)`); render(); }
     } catch (e) { safeCall.log(e, 'enrichAnilistSchedule'); }
     finally { anilistPassRunning = false; STATE.anilistProgress = null; render(); }
+  }
+
+  // Récupère À LA DEMANDE les tags AniList d'UNE seule série (baguette magique 🪄) quand ni
+  // la carte d'origine ni le cache ne les connaissent encore. Sans ça, buildSingleSeriesProfile
+  // retombait sur les ~20 genres larges (Action, Aventure…) — trop grossiers pour distinguer
+  // deux séries d'un même genre (typiquement deux shonen très différents dans le fond). Ici on
+  // force le match AniList de CETTE seule série (titre affiché puis repli titre anglais CR),
+  // on en extrait les tags fins (rank/100), et on écrit le résultat dans le cache standard
+  // 'anilist:ID' — ce qui profite aussi aux passages d'enrichissement suivants. Best-effort :
+  // respecte le coupe-circuit (403/429), n'émet qu'1 à 2 requêtes AniList au maximum, et ne
+  // lève jamais (repli genres côté appelant si rien n'aboutit).
+  async function fetchSeriesAniTags(id, title) {
+    // 1. Cache déjà chaud ? lecture gratuite, aucune requête.
+    try {
+      const cached = readAnilistCached(id);
+      if (cached && cached.tags && cached.tags.length) return { tags: cached.tags, genres: cached.genres || [] };
+    } catch (_) { /* cache absent, on tente le fetch */ }
+    // 2. AniList en pause (403/429) : inutile d'insister — l'appelant retombera sur les genres.
+    if (anilistCooldownRemainingMs() > 0) return { tags: [], genres: [] };
+    // Série réelle si connue (meilleur appariement via airing/année de diffusion), sinon fabriquée.
+    const real = (STATE.series || []).find((x) => String(x.id) === String(id));
+    const seriesLike = real || { id, title: title || '', airing: false, lastAired: null, categories: [] };
+    try {
+      let res = await anilistSearch(seriesLike.title || title || '');
+      let m = aniPickMatch(res.media, seriesLike);
+      // Repli titre anglais (endpoint Crunchyroll, PAS AniList → sans incidence sur le rate limit).
+      if (!m) {
+        const enTitle = await getSeriesEnglishTitle(id);
+        if (enTitle && aniNorm(enTitle) !== aniNorm(seriesLike.title || '')) {
+          const res2 = await anilistSearch(enTitle);
+          m = aniPickMatch(res2.media, { ...seriesLike, title: enTitle });
+        }
+      }
+      if (!m) return { tags: [], genres: [] };
+      const sched = computeAniSchedule(m, seriesLike);
+      // Cache standard : MÊME forme que celle écrite par enrichAnilistSchedule.
+      const result = { matched: false, ...EMPTY_ANI, aniId: null, aniTitle: '', av: ANILIST_CACHE_VER };
+      Object.assign(result, sched, { matched: true, aniId: m.id, aniTitle: aniPrimaryTitle(m) });
+      try { cacheSet('anilist:' + id, result); } catch (_) { /* quota plein : on garde les tags en mémoire */ }
+      // Propagation sur l'objet série vivant s'il existe, pour cohérence immédiate ailleurs.
+      if (real) {
+        if (sched.tags && sched.tags.length) real.tags = mergeTagLists(real.tags || [], sched.tags);
+        if (sched.genres && sched.genres.length) real.categories = mergeGenreLists(real.categories || [], sched.genres);
+      }
+      return { tags: sched.tags || [], genres: sched.genres || [] };
+    } catch (e) {
+      safeCall.log(e, 'fetchSeriesAniTags');
+      return { tags: [], genres: [] };
+    }
   }
 
   // Date courte « 19 sept. » (année ajoutée seulement si différente de l'année en cours).
@@ -3501,7 +3720,7 @@
     fromSnapshot: false,
     filters: loadFilters(),
     tab: 'suivi',
-    discover: { series: [], loading: false, error: null, warning: null, shortfallDetail: null, lastSync: null, excludedIds: new Set(), searchedFilters: undefined, similarTo: null, legendaryHunt: false, cancelRequested: false, scan: null },
+    discover: { series: [], loading: false, error: null, warning: null, shortfallDetail: null, lastSync: null, excludedIds: new Set(), searchedFilters: undefined, similarTo: null, similarProfile: null, similarFetching: false, legendaryHunt: false, cancelRequested: false, scan: null },
     orphan: { series: [], loading: false, error: null, warning: null, lastSync: null },
     newPremieres: { series: [], loading: false, error: null, lastSync: null, debug: null },
     // Crunchylists détectées (id + titre), pour le bouton d'ajout depuis Découverte.
@@ -3513,6 +3732,7 @@
     // si un choix de liste est demandé (CFG.askListEachTime), la fiche en attente de choix.
     addingId: null,
     listPicker: null,   // { seriesId, title } ou null
+    confirmModal: null, // { title, message, confirmLabel, danger, onConfirm } ou null (voir confirmModalHtml)
   };
 
   // (1) vu = flag Crunchyroll OU plus de 90 % de l'épisode écoulé
@@ -3643,6 +3863,17 @@
       seasonEndTs: ani.seasonEndTs,
       plannedApprox: ani.plannedApprox,
       anilistStatus: ani.anilistStatus,
+      // (v7) Champs AniList gratuits (même requête) — voir computeStats (studios, format,
+      // source, décennie, comparaison de notes). Peuvent être null (non matché / pas encore
+      // enrichi / AniList ne connaît pas le champ pour cette fiche).
+      aniStudio: ani.studio,
+      aniScore: ani.meanScore,
+      aniPopularity: ani.popularity,
+      aniDuration: ani.duration,
+      aniSeason: ani.season,
+      aniSeasonYear: ani.seasonYear,
+      aniSource: ani.source,
+      aniFormat: ani.format,
       aniNextTs: ani.nextEpTs,
       aniNextNum: ani.nextEpNum,
     };
@@ -3844,10 +4075,6 @@
       if (!matches) return true;
     }
     return false;
-  }
-
-  function panelRejectedByGenre(p) {
-    return categoriesRejectedByGenre(panelCategories(p));
   }
 
   // Pré-filtre AU STADE « browse » : le panel de la liste popularité ne porte pas
@@ -4173,6 +4400,11 @@
     const legendary = !!(opts && opts.legendary);
     const D = STATE.discover;
     D.loading = true;
+    // (streaming) Scan frais : on vide la grille tout de suite pour que le PREMIER rendu
+    // montre des squelettes propres (et non les résultats du scan précédent qui clignoteraient
+    // avant d'être remplacés). En mode « autres pépites » (more), on garde au contraire ce qui
+    // est affiché : les nouvelles pépites viendront s'y ajouter au fil du scan.
+    if (!more) D.series = [];
     D.error = null;
     D.warning = null;
     D.shortfallDetail = null;
@@ -4214,7 +4446,12 @@
       const accountId = await getAccountId();
       // Profil de goût nécessaire pour juger « légendaire » PENDANT le scan (pas seulement
       // à l'affichage) : c'est lui qui détermine ce qui compte comme trouvé en mode 🎲.
-      const tasteProfile = legendary ? buildTasteProfile() : null;
+      // (4bis) En mode baguette magique 🪄 actif (voir activeSimilarProfile), c'est le
+      // profil à SA SEULE série — même en 🎲 Dé légendaire — qui sert de référence : les
+      // pépites légendaires trouvées sont alors « légendaires PAR RAPPORT À CETTE série »,
+      // pas à ton goût agrégé habituel.
+      const simProfile = activeSimilarProfile();
+      const tasteProfile = legendary ? (simProfile || buildTasteProfile()) : null;
 
 
       // Séries déjà connues via la watchlist / les listes personnalisées.
@@ -4289,6 +4526,23 @@
       // 'cancelled' = interruption manuelle.
       let stopReason;
 
+      // (streaming) Affichage AU FUR ET À MESURE. Avant, D.series n'était écrit qu'À LA FIN,
+      // une fois les `target` pépites trouvées : en 🎲 légendaire, qui brasse potentiellement
+      // des centaines de pages pour n'en retenir qu'une poignée, on restait sur des squelettes
+      // très longtemps sans rien voir. Désormais chaque pépite validée est publiée aussitôt
+      // dans D.series et la grille se redessine. `prevSeries` = ce qui est déjà affiché avant
+      // CE scan (le batch précédent en mode « autres pépites », vide en scan frais) : les
+      // nouvelles s'y ajoutent, sans risque de doublon (les ids déjà montrés sont dans
+      // D.excludedIds, donc jamais re-proposés). `extra` = les pépites de la tranche en cours
+      // pas encore fusionnées dans `matches`, pour un affichage à la candidate près.
+      const prevSeries = more ? [...D.series] : [];
+      const publishFound = (extra) => {
+        D.series = (extra && extra.length)
+          ? [...prevSeries, ...matches, ...extra]
+          : [...prevSeries, ...matches];
+        render();
+      };
+
       // Interruption : on sort proprement dès que l'utilisateur demande d'arrêter, en
       // gardant ce qui a déjà été trouvé.
       for (let page = 0; page < maxPages && matches.length < target; page++) {
@@ -4349,21 +4603,31 @@
 
           const survivors = got.filter(Boolean);
 
-          // (fix) 4bis. Mode légendaire UNIQUEMENT : le score de goût (tasteScore) exige
-          // des genres — sans eux, un candidat plafonne mécaniquement à « notable » et ne
-          // peut JAMAIS devenir légendaire (le goût pèse jusqu'à 2.5 points sur un seuil de
-          // 2.5 ; note+popularité ne montent qu'à 1.5), même s'il correspond en réalité
-          // parfaitement à ton profil — juste parce que Crunchyroll n'a pas donné de genre.
-          // AVANT : un appel AniList (fetchAnilistSchedule) était lancé PAR CANDIDAT dans le
-          // pool ci-dessus — jusqu'à 8 requêtes HTTP séquentielles-par-couloir en parallèle,
-          // chacune avec ses propres retries (jusqu'à 3 tentatives, 12-16 s de timeout
-          // chacune) : c'est ce qui rendait le parcours d'une page très long dès que
-          // plusieurs candidats de la tranche manquaient de genre — un cas fréquent d'après
-          // toi. MAINTENANT : UN SEUL appel groupé (anilistSearchBatch, même mécanisme que
-          // l'enrichissement en tâche de fond) pour TOUTE la tranche de survivants sans
-          // genre exploitable — 1 requête HTTP au lieu de jusqu'à 8. Résultat mis en cache
-          // 7 j (comme tout appel AniList du script), donc jamais refait pour cette série.
-          if (legendary && !D.cancelRequested && anilistCooldownRemainingMs() <= 0) {
+          // (fix) 4bis. Le score de goût (tasteScore) exige des tags/genres — sans eux, un
+          // candidat plafonne mécaniquement à « notable » et ne peut JAMAIS devenir
+          // légendaire (le goût pèse jusqu'à 2.5 points sur un seuil de 2.5 ; note+popularité
+          // ne montent qu'à 1.5), même s'il correspond en réalité parfaitement à ton profil —
+          // juste parce que Crunchyroll n'a pas donné de genre. AVANT : un appel AniList
+          // (fetchAnilistSchedule) était lancé PAR CANDIDAT dans le pool ci-dessus — jusqu'à
+          // 8 requêtes HTTP séquentielles-par-couloir en parallèle, chacune avec ses propres
+          // retries (jusqu'à 3 tentatives, 12-16 s de timeout chacune) : c'est ce qui rendait
+          // le parcours d'une page très long dès que plusieurs candidats de la tranche
+          // manquaient de genre — un cas fréquent d'après toi. MAINTENANT : UN SEUL appel
+          // groupé (anilistSearchBatch, même mécanisme que l'enrichissement en tâche de fond)
+          // pour TOUTE la tranche de survivants sans genre exploitable — 1 requête HTTP au
+          // lieu de jusqu'à 8. Résultat mis en cache 7 j (comme tout appel AniList du
+          // script), donc jamais refait pour cette série.
+          //
+          // (fix) Avant, ce passage était réservé au mode légendaire (le seul qui FILTRE sur
+          // le score). Mais le score/badge « pépite » est calculé et AFFICHÉ dans les DEUX
+          // modes (discoverCard/discoverListRow, voir sigMarkup/scoreChip) — une série sans
+          // tags tombait donc en Découverte normale sur le repli genres CR bruts, dans un
+          // espace de clés (genre:) qui ne recoupe presque jamais un profil bâti sur des tags
+          // AniList (tag:), d'où un score quasi systématiquement très négatif alors que la
+          // MÊME série, une fois enrichie via 🎲 légendaire, obtenait un score positif
+          // cohérent. Le fix : lancer cet enrichissement dans les deux modes, pas seulement
+          // légendaire, pour que le score affiché repose toujours sur les mêmes données.
+          if (!D.cancelRequested && anilistCooldownRemainingMs() <= 0) {
             // Genres pauvres OU tags encore inconnus (voir needsAniGenres) : les tags sont
             // le principal levier du goût désormais (tasteScore), donc un candidat avec de
             // bons genres CR mais sans tag profite quand même de ce passage groupé.
@@ -4417,9 +4681,11 @@
           results.push(...finalResults);
           D.scan = { page: page + 1, maxPages, found: matches.length + results.length, target, legendary };
           onProgress(stepLabel(3, 3, `page ${page + 1}`));
+          publishFound(results);   // (streaming) les pépites de cette tranche apparaissent aussitôt
         }
 
         matches.push(...results.filter(Boolean));
+        publishFound();            // (streaming) consolidation de la page dans D.series
       }
 
       // Second bassin AniList (voir scanAnilistPopularity), EN COMPLÉMENT du classement
@@ -4429,7 +4695,7 @@
       // celui déjà rempli par le scan CR ci-dessus (jamais un second) : il couvre donc
       // les deux sources et empêche tout doublon d'affichage entre elles.
       if (!D.cancelRequested && matches.length < target && CFG.discoverAnilistEnabled) {
-        const aniProfile = tasteProfile || buildTasteProfile();
+        const aniProfile = tasteProfile || simProfile || buildTasteProfile();
         // Titres déjà suivis, pour le pré-filtre local LÉGER de scanAnilistPopularity
         // (même logique que isKnown() dans loadNewPremieres) — évite de dépenser une
         // résolution Crunchyroll pour un titre déjà repéré comme connu.
@@ -4458,6 +4724,7 @@
             if (!sig.legendary) { REJ.legendaryScore++; continue; }
           }
           matches.push(candidate);
+          publishFound();          // (streaming) pépite du second bassin AniList affichée aussitôt
         }
       }
 
@@ -4489,8 +4756,10 @@
       };
 
       if (D.cancelRequested) {
-        // Interrompu à la demande : on affiche ce qui a déjà été trouvé plutôt que rien.
-        D.series = more ? [...D.series, ...found] : found;
+        // Interrompu à la demande : on fige ce qui a déjà été trouvé (le streaming l'avait
+        // déjà publié ; on recolle proprement prevSeries + found pour retomber sur la même
+        // liste sans doublon, quel que soit le point d'arrêt).
+        D.series = [...prevSeries, ...found];
         D.lastSync = new Date();
         D.warning = found.length
           ? `Recherche interrompue — ${found.length} pépite${found.length > 1 ? 's' : ''} déjà ${found.length > 1 ? 'trouvées' : 'trouvée'} affichée${found.length > 1 ? 's' : ''}.`
@@ -4498,6 +4767,9 @@
         D.shortfallDetail = buildDiscoverShortfallReport(shortfallCtx);
         idle(() => fillMissingRatings(found));
       } else if (more && !found.length) {
+        // Rien de neuf : le streaming a laissé D.series = prevSeries (batch précédent), on
+        // le garde tel quel et on explique pourquoi il n'y a pas d'ajout.
+        D.series = [...prevSeries];
         D.warning = legendary
           ? "Aucune autre pépite légendaire trouvée pour l'instant — essaie d'élargir tes genres, ou réessaie plus tard."
           : "Aucune autre pépite trouvée pour l'instant — le classement popularité n'a " +
@@ -4507,11 +4779,15 @@
         D.warning = "Aucune pépite légendaire trouvée en " + pagesScanned + " page" + (pagesScanned > 1 ? 's' : '') +
           " (classement popularité parcouru jusqu'au bout). Essaie d'élargir tes genres, " +
           "ou relance le dé : le classement popularité bouge et l'historique des pépites déjà vues expire avec le temps.";
-        D.series = found;
+        D.series = [...prevSeries, ...found];
         D.lastSync = new Date();
         D.shortfallDetail = buildDiscoverShortfallReport(shortfallCtx);
       } else {
-        D.series = found;
+        // (streaming) prevSeries + found : en scan frais prevSeries est vide (= found seul,
+        // comportement d'avant) ; en « autres pépites » les nouvelles s'AJOUTENT à celles déjà
+        // affichées au lieu de les remplacer — cohérent avec ce que le streaming montrait déjà
+        // pendant le scan, et on ne perd plus le batch précédent sous les yeux.
+        D.series = [...prevSeries, ...found];
         D.lastSync = new Date();
         if (found.length < target) D.shortfallDetail = buildDiscoverShortfallReport(shortfallCtx);
         idle(() => fillMissingRatings(found));
@@ -5322,7 +5598,7 @@
       list = list.filter((s) => s.title.toLowerCase().includes(needle));
     }
 
-    const profile = buildTasteProfile();
+    const profile = activeSimilarProfile() || buildTasteProfile();
     const sigScore = (s) => discoverSignals(s, profile).score;
     const sorters = {
       // Meilleur score « pépite » d'abord (goût net + note + popularité), note en
@@ -5419,6 +5695,32 @@
     if (!h) return `${m} min`;
     return m ? `${h} h ${String(m).padStart(2, '0')}` : `${h} h`;
   }
+
+  // Temps relatif court pour l'activité récente des Stats (ex. « hier », « il y a 5 j »).
+  // Pur calcul local sur un timestamp déjà en mémoire (lastWatchedTs) — aucune requête.
+  function fmtRelDay(ts) {
+    if (!ts) return '';
+    const days = Math.floor((Date.now() - ts) / DAY);
+    if (days <= 0) return "aujourd'hui";
+    if (days === 1) return 'hier';
+    if (days < 7) return `il y a ${days} j`;
+    if (days < 30) return `il y a ${Math.round(days / 7)} sem.`;
+    if (days < 365) return `il y a ${Math.round(days / 30)} mois`;
+    return `il y a ${Math.round(days / 365)} an${days >= 730 ? 's' : ''}`;
+  }
+
+  // Libellés FR des enums AniList — jamais affichés bruts en anglais (cohérent avec
+  // translateAniGenres pour les genres).
+  const ANI_SOURCE_FR = {
+    ORIGINAL: 'Original', MANGA: 'Manga', LIGHT_NOVEL: 'Light novel', NOVEL: 'Roman',
+    VISUAL_NOVEL: 'Visual novel', VIDEO_GAME: 'Jeu vidéo', GAME: 'Jeu', WEB_NOVEL: 'Web novel',
+    DOUJINSHI: 'Doujinshi', ANIME: 'Anime', LIVE_ACTION: 'Live action', COMIC: 'Comic',
+    MULTIMEDIA_PROJECT: 'Projet multimédia', PICTURE_BOOK: 'Livre illustré', OTHER: 'Autre',
+  };
+  const ANI_FORMAT_FR = {
+    TV: 'Série TV', TV_SHORT: 'Série TV courte', MOVIE: 'Film', SPECIAL: 'Spécial',
+    OVA: 'OAV', ONA: 'ONA', MUSIC: 'Clip musical',
+  };
 
   // (14) la couleur encode la proximité de la fin
   function progColor(s) {
@@ -5556,6 +5858,26 @@
         <p>Choisis la liste de destination.</p>
         ${options}
         <button type="button" class="crrav-listpicker-cancel" data-picklist-cancel>Annuler</button>
+      </div>
+    </div>`;
+  }
+
+  // Modale de confirmation générique, pilotée par STATE.confirmModal = { title, message,
+  // confirmLabel, danger, onConfirm }. Rendu dans le même moule que le sélecteur de liste
+  // (overlay + sheet), fermée par le bouton Annuler, par le bouton ✕, ou en tapant hors de
+  // la feuille. `danger` colore le bouton d'action en rouge (action destructive/irréversible).
+  // onConfirm est une fonction stockée en mémoire (jamais sérialisée) exécutée à la validation.
+  function confirmModalHtml() {
+    const m = STATE.confirmModal;
+    if (!m) return '';
+    return `<div class="crrav-confirm" role="dialog" aria-modal="true" aria-label="${escapeHtml(m.title || 'Confirmation')}">
+      <div class="crrav-confirm-sheet">
+        <h3>${escapeHtml(m.title || 'Confirmer ?')}</h3>
+        <div class="crrav-confirm-msg">${m.message || ''}</div>
+        <div class="crrav-confirm-actions">
+          <button type="button" class="crrav-confirm-cancel" data-confirm-cancel>Annuler</button>
+          <button type="button" class="crrav-confirm-ok${m.danger ? ' danger' : ''}" data-confirm-ok>${escapeHtml(m.confirmLabel || 'Confirmer')}</button>
+        </div>
       </div>
     </div>`;
   }
@@ -5703,16 +6025,21 @@
   }
 
   // Bouton « séries similaires » : présent sur les cartes Reste à voir / Hors listes.
-  // Déclenche discoverSimilarTo (bascule vers Découverte filtrée sur les genres de la série).
+  // Déclenche discoverSimilarTo (bascule vers Découverte, triée par similarité de tags
+  // AniList avec CETTE série — voir buildSingleSeriesProfile).
   function similarBtn(s) {
-    // On transporte les genres déjà connus de la carte (s.categories, posés par
+    // On transporte les genres ET les tags AniList déjà connus de la carte (posés par
     // buildSeriesEntry) pour éviter un second appel API redondant et fragile côté
     // discoverSimilarTo : si CE second appel échoue ou ne renvoie rien pour ce titre
     // précis, le bandeau affichait « genres introuvables » alors que l'app les connaît déjà.
+    // Les tags sont ce qui permet la vraie précision (similarité cosinus, voir
+    // buildSingleSeriesProfile) — les genres ne servent plus qu'au pré-filtre souple.
     const catsAttr = (s.categories || []).length
       ? ` data-similar-cats="${escapeHtml((s.categories || []).join('|'))}"` : '';
-    return `<button type="button" class="crrav-similar" data-similar="${s.id}" data-similar-title="${escapeHtml(s.title)}"${catsAttr}`
-      + ` title="Découvrir des séries du même genre, populaires et bien notées, que tu n'as pas vues"`
+    const tagsAttr = (s.tags || []).length
+      ? ` data-similar-tags="${escapeHtml(JSON.stringify(s.tags.map((t) => [t.name, t.rank])))}"` : '';
+    return `<button type="button" class="crrav-similar" data-similar="${s.id}" data-similar-title="${escapeHtml(s.title)}"${catsAttr}${tagsAttr}`
+      + ` title="Découvrir des séries proches (tags AniList), populaires et bien notées, que tu n'as pas vues"`
       + ` aria-label="Découvrir des séries similaires à ${escapeHtml(s.title)}">🪄</button>`;
   }
 
@@ -5886,6 +6213,45 @@
       for (const c of s.categories || []) v[genreKey(c)] = 1;
     }
     return v;
+  }
+
+  // (4bis) Profil de goût réduit à UNE SEULE série — même forme que buildTasteProfile
+  // (weights/norm/max/top/size), pour que tasteScore/discoverSignals l'utilisent SANS
+  // aucune adaptation. Sert à la baguette magique 🪄 « séries similaires » : au lieu de
+  // filtrer sur les genres larges de la série (Action, Aventure…), on compare par
+  // similarité cosinus sur ses tags AniList fins (rank/100) — bien plus précis pour
+  // distinguer deux séries du même genre large mais très différentes dans le fond.
+  // Repli sur les catégories (genres) si aucun tag n'est encore connu pour cette série.
+  function buildSingleSeriesProfile(tags, categories) {
+    const v = candidateTasteVector({ tags: tags && tags.length ? tags : null, categories: categories || [] });
+    const entries = Object.entries(v).sort((a, b) => b[1] - a[1]);
+    if (!entries.length) return null;
+    const norm = Math.sqrt(entries.reduce((a, [, w]) => a + w * w, 0));
+    return { weights: v, norm, max: entries[0][1], top: entries.slice(0, 3).map(([k]) => k), size: entries.length };
+  }
+
+  // Égalité de deux ensembles (insensible à la casse) — sert à détecter si les filtres
+  // genre affichés correspondent encore à la série source de la baguette magique.
+  function sameSet(a, b) {
+    const A = new Set((a || []).map((x) => String(x).toLowerCase()));
+    const B = new Set((b || []).map((x) => String(x).toLowerCase()));
+    if (A.size !== B.size) return false;
+    for (const x of A) if (!B.has(x)) return false;
+    return true;
+  }
+
+  // Le profil « série unique » (baguette magique) ne reste actif QUE tant que les
+  // filtres genre affichés correspondent encore à la série source — dès qu'on clique
+  // manuellement un genre pour diverger, on retombe sur le profil de goût agrégé
+  // habituel, cohérent avec la disparition du bandeau 🪄 (même condition que simActive
+  // dans renderDiscover, centralisée ici pour ne pas dupliquer la logique).
+  function activeSimilarProfile() {
+    const sim = STATE.discover.similarTo;
+    const sp = STATE.discover.similarProfile;
+    if (!sim || !sp) return null;
+    const IN = STATE.filters.discoverCatsIn || [];
+    const active = sim.genres.length ? sameSet(IN, sim.genres) : IN.length === 0;
+    return active ? sp : null;
   }
 
   // (34) Détail concret, replié par défaut, du profil de goût utilisé par le score « pépite »
@@ -6887,6 +7253,28 @@
   .crrav-listpicker-cancel{margin-top:4px;background:transparent;border:1px solid rgba(255,255,255,.15);
     border-radius:10px;padding:10px;color:#c9c9d2;font:600 12.5px/1 system-ui;cursor:pointer}
 
+  /* Modale de confirmation générique (même moule que le sélecteur de liste) */
+  .crrav-confirm{position:fixed;inset:0;z-index:70;display:flex;align-items:flex-end;justify-content:center;
+    background:rgba(6,6,8,.72)}
+  .crrav-confirm-sheet{width:100%;max-width:420px;background:#141419;border:1px solid rgba(255,255,255,.1);
+    border-radius:16px 16px 0 0;padding:18px 16px;display:flex;flex-direction:column;gap:12px;
+    max-height:80vh;overflow:auto}
+  @media(min-width:640px){.crrav-confirm{align-items:center}.crrav-confirm-sheet{border-radius:16px}}
+  .crrav-confirm-sheet h3{margin:0;font:700 15px/1.3 system-ui;color:#f2f2f4}
+  .crrav-confirm-msg{font:400 12.5px/1.5 system-ui;color:#c9c9d2}
+  .crrav-confirm-msg p{margin:0 0 8px}.crrav-confirm-msg p:last-child{margin-bottom:0}
+  .crrav-confirm-msg b{color:#f2f2f4;font-weight:700}
+  .crrav-confirm-actions{display:flex;gap:8px;margin-top:2px}
+  .crrav-confirm-cancel{flex:1;background:transparent;border:1px solid rgba(255,255,255,.15);
+    border-radius:10px;padding:11px;color:#c9c9d2;font:600 13px/1 system-ui;cursor:pointer}
+  .crrav-confirm-cancel:hover{border-color:rgba(255,255,255,.3)}
+  .crrav-confirm-ok{flex:1;background:#f47521;border:1px solid #f47521;border-radius:10px;padding:11px;
+    color:#0a0a0c;font:700 13px/1 system-ui;cursor:pointer}
+  .crrav-confirm-ok:hover{filter:brightness(1.08)}
+  .crrav-confirm-ok.danger{background:#e0483d;border-color:#e0483d;color:#fff}
+  .crrav-ignoreall{color:#e6a9a2}
+  .crrav-ignoreall:hover{border-color:#e0483d;color:#f2c4bf}
+
   /* (5) vue liste compacte */
   .crrav-grid.crrav-list{grid-template-columns:1fr;gap:8px}
   .crrav-lrow{display:flex;align-items:center;gap:10px;min-width:0;padding:7px 9px;background:#141419;
@@ -7037,45 +7425,46 @@
      mobile/tactile (Z Fold compris, déplié ou non) : le bouton n'était alors JAMAIS visible. */
   .crrav-sheetfoot{display:none}
 
-  /* Petits écrans tactiles : panneau plein écran avec son PROPRE défilement.
-     Empiler deux zones scrollables (overlay + panneau) rendait le scroll imprévisible.
-     Condition en OR : largeur ≤720px (petit mobile) OU pointeur tactile (pointer:coarse).
-     Un écran pliable ouvert (Z Fold…) peut dépasser 720px de large selon le zoom
-     d'affichage du fabricant — s'appuyer uniquement sur la largeur ratait ces appareils.
-     Le tactile, lui, ne ment pas : un doigt reste un doigt, quelle que soit la largeur. */
-  @media(max-width:720px),(pointer:coarse){
-    .crrav-settingssheet{position:fixed;inset:0;height:100vh;height:100dvh;
-      z-index:20;background:#0a0a0c;padding:0;
-      display:flex;flex-direction:column}
-    .crrav-sheethead{position:sticky;top:0;display:flex;align-items:center;gap:10px;z-index:2;
-      padding:14px 16px;border-bottom:1px solid rgba(255,255,255,.1);
-      background:linear-gradient(180deg,rgba(10,10,12,.96),rgba(10,10,12,.82));backdrop-filter:blur(18px)}
-    .crrav-sheethead h2{margin:0;font:800 18px/1 system-ui;letter-spacing:-.02em;flex:1;
-      display:flex;align-items:center;gap:10px}
-    .crrav-sheethead h2::before{content:'';flex:0 0 auto;width:4px;height:20px;border-radius:3px;
-      background:linear-gradient(#ffb347,#f47521);box-shadow:0 0 10px rgba(244,117,33,.55)}
-    .crrav-sheetbody{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;
-      overscroll-behavior:contain;padding:2px 14px 72px}
-    .crrav-sheetbody .crrav-settings{max-height:none;overflow:visible;border:0;background:none;
-      box-shadow:none;padding:8px 0 0;margin:0}
-    /* Le titre du panneau ferait doublon avec l'en-tête collant « Réglages ». */
-    .crrav-sheetbody .crrav-settings>h3{display:none}
-    .crrav-sheetbody .crrav-sgrid{grid-template-columns:1fr}
-    .crrav-sheetbody .crrav-field input[type=number],
-    .crrav-sheetbody .crrav-field input[type=text]{font-size:16px}
-    /* (30) Recherche collée sous l'en-tête, actions collées en bas — toujours à portée de pouce. */
-    .crrav-sheetbody .crrav-setsearch,
-    .crrav-sheetbody .crrav-setsearch:focus-within{position:sticky;top:0;z-index:6;
-      background:rgba(16,16,20,.97);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)}
-    .crrav-sheetbody .crrav-sactions-primary{display:none}
-    .crrav-sheetfoot{display:flex;flex:0 0 auto;gap:10px;
-      padding:12px 14px calc(12px + env(safe-area-inset-bottom,0px));
-      border-top:1px solid rgba(255,255,255,.1);
-      background:linear-gradient(0deg,rgba(10,10,12,.98),rgba(10,10,12,.84));
-      backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px)}
-    .crrav-sheetfoot>.crrav-btn{flex:1 1 0;min-width:0;padding:12px 12px;font-size:13px}
-    .crrav-sheetfoot>[data-act="settings-save"]{flex:1.7 1 0}
-  }
+  /* Réglages : panneau PLEIN ÉCRAN sur TOUTES les tailles (téléphone, pliable, PC).
+     Auparavant réservé à « ≤720px OU tactile », ce qui laissait le bureau en rendu « en
+     ligne » : le panneau s'empilait alors EN BAS du contenu et il fallait scroller pour le
+     voir — déroutant. Désormais c'est toujours un overlay fixe qui remplace tout l'écran,
+     avec son PROPRE défilement (empiler deux zones scrollables — overlay + panneau — rendait
+     le scroll imprévisible). Le contenu est centré à une largeur confortable sur grand écran
+     via padding-inline: max(marge, (100% − largeurMax)/2) — sur mobile le max() retombe sur
+     la petite marge, donc rendu identique à avant ; sur PC, il centre au lieu d'étirer. */
+  .crrav-settingssheet{position:fixed;inset:0;height:100vh;height:100dvh;
+    z-index:20;background:#0a0a0c;padding:0;
+    display:flex;flex-direction:column}
+  .crrav-sheethead{position:sticky;top:0;display:flex;align-items:center;gap:10px;z-index:2;
+    padding:14px max(16px,calc((100% - 900px)/2));border-bottom:1px solid rgba(255,255,255,.1);
+    background:linear-gradient(180deg,rgba(10,10,12,.96),rgba(10,10,12,.82));backdrop-filter:blur(18px)}
+  .crrav-sheethead h2{margin:0;font:800 18px/1 system-ui;letter-spacing:-.02em;flex:1;
+    display:flex;align-items:center;gap:10px}
+  .crrav-sheethead h2::before{content:'';flex:0 0 auto;width:4px;height:20px;border-radius:3px;
+    background:linear-gradient(#ffb347,#f47521);box-shadow:0 0 10px rgba(244,117,33,.55)}
+  .crrav-sheetbody{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;
+    overscroll-behavior:contain;padding:2px max(14px,calc((100% - 900px)/2)) 72px}
+  .crrav-sheetbody .crrav-settings{max-height:none;overflow:visible;border:0;background:none;
+    box-shadow:none;padding:8px 0 0;margin:0}
+  /* Le titre du panneau ferait doublon avec l'en-tête collant « Réglages ». */
+  .crrav-sheetbody .crrav-settings>h3{display:none}
+  .crrav-sheetbody .crrav-sgrid{grid-template-columns:1fr}
+  .crrav-sheetbody .crrav-field input[type=number],
+  .crrav-sheetbody .crrav-field input[type=text]{font-size:16px}
+  /* (30) Recherche collée sous l'en-tête, actions collées en bas — toujours à portée de main. */
+  .crrav-sheetbody .crrav-setsearch,
+  .crrav-sheetbody .crrav-setsearch:focus-within{position:sticky;top:0;z-index:6;
+    background:rgba(16,16,20,.97);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)}
+  /* La barre d'actions « en ligne » du panneau ferait doublon avec le pied collant : masquée. */
+  .crrav-sheetbody .crrav-sactions-primary{display:none}
+  .crrav-sheetfoot{display:flex;flex:0 0 auto;gap:10px;
+    padding:12px max(14px,calc((100% - 900px)/2)) calc(12px + env(safe-area-inset-bottom,0px));
+    border-top:1px solid rgba(255,255,255,.1);
+    background:linear-gradient(0deg,rgba(10,10,12,.98),rgba(10,10,12,.84));
+    backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px)}
+  .crrav-sheetfoot>.crrav-btn{flex:1 1 0;min-width:0;padding:12px 12px;font-size:13px}
+  .crrav-sheetfoot>[data-act="settings-save"]{flex:1.7 1 0}
   .crrav-settings h3{margin:0 0 16px;font:800 18px/1.1 system-ui;letter-spacing:-.02em;
     display:flex;align-items:center;gap:10px}
   .crrav-settings h3::before{content:'';flex:0 0 auto;width:4px;height:19px;border-radius:3px;
@@ -7691,6 +8080,44 @@
   .crrav-avgnote{margin:14px 0 0;font:500 12px/1.4 system-ui;color:#9a9aa4}
   .crrav-avgnote b{color:#ffcf55}
 
+  /* (v7) Chronologie par décennie — mini schéma en barres horizontales, même famille
+     visuelle que .crrav-gbar mais échelle par décennie et étiquette centrée. */
+  .crrav-timeline{display:flex;align-items:flex-end;gap:6px;height:120px;padding:10px 4px 0;
+    overflow-x:auto}
+  .crrav-tlbar{flex:1 1 auto;min-width:34px;display:flex;flex-direction:column;
+    align-items:center;justify-content:flex-end;gap:6px;height:100%}
+  .crrav-tlbar-fill{width:100%;border-radius:6px 6px 3px 3px;
+    background:linear-gradient(180deg,#ffb347,#f47521);min-height:4px;
+    transition:height .25s ease}
+  .crrav-tlbar-n{font:800 11px/1 system-ui;color:#f2f2f4;font-variant-numeric:tabular-nums}
+  .crrav-tlbar-l{font:700 10px/1 system-ui;color:#9a9aa4;white-space:nowrap}
+
+  /* (v7) Tableaux réels (comparaison de notes, tops) — plus lisibles qu'une liste de
+     lignes quand plusieurs colonnes de chiffres doivent s'aligner. */
+  .crrav-table{width:100%;border-collapse:collapse;font:600 12.5px/1.3 system-ui}
+  .crrav-table th{text-align:left;color:#9a9aa4;font:700 10.5px/1 system-ui;
+    text-transform:uppercase;letter-spacing:.05em;padding:0 8px 8px;border-bottom:1px solid rgba(255,255,255,.1)}
+  .crrav-table th.crrav-tnum,.crrav-table td.crrav-tnum{text-align:right}
+  .crrav-table td{padding:8px;border-bottom:1px solid rgba(255,255,255,.06);
+    color:#e8e8ec;vertical-align:middle}
+  .crrav-table tr:last-child td{border-bottom:0}
+  .crrav-table td.crrav-ttitle{max-width:0;width:100%;overflow:hidden;text-overflow:ellipsis;
+    white-space:nowrap}
+  .crrav-table a{color:inherit;text-decoration:none}
+  .crrav-table a:hover{color:#f47521}
+  .crrav-tup{color:#5ce6a0}
+  .crrav-tdown{color:#ff8a8a}
+
+  /* (v7) Activité récente — mini-liste chronologique, même style que .crrav-toprow */
+  .crrav-activity{display:flex;flex-direction:column}
+  .crrav-actrow{display:flex;align-items:center;gap:10px;padding:7px 0;text-decoration:none;
+    color:inherit;border-bottom:1px solid rgba(255,255,255,.06)}
+  .crrav-actrow:last-child{border-bottom:0}
+  .crrav-actdot{flex:0 0 7px;width:7px;height:7px;border-radius:50%;background:#f47521}
+  .crrav-acttitle{flex:1;min-width:0;font:600 12.5px/1.3 system-ui;overflow:hidden;
+    text-overflow:ellipsis;white-space:nowrap}
+  .crrav-acttime{flex:0 0 auto;font:600 11px/1 system-ui;color:#9a9aa4}
+
   /* Calendrier estimatif — le titre de série n'est JAMAIS tronqué */
   .crrav-schedhint{margin:-4px 0 4px;font:400 11.5px/1.4 system-ui;color:#8a8a94}
   .crrav-sched{display:flex;flex-direction:column;gap:8px}
@@ -8066,6 +8493,69 @@
 
     const g = agg(all);
 
+    // — (v7) Studios, format, source, décennie — tout vient du cache AniList déjà
+    // rempli par enrichAnilistSchedule (voir buildSeriesEntry), aucune requête ici.
+    // Comptées sur les mêmes séries que les genres (vues, au moins 1 épisode).
+    const seenAll = all.filter((s) => s.seen > 0);
+    const count = (arr, key, translate) => {
+      const m = {};
+      for (const s of arr) {
+        const raw = s[key];
+        if (!raw) continue;
+        const label = translate ? (translate[raw] || raw) : raw;
+        m[label] = (m[label] || 0) + 1;
+      }
+      return Object.entries(m).sort((a, b) => b[1] - a[1]);
+    };
+    const topStudios = count(seenAll, 'aniStudio').slice(0, 8);
+    const formatBreakdown = count(seenAll, 'aniFormat', ANI_FORMAT_FR);
+    const sourceBreakdown = count(seenAll, 'aniSource', ANI_SOURCE_FR);
+    const knownAniFields = seenAll.filter((s) => s.aniStudio || s.aniFormat || s.aniSource).length;
+
+    // Décennie de sortie, depuis aniSeasonYear (repli sur lastAired si absent). Regroupé
+    // par décennie plutôt que par année pour rester lisible même avec peu de séries.
+    const decadeOf = (s) => {
+      const y = s.aniSeasonYear || (s.lastAired ? new Date(s.lastAired.air).getFullYear() : null);
+      return y ? Math.floor(y / 10) * 10 : null;
+    };
+    const decadeCounts = {};
+    for (const s of seenAll) {
+      const d = decadeOf(s);
+      if (d) decadeCounts[d] = (decadeCounts[d] || 0) + 1;
+    }
+    const timeline = Object.entries(decadeCounts)
+      .map(([d, n]) => [Number(d), n])
+      .sort((a, b) => a[0] - b[0]);
+
+    // Comparaison de notes : ta note (1-5 ★) vs la moyenne communauté AniList
+    // (meanScore 0-100, ramenée sur 5 pour être comparable). Uniquement les séries où
+    // TU as noté ET où AniList a matché — comparaison honnête, pas d'extrapolation.
+    const compared = all.filter((s) => s.rating != null && s.aniScore != null)
+      .map((s) => ({ title: s.title, id: s.id, slug: s.slug, mine: s.rating, ani: s.aniScore / 20 }));
+    const scoreCompare = compared.length ? {
+      n: compared.length,
+      avgMine: compared.reduce((a, x) => a + x.mine, 0) / compared.length,
+      avgAni: compared.reduce((a, x) => a + x.ani, 0) / compared.length,
+      // Plus grands écarts dans un sens et dans l'autre (dépassant tes propres goûts /
+      // au contraire, sous-noté par toi par rapport au consensus).
+      harshest: [...compared].sort((a, b) => (a.mine - a.ani) - (b.mine - b.ani)).slice(0, 3),
+      kindest: [...compared].sort((a, b) => (b.mine - b.ani) - (a.mine - a.ani)).slice(0, 3),
+    } : null;
+
+    // Activité récente : dernière date de visionnage par série (lastWatchedTs), déjà en
+    // mémoire (voir buildSeriesEntry) — pur tri, aucune requête.
+    const recentActivity = all
+      .filter((s) => s.lastWatchedTs)
+      .sort((a, b) => b.lastWatchedTs - a.lastWatchedTs)
+      .slice(0, 6)
+      .map((s) => ({ id: s.id, title: s.title, slug: s.slug, ts: s.lastWatchedTs }));
+
+    // Durée moyenne d'épisode déclarée par AniList vs durée réelle mesurée côté CR
+    // (g.epSeen/g.secSeen, calculé plus haut) — pur affichage informatif, aucun coût.
+    const withAniDur = seenAll.filter((s) => s.aniDuration);
+    const avgAniDuration = withAniDur.length
+      ? Math.round(withAniDur.reduce((a, s) => a + s.aniDuration, 0) / withAniDur.length) : null;
+
     // Faits marquants — tout est déjà en mémoire (aucune requête ajoutée) :
     // série la plus chronophage, mieux notée, la plus longue, presque finies…
     const withSeenSec = all.map((s) => ({
@@ -8103,6 +8593,10 @@
       tagCount: Object.keys(tagWeights).length,
       avgRating,
       seriesWithGenres: all.filter((s) => s.seen > 0 && (s.categories || []).length).length,
+      // (v7) données AniList gratuites (voir plus haut) — undefined proprement géré en
+      // rendu (blocs masqués tant que l'enrichissement AniList n'a pas encore tourné).
+      topStudios, formatBreakdown, sourceBreakdown, knownAniFields,
+      timeline, scoreCompare, recentActivity, avgAniDuration,
       highlights: {
         mostWatched: mostWatched ? { title: mostWatched.s.title, id: mostWatched.s.id, slug: mostWatched.s.slug, sec: mostWatched.sec } : null,
         longest: longest && longest.total ? { title: longest.title, id: longest.id, slug: longest.slug, total: longest.total } : null,
@@ -8326,7 +8820,8 @@
       factStat('📡', hl.airingCount, 'en diffusion en ce moment'),
       factStat('🎭', st.genreCount, 'genres différents suivis'),
       factStat('🧬', st.tagCount, 'tags AniList différents'),
-      factStat('⏳', fmtDuration(hl.avgEpisodeSec), 'durée moyenne / épisode'),
+      factStat('⏳', fmtDuration(hl.avgEpisodeSec), 'durée moyenne / épisode (réelle)'),
+      st.avgAniDuration ? factStat('📺', st.avgAniDuration + ' min', 'durée déclarée AniList / épisode') : '',
     ].join('');
     const almostBlock = hl.almostDone.length ? `
       <div class="crrav-almost">
@@ -8341,10 +8836,105 @@
     const topListsBlock = topLists.length ? `
       <div class="crrav-topseries">
         <h3>Tes séries suivies les plus regardées</h3>
-        ${topLists.map((s, i) => `<a class="crrav-toprow" href="${escapeHtml(seriesUrl(s.id, s.slug))}">
-          <span class="crrav-toprank">${i + 1}</span>
-          <span class="crrav-toptitle">${escapeHtml(s.title)}</span>
-          <span class="crrav-topmeta">${s.episodes} ép.${s.seconds ? ` \u00b7 ${Math.round(s.seconds / 3600)} h` : ''}</span>
+        <table class="crrav-table">
+          <thead><tr><th>#</th><th>Titre</th><th class="crrav-tnum">Épisodes</th><th class="crrav-tnum">Temps</th></tr></thead>
+          <tbody>
+            ${topLists.map((s, i) => `<tr>
+              <td>${i + 1}</td>
+              <td class="crrav-ttitle"><a href="${escapeHtml(seriesUrl(s.id, s.slug))}">${escapeHtml(s.title)}</a></td>
+              <td class="crrav-tnum">${s.episodes}</td>
+              <td class="crrav-tnum">${s.seconds ? Math.round(s.seconds / 3600) + ' h' : '—'}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>` : '';
+
+    // — (v7) Studios / formats / sources — comptés sur les mêmes séries que les genres,
+    // même style de barres (crrav-gbar), aucune requête (déjà en cache AniList).
+    const barBlock = (entries, max) => entries.map(([name, n]) =>
+      `<div class="crrav-gbar">
+        <span class="crrav-gbar-l">${escapeHtml(name)}</span>
+        <span class="crrav-gbar-t"><i style="width:${Math.round((n / max) * 100)}%"></i></span>
+        <span class="crrav-gbar-n">${n}</span>
+      </div>`).join('');
+    const maxStudio = st.topStudios.length ? st.topStudios[0][1] : 1;
+    const maxFormat = st.formatBreakdown.length ? st.formatBreakdown[0][1] : 1;
+    const maxSource = st.sourceBreakdown.length ? st.sourceBreakdown[0][1] : 1;
+    const aniEmptyNote = `<p class="crrav-schedempty">Pas encore assez de données AniList —
+      ça se complète tout seul en tâche de fond au fil des chargements.</p>`;
+    const studiosBlock = st.knownAniFields ? `
+      <div class="crrav-statcols">
+        <section class="crrav-statcard">
+          <h3>🎬 Studios les plus suivis</h3>
+          ${st.topStudios.length ? barBlock(st.topStudios, maxStudio) : aniEmptyNote}
+        </section>
+        <section class="crrav-statcard">
+          <h3>📺 Formats</h3>
+          ${st.formatBreakdown.length ? barBlock(st.formatBreakdown, maxFormat) : aniEmptyNote}
+        </section>
+        <section class="crrav-statcard">
+          <h3>📖 Œuvres sources</h3>
+          ${st.sourceBreakdown.length ? barBlock(st.sourceBreakdown, maxSource) : aniEmptyNote}
+        </section>
+      </div>` : `<p class="crrav-schedempty">Studios/formats/sources apparaîtront ici une fois
+        l'enrichissement AniList passé sur tes séries (Réglages → AniList).</p>`;
+
+    // — (v7) Chronologie par décennie — mini schéma en barres, 0 requête (aniSeasonYear déjà
+    // en cache, repli sur la date de dernier épisode connu si absente).
+    const maxDecade = st.timeline.length ? Math.max(...st.timeline.map(([, n]) => n)) : 1;
+    const timelineBlock = st.timeline.length ? `
+      <div class="crrav-timeline">
+        ${st.timeline.map(([decade, n]) => `<div class="crrav-tlbar">
+          <span class="crrav-tlbar-n">${n}</span>
+          <div class="crrav-tlbar-fill" style="height:${Math.max(6, Math.round((n / maxDecade) * 92))}%"></div>
+          <span class="crrav-tlbar-l">${decade}s</span>
+        </div>`).join('')}
+      </div>
+      <p class="crrav-schedhint" style="margin-top:10px">Décennie de sortie de tes séries vues (année AniList, ou date du dernier épisode connu à défaut).</p>`
+      : `<p class="crrav-schedempty">Chronologie disponible une fois l'enrichissement AniList passé sur tes séries.</p>`;
+
+    // — (v7) Toi vs AniList — comparaison de notes, uniquement sur ce que TU as noté ET
+    // qu'AniList a matché (pas d'extrapolation). meanScore/20 pour ramener sur 5 ★.
+    const sc = st.scoreCompare;
+    const deltaCell = (mine, ani) => {
+      const d = mine - ani;
+      const cls = d > 0.15 ? 'crrav-tup' : d < -0.15 ? 'crrav-tdown' : '';
+      const sign = d > 0 ? '+' : '';
+      return `<td class="crrav-tnum ${cls}">${sign}${d.toFixed(1)}</td>`;
+    };
+    const scoreRows = sc ? (() => {
+      const seen = new Set();
+      const rows = [];
+      for (const x of [...sc.harshest, ...sc.kindest]) {
+        if (seen.has(x.id)) continue;
+        seen.add(x.id); rows.push(x);
+      }
+      return rows;
+    })() : [];
+    const scoreBlock = sc ? `
+      <p class="crrav-schedhint">Comparé sur <b>${sc.n}</b> série${sc.n > 1 ? 's' : ''} à la fois notée${sc.n > 1 ? 's' : ''}
+        par toi et reconnue${sc.n > 1 ? 's' : ''} par AniList. Ta moyenne : <b>★ ${sc.avgMine.toFixed(2)}</b>
+        — moyenne AniList (ramenée sur 5) : <b>★ ${sc.avgAni.toFixed(2)}</b>.</p>
+      <table class="crrav-table">
+        <thead><tr><th>Titre</th><th class="crrav-tnum">Toi</th><th class="crrav-tnum">AniList</th><th class="crrav-tnum">Écart</th></tr></thead>
+        <tbody>
+          ${scoreRows.map((x) => `<tr>
+            <td class="crrav-ttitle"><a href="${escapeHtml(seriesUrl(x.id, x.slug))}">${escapeHtml(x.title)}</a></td>
+            <td class="crrav-tnum">★ ${x.mine.toFixed(1)}</td>
+            <td class="crrav-tnum">★ ${x.ani.toFixed(1)}</td>
+            ${deltaCell(x.mine, x.ani)}
+          </tr>`).join('')}
+        </tbody>
+      </table>` : `<p class="crrav-schedempty">Note au moins une série que tu suis pour voir comment
+        tes notes se comparent à la moyenne AniList.</p>`;
+
+    // — (v7) Activité récente — dernière date de visionnage par série, aucune requête.
+    const activityBlock = st.recentActivity.length ? `
+      <div class="crrav-activity">
+        ${st.recentActivity.map((s) => `<a class="crrav-actrow" href="${escapeHtml(seriesUrl(s.id, s.slug))}">
+          <span class="crrav-actdot"></span>
+          <span class="crrav-acttitle">${escapeHtml(s.title)}</span>
+          <span class="crrav-acttime">${fmtRelDay(s.ts)}</span>
         </a>`).join('')}
       </div>` : '';
 
@@ -8406,9 +8996,16 @@
           </section>
         </div>`)}
 
+        ${accordion('studios', '🎬', 'Studios, formats & sources', studiosBlock)}
+
+        ${accordion('chronologie', '🕰️', 'Chronologie', timelineBlock)}
+
+        ${accordion('scorecompare', '⚖️', 'Toi vs AniList', scoreBlock)}
+
         ${accordion('faits', '🏆', 'Faits marquants', `
         <div class="crrav-hlgrid">${hlCards}${factCards}</div>
-        ${almostBlock}`)}
+        ${almostBlock}
+        ${activityBlock ? `<div class="crrav-almost"><h4>🕓 Activité récente</h4>${activityBlock}</div>` : ''}`)}
         ${topListsBlock}
       </div>
 
@@ -8792,11 +9389,17 @@
     const topBlock = (h.topSeries && h.topSeries.length) ? `
       <div class="crrav-topseries">
         <h3>Tes séries hors listes les plus regardées</h3>
-        ${h.topSeries.map((s, i) => `<a class="crrav-toprow" href="${crSeriesUrl(s.id)}">
-          <span class="crrav-toprank">${i + 1}</span>
-          <span class="crrav-toptitle">${escapeHtml(s.title)}</span>
-          <span class="crrav-topmeta">${s.episodes} ép.${s.seconds ? ` \u00b7 ${Math.round(s.seconds / 3600)} h` : ''}</span>
-        </a>`).join('')}
+        <table class="crrav-table">
+          <thead><tr><th>#</th><th>Titre</th><th class="crrav-tnum">Épisodes</th><th class="crrav-tnum">Temps</th></tr></thead>
+          <tbody>
+            ${h.topSeries.map((s, i) => `<tr>
+              <td>${i + 1}</td>
+              <td class="crrav-ttitle"><a href="${crSeriesUrl(s.id)}">${escapeHtml(s.title)}</a></td>
+              <td class="crrav-tnum">${s.episodes}</td>
+              <td class="crrav-tnum">${s.seconds ? Math.round(s.seconds / 3600) + ' h' : '—'}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
       </div>` : '';
 
     const maxBg = h.beyondGenres && h.beyondGenres.length ? h.beyondGenres[0][1] : 1;
@@ -8921,25 +9524,17 @@
     // Bandeau « Proches de X » : affiché UNIQUEMENT tant que le filtre genre correspond encore
     // à la série source. Dès que l'utilisateur touche aux chips, le contexte n'est plus fidèle,
     // on masque le bandeau (le filtre, lui, reste). Cas « genres introuvables » : tant qu'aucun
-    // filtre n'est posé.
-    const sameSet = (a, b) => {
-      const A = new Set((a || []).map((x) => String(x).toLowerCase()));
-      const B = new Set((b || []).map((x) => String(x).toLowerCase()));
-      if (A.size !== B.size) return false;
-      for (const x of A) if (!B.has(x)) return false;
-      return true;
-    };
+    // filtre n'est posé. (sameSet : fonction partagée, voir plus haut.)
     const sim = D.similarTo;
     const simActive = sim && (sim.genres.length
       ? sameSet(f.discoverCatsIn, sim.genres)
       : f.discoverCatsIn.length === 0);
-    const profile = buildTasteProfile();
+    const profile = activeSimilarProfile() || buildTasteProfile();
 
     let body;
-    if (D.loading) {
-      // Statut + bouton Interrompre affichés dans la barre d'activité (renderActivityBar,
-      // sticky en haut) plutôt qu'ici : en pied de grille, sous 12 squelettes de cartes,
-      // il fallait défiler pour les voir.
+    if (D.loading && !list.length) {
+      // Rien encore trouvé : squelettes classiques. Le statut + le bouton Interrompre sont
+      // dans la barre d'activité (renderActivityBar, sticky en haut), pas ici.
       body = `<div class="crrav-grid">${Array.from({ length: 12 },
         () => '<div class="crrav-skel"><div></div></div>').join('')}</div>`;
     } else if (D.error) {
@@ -8957,7 +9552,14 @@
       const cardFn = useList
         ? (f.showIgnoredDiscover ? discoverIgnoredListRow : (x) => discoverListRow(x, profile))
         : (f.showIgnoredDiscover ? discoverIgnoredCard : (x) => discoverCard(x, profile));
-      body = `<div class="crrav-grid${useList ? ' crrav-list' : ''}">${list.map(cardFn).join('')}</div>`;
+      // (streaming) Pendant que le scan continue, on montre déjà les pépites trouvées et on
+      // ajoute quelques squelettes en fin de grille pour signaler que d'autres arrivent —
+      // surtout utile en 🎲 légendaire, où elles tombent au compte-gouttes. La barre
+      // d'activité (en haut) porte la progression détaillée et le bouton Interrompre.
+      const tail = D.loading && !f.showIgnoredDiscover && !useList
+        ? Array.from({ length: 4 }, () => '<div class="crrav-skel"><div></div></div>').join('')
+        : '';
+      body = `<div class="crrav-grid${useList ? ' crrav-list' : ''}">${list.map(cardFn).join('')}${tail}</div>`;
     }
 
     return `
@@ -8968,8 +9570,12 @@
         </p>
         ${simActive ? `
         <div class="crrav-simbar">
-          <span class="crrav-simbar-txt">${sim.genres.length
-            ? `🪄 Proches de « <b>${escapeHtml(sim.title)}</b> » · ${sim.genres.map(escapeHtml).join(', ')}`
+          <span class="crrav-simbar-txt">${D.similarFetching
+            ? `🪄 Récupération des tags AniList de « <b>${escapeHtml(sim.title)}</b> »…`
+            : sim.tags && sim.tags.length
+            ? `🪄 Proches de « <b>${escapeHtml(sim.title)}</b> » · tri par tags AniList (${sim.tags.length})`
+            : sim.genres.length
+            ? `🪄 Proches de « <b>${escapeHtml(sim.title)}</b> » · genres seuls (tags AniList indisponibles) · ${sim.genres.map(escapeHtml).join(', ')}`
             : `🪄 Genres de « <b>${escapeHtml(sim.title)}</b> » introuvables — séries populaires que tu n'as pas vues`}</span>
           <button class="crrav-simbar-x" data-act="clear-similar" title="Réinitialiser la découverte" aria-label="Réinitialiser">✕</button>
         </div>` : ''}
@@ -9001,6 +9607,10 @@
           </select>
           ${!D.loading && D.series.length && !f.showIgnoredDiscover
             ? '<button class="crrav-sync" data-act="more-discover">🔄 30 autres pépites</button>'
+            : ''}
+          ${!D.loading && list.length && !f.showIgnoredDiscover
+            ? `<button class="crrav-sync crrav-ignoreall" data-act="ignore-all-discover"
+                 title="Ignorer toutes les pépites actuellement affichées — elles ne seront plus jamais proposées">🙈 Tout ignorer (${list.length})</button>`
             : ''}
           ${!D.loading && !f.showIgnoredDiscover
             ? `<button class="crrav-sync" data-act="legendary-discover"
@@ -10730,7 +11340,7 @@
           : STATE.tab === 'stats' ? renderStats()
           : STATE.tab === 'calendrier' ? renderCalendrier()
           : renderSuivi()}`
-      + settingsSheet + listPickerSheet;
+      + settingsSheet + listPickerSheet + confirmModalHtml();
 
     // Restauration du défilement, juste après le remplacement du DOM.
     if (prevScroll > 0 && content.scrollHeight > content.clientHeight) content.scrollTop = prevScroll;
@@ -11019,7 +11629,14 @@
         const sim = e.target.closest('[data-similar]');
         if (sim) {
           const knownCats = sim.dataset.similarCats ? sim.dataset.similarCats.split('|') : [];
-          discoverSimilarTo(sim.dataset.similar, sim.dataset.similarTitle, knownCats);
+          // Tags encodés compact en [nom, rank] côté similarBtn — décodés ici vers
+          // {name, rank}, la forme attendue par candidateTasteVector/buildSingleSeriesProfile.
+          let knownTags = [];
+          if (sim.dataset.similarTags) {
+            try { knownTags = JSON.parse(sim.dataset.similarTags).map(([name, rank]) => ({ name, rank })); }
+            catch (e) { safeCall.log(e, 'parse data-similar-tags'); }
+          }
+          discoverSimilarTo(sim.dataset.similar, sim.dataset.similarTitle, knownCats, knownTags);
           return;
         }
         const ign = e.target.closest('[data-ignore]');
@@ -11063,6 +11680,22 @@
           STATE.listPicker = null;
           forceRender(); return;
         }
+        // ── Modale de confirmation générique (voir confirmModalHtml / STATE.confirmModal) ──
+        if (e.target.closest('[data-confirm-ok]')) {
+          e.preventDefault();
+          const m = STATE.confirmModal;
+          STATE.confirmModal = null;
+          if (m && typeof m.onConfirm === 'function') {
+            try { m.onConfirm(); } catch (err) { safeCall.log(err, 'confirmModal:onConfirm'); }
+          }
+          forceRender(); return;
+        }
+        if (e.target.closest('[data-confirm-cancel]')
+          || (e.target.classList && e.target.classList.contains('crrav-confirm'))) {
+          e.preventDefault();
+          STATE.confirmModal = null;
+          forceRender(); return;
+        }
         // (9) cycle à trois états : neutre → garder → exclure → neutre.
         const catScoped = e.target.closest('[data-cat][data-catscope]');
         if (catScoped) {
@@ -11092,9 +11725,9 @@
           if (iIn === -1 && iEx === -1) IN.push(c);            // neutre → garder
           else if (iIn !== -1) { IN.splice(iIn, 1); EX.push(c); }  // garder → exclure
           else EX.splice(iEx, 1);                              // exclure → neutre
-          // Un clic manuel sur un genre sort du mode « baguette magique » (AND strict) :
-          // on repasse en filtre classique (OR), sinon cocher un 2e genre ne renverrait
-          // plus rien puisqu'aucune série ne cumule les deux par hasard.
+          // Un clic manuel sur un genre modifie le pré-filtre souple ('any' — au moins un
+          // genre en commun) ; ça sort aussi de facto de la baguette magique 🪄 dès que
+          // les genres affichés divergent de la série source (voir activeSimilarProfile).
           STATE.filters.discoverCatsInMode = 'any';
           saveFilters(); render(); return;
         }
@@ -11145,6 +11778,31 @@
         if (act.dataset.act === 'retry') refreshActive();
         if (act.dataset.act === 'reload') { location.reload(); return; }
         if (act.dataset.act === 'more-discover') refreshMoreDiscover();
+        if (act.dataset.act === 'ignore-all-discover') {
+          const toIgnore = visibleDiscover();   // exactement la « page actuelle » affichée
+          const n = toIgnore.length;
+          if (!n) return;
+          STATE.confirmModal = {
+            title: `Ignorer ${n} série${n > 1 ? 's' : ''} ?`,
+            message: `<p>Les <b>${n}</b> série${n > 1 ? 's' : ''} actuellement affichée${n > 1 ? 's' : ''} `
+              + `${n > 1 ? 'seront' : 'sera'} <b>définitivement écartée${n > 1 ? 's' : ''}</b> de la Découverte : `
+              + `elles ne te seront <b>plus jamais proposées</b>, y compris lors des prochains scans.</p>`
+              + `<p>Tu pourras toujours les restaurer une par une depuis le chip « Ignorées ».</p>`,
+            confirmLabel: `🙈 Ignorer ${n > 1 ? 'les ' + n : 'la série'}`,
+            danger: true,
+            onConfirm: () => {
+              const added = ignoreAll(toIgnore, 'discover');
+              // Pas besoin de vider STATE.discover.series : visibleDiscover les filtre déjà
+              // via IGNORED (la grille se vide aussitôt). On garde le pool intact pour que
+              // le bouton « 30 autres pépites » (conditionné à D.series.length) reste offert
+              // — sinon « Tout ignorer » laissait un cul-de-sac sans moyen de recharger.
+              LOG(`Découverte : ${added} série(s) ignorée(s) en bloc`);
+              forceRender();
+            },
+          };
+          forceRender();
+          return;
+        }
         if (act.dataset.act === 'relaunch-discover') relaunchDiscover();
         if (act.dataset.act === 'legendary-discover') legendaryHuntDiscover();
         if (act.dataset.act === 'dismiss-quota') {
@@ -11162,6 +11820,8 @@
         }
         if (act.dataset.act === 'clear-similar') {
           STATE.discover.similarTo = null;
+          STATE.discover.similarProfile = null;
+          STATE.discover.similarFetching = false;
           STATE.filters.discoverCatsIn = [];
           STATE.filters.discoverCatsInMode = 'any';
           STATE.discover.series = [];
