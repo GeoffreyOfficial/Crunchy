@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.0.0
+// @version      3.1.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.0.0';
+  const SCRIPT_VERSION = '3.1.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -78,16 +78,16 @@
     // votants très différentes (CR souvent plus généreux/moins de votants), un seuil
     // unique appliqué aux deux était soit trop laxiste sur l'un, soit trop strict sur
     // l'autre. Une note manquante côté source ne bloque toujours pas (voir plus bas).
-    discoverMinRatingCr: 4.2,
-    discoverMinRatingAni: 3.3,
+    discoverMinRatingCr: 3.8,
+    discoverMinRatingAni: 3.0,
     // Seuils 🏆/badge « très bien notée » — désormais UN PAR SOURCE (CR et AniList),
     // FIXES et INDÉPENDANTS des minimums d'entrée ci-dessus (voir discoverSignals).
     // Pour décrocher le bonus, la note CR (si connue) doit dépasser son propre seuil ET
     // la note AniList (si connue) doit dépasser le sien — pas juste l'une des deux.
-    discoverWellRatedThresholdCr: 4.3,
-    discoverWellRatedThresholdAni: 3.7,
+    discoverWellRatedThresholdCr: 4.1,
+    discoverWellRatedThresholdAni: 3.3,
     discoverSuperRatedThresholdCr: 4.5,
-    discoverSuperRatedThresholdAni: 4,
+    discoverSuperRatedThresholdAni: 3.8,
     // Bonus de score ajoutés quand la note franchit ces seuils (voir discoverSignals).
     // Avant, +0.5 fixe et invisible dans le code — désormais réglable au même titre que
     // les seuils eux-mêmes, pour que le poids de la note dans le score soit ajustable.
@@ -111,8 +111,8 @@
     // installations neuves et au bouton « Valeurs par défaut » : un réglage sauvegardé prime
     // toujours (voir applySettings). Le rapport « Pourquoi seulement X » (section 2ter) donne,
     // à partir de la distribution réelle de chaque scan, le seuil exact pour viser N pépites.
-    discoverLegendaryScore: 1.5,
-    discoverNotableScore: 1.0,
+    discoverLegendaryScore: 1.7,
+    discoverNotableScore: 1.2,
     // Poids du GOÛT NET (tasteScore, -1..1) dans le score final : score du goût = taste ×
     // ce multiplicateur.
     // (fix) Valeur adoptée comme défaut d'après tes essais : 2.5 — le goût pèse un peu moins,
@@ -182,7 +182,7 @@
     // classement popularité Crunchyroll disponible (jusqu'à épuisement réel), au lieu de
     // s'arrêter à un plafond de pages réglable — c'est justement ce qui permet de puiser
     // plus profond à chaque lancement plutôt que de retomber sur les mêmes candidats.
-    legendaryTarget: 15,       // 🎲 dé légendaire : nombre de LÉGENDAIRES visées (pas de candidats bruts)
+    legendaryTarget: 10,       // 🎲 dé légendaire : nombre de LÉGENDAIRES visées (pas de candidats bruts)
     // Historique des pépites légendaires déjà montrées (persisté en cache, pas un simple
     // Set en mémoire) : sans ça, un scan qui va « jusqu'au bout » retombe presque toujours
     // sur les mêmes séries en tête de popularité d'un lancement à l'autre, puisque le
@@ -728,6 +728,45 @@
     if (changed) persistState(APP_STATE);
   }
   migrateRecalibratedDefaults();
+
+  // Migration de RECALIBRAGE FORCÉE (v3.1.0) : contrairement à migrateRecalibratedDefaults
+  // ci-dessus (qui ne touche que les valeurs JAMAIS personnalisées), celle-ci impose les
+  // nouveaux seuils à TOUT le monde venant d'une version < 3.1.0, même si le réglage avait
+  // été modifié à la main — ce recalibrage corrige un déséquilibre du score jugé prioritaire
+  // sur la personnalisation existante. Ne s'exécute qu'UNE SEULE FOIS par installation (le
+  // marqueur APP_STATE.forcedSettingsVersion empêche toute réexécution une fois appliqué) :
+  // un réglage retouché ensuite par l'utilisateur n'est donc plus jamais écrasé après coup.
+  function compareVersions(a, b) {
+    const pa = String(a).split('.').map((n) => parseInt(n, 10) || 0);
+    const pb = String(b).split('.').map((n) => parseInt(n, 10) || 0);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+      const d = (pa[i] || 0) - (pb[i] || 0);
+      if (d !== 0) return d < 0 ? -1 : 1;
+    }
+    return 0;
+  }
+  const FORCED_SETTINGS_VERSION = '3.1.0';
+  function forceRecalibratedDefaults() {
+    const last = APP_STATE.forcedSettingsVersion || '0.0.0';
+    if (compareVersions(last, FORCED_SETTINGS_VERSION) >= 0) return;
+    if (!APP_STATE.settings || typeof APP_STATE.settings !== 'object') APP_STATE.settings = {};
+    Object.assign(APP_STATE.settings, {
+      discoverMinRatingCr: 3.8,
+      discoverMinRatingAni: 3.0,
+      legendaryTarget: 10,
+      discoverTasteWeight: 3,
+      discoverWellRatedThresholdCr: 4.1,
+      discoverWellRatedThresholdAni: 3.3,
+      discoverSuperRatedThresholdCr: 4.5,
+      discoverSuperRatedThresholdAni: 3.8,
+      discoverLegendaryScore: 1.7,
+      discoverNotableScore: 1.2,
+    });
+    APP_STATE.forcedSettingsVersion = FORCED_SETTINGS_VERSION;
+    persistState(APP_STATE);
+  }
+  forceRecalibratedDefaults();
+
   applySettings();
 
   // ─── Séries ignorées (masquées sans être marquées vues) ─────
