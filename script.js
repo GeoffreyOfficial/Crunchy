@@ -4391,7 +4391,7 @@
   }
 
   function buildDiscoverShortfallReport(ctx) {
-    const { target, foundCount, legendary, pagesScanned, maxPages, candidatesSeenTotal, rej, scoreSamples, stopReason, similarTitle } = ctx;
+    const { target, foundCount, legendary, pagesScanned, maxPages, candidatesSeenTotal, rej, scoreSamples, stopReason, similarTitle, similarRecTotal } = ctx;
     // (fix) Vocabulaire adapté : « pépite(s) » a du sens pour la Découverte générale
     // (dénicher des séries populaires jamais vues), mais pas pour la baguette magique 🪄
     // (chercher des séries PROCHES d'une série précise) — d'où les retours « ça parle de
@@ -4418,18 +4418,31 @@
     const topReason = rows[0] ? rows[0][0] : null;
 
     const activeFilters = [
-      `Note minimale : <b>CR ${CFG.discoverMinRatingCr}★</b> / <b>AniList ${CFG.discoverMinRatingAni}★</b>`,
+      // (fix) Le mode similaire force la note minimale à 0 (voir evaluateDiscoverCandidate /
+      // isSimilarMode) : afficher les seuils normaux de Découverte comme « actifs » était
+      // trompeur — ils ne s'appliquent pas du tout ici.
+      isSimilar
+        ? `Note minimale : <b>désactivée</b> (mode similaire — toutes les séries proches comptent, notées ou non)`
+        : `Note minimale : <b>CR ${CFG.discoverMinRatingCr}★</b> / <b>AniList ${CFG.discoverMinRatingAni}★</b>`,
       `Saisons maximum : <b>${CFG.discoverMaxSeasons}</b>`,
       `Genres exclus par défaut : ${CFG.discoverExcludeCategories.length ? '<b>' + CFG.discoverExcludeCategories.map(escapeHtml).join(', ') + '</b>' : '<i>aucun</i>'}`,
       f.discoverCatsIn.length ? `Genres gardés exclusivement (${f.discoverCatsInMode === 'all' ? 'TOUS requis' : 'au moins un'}) : <b>${f.discoverCatsIn.map(escapeHtml).join(', ')}</b>` : null,
       f.discoverCatsEx.length ? `Genres exclus en plus (manuel) : <b>${f.discoverCatsEx.map(escapeHtml).join(', ')}</b>` : null,
-      `Profondeur de scan : <b>classement popularité entier</b> (${CFG.discoverPageSize} séries/page, jusqu'à épuisement)`,
+      // (fix) « classement popularité entier » ne veut rien dire en mode similaire : le pool
+      // n'est pas un scan de popularité mais les recommandations AniList de la série source
+      // (avec repli par tags proches si elle n'en a pas d'exploitables).
+      isSimilar
+        ? `Source des candidats : <b>recommandations AniList</b> de la série source (repli par tags proches si aucune reco exploitable)`
+        : `Profondeur de scan : <b>classement popularité entier</b> (${CFG.discoverPageSize} séries/page, jusqu'à épuisement)`,
     ].filter(Boolean);
 
     // Conseils ciblés sur la cause de rejet dominante — chaque conseil pointe vers le
     // réglage exact à modifier dans Réglages → Découverte.
     const ADVICE = {
-      known: "La plupart des candidats croisés sont des séries que tu connais déjà (listes, historique, ignorées). C'est sain — essaie « 🔄 30 autres pépites » ou « 🎲 Dé légendaire » pour puiser plus profond dans le classement popularité.",
+      // (fix) « 🔄 30 autres pépites »/« 🎲 Dé légendaire » n'existent pas en mode similaire.
+      known: isSimilar
+        ? "La plupart des séries proposées comme proches sont des séries que tu connais déjà (listes, historique, ignorées). C'est sain — il n'y a simplement plus beaucoup d'inconnues proches de cette série précise."
+        : "La plupart des candidats croisés sont des séries que tu connais déjà (listes, historique, ignorées). C'est sain — essaie « 🔄 30 autres pépites » ou « 🎲 Dé légendaire » pour puiser plus profond dans le classement popularité.",
       genrePreBrowse: "Beaucoup de séries sont écartées par le filtre de genre. Vérifie tes chips « garder uniquement »/« exclure » sous les résultats, ou élargis « Genres exclus par défaut » dans Réglages → Découverte.",
       seasonsPreBrowse: `Beaucoup de séries dépassent ${CFG.discoverMaxSeasons} saison${CFG.discoverMaxSeasons > 1 ? 's' : ''}. Monte « Saisons maximum » dans Réglages → Découverte si tu es prêt·e à rattraper des séries plus longues.`,
       seasons: `Beaucoup de séries dépassent ${CFG.discoverMaxSeasons} saison${CFG.discoverMaxSeasons > 1 ? 's' : ''}. Monte « Saisons maximum » dans Réglages → Découverte.`,
@@ -4440,7 +4453,9 @@
         ? `Beaucoup de candidats passent les filtres mais restent sous le score légendaire (${CFG.discoverLegendaryScore}). Sur ce scan, le score max réellement atteint était de <b>${scoreStats.max.toFixed(2)}</b> — si c'est en-dessous ou tout juste au-dessus du seuil, baisse « Score minimum — légendaire » (par exemple vers ${Math.max(0, scoreStats.top25).toFixed(1)}, la borne des 25% meilleurs candidats de ce scan) ou monte « Poids du goût dans le score final » dans Réglages → Découverte.`
         : `Beaucoup de candidats passent les filtres mais restent sous le score légendaire (${CFG.discoverLegendaryScore}). Baisse « Score minimum — légendaire » ou monte « Poids du goût dans le score final » dans Réglages → Découverte.`,
     };
-    const mainAdvice = topReason ? ADVICE[topReason] : "Élargis un des filtres ci-dessous, ou relance plus tard : le classement popularité change en continu.";
+    const mainAdvice = topReason ? ADVICE[topReason] : (isSimilar
+      ? "Élargis un des filtres ci-dessous, ou réessaie avec une autre série proche comme point de départ : le nombre de vraies recommandations AniList pour un titre donné est limité."
+      : "Élargis un des filtres ci-dessous, ou relance plus tard : le classement popularité change en continu.");
     const extraAdvice = [];
     if (target > 0 && foundCount === 0) extraAdvice.push("Zéro résultat : commence par assouplir le filtre le plus haut dans le tableau ci-dessous, c'est lui qui coûte le plus de candidats.");
 
@@ -4450,11 +4465,17 @@
     const STOP = {
       exhausted: `le classement popularité a été <b>entièrement parcouru</b> (${pagesScanned} page${pagesScanned > 1 ? 's' : ''} — l'API Crunchyroll n'en sert pas davantage). Le scan va toujours jusqu'au bout : ce n'est donc jamais un plafond de pages qui manque ici.`,
       maxPages: `le scan a atteint son <b>filet de sécurité interne</b> (${maxPages} pages, anti-boucle-infinie) sans épuiser le classement — cas très inhabituel, relance ou regarde la console pour un éventuel comportement anormal de l'API.`,
+      // (fix) Pendant du 'exhausted' ci-dessus, mais pour le pool de candidats du mode
+      // similaire (recommandations AniList ± repli tags), qui n'a rien à voir avec un
+      // classement de popularité ni un nombre de pages.
+      similarExhausted: `${similarRecTotal != null ? `les <b>${similarRecTotal}</b> recommandations` : 'toutes les recommandations'} AniList disponibles pour « ${escapeHtml(similarTitle || '')} » (et, si besoin, le repli par tags proches) ont été <b>entièrement explorées</b>. Ce n'est pas un réglage qui manque : AniList ne propose tout simplement pas plus de séries proches identifiables pour ce titre en ce moment.`,
       cancelled: `tu as <b>interrompu</b> le scan avant la fin.`,
       target: '',
     };
     const PARAM_FIX = {
-      known: 'aucun réglage à toucher — ce sont des séries que tu connais déjà ; utilise « 🔄 30 autres pépites » ou « 🎲 Dé légendaire » pour puiser plus loin',
+      known: isSimilar
+        ? 'aucun réglage à toucher — ce sont des séries que tu connais déjà'
+        : 'aucun réglage à toucher — ce sont des séries que tu connais déjà ; utilise « 🔄 30 autres pépites » ou « 🎲 Dé légendaire » pour puiser plus loin',
       genrePreBrowse: '« Genres exclus par défaut » (Réglages → Découverte) ou les chips de genre sous les résultats',
       seasonsPreBrowse: `« Saisons maximum » — actuellement ${CFG.discoverMaxSeasons} (Réglages → Découverte)`,
       seasons: `« Saisons maximum » — actuellement ${CFG.discoverMaxSeasons} (Réglages → Découverte)`,
@@ -4518,8 +4539,15 @@
 
         <p style="margin:10px 0 4px"><b>1. Ce qui a été scanné</b></p>
         <ul style="margin:0 0 10px;padding-left:20px">
+          ${isSimilar ? `
+          <li>${similarRecTotal != null
+              ? `<b>${similarRecTotal}</b> recommandation${similarRecTotal > 1 ? 's' : ''} AniList reçue${similarRecTotal > 1 ? 's' : ''} pour « ${escapeHtml(similarTitle)} »`
+              : `Aucune recommandation communautaire exploitable pour « ${escapeHtml(similarTitle)} » — repli sur une recherche par tags proches`}</li>
+          <li>${candidatesSeenTotal} candidat${candidatesSeenTotal > 1 ? 's' : ''} au total examiné${candidatesSeenTotal > 1 ? 's' : ''}</li>
+          ` : `
           <li>${pagesScanned} page${pagesScanned > 1 ? 's' : ''} scannée${pagesScanned > 1 ? 's' : ''} (${CFG.discoverPageSize} séries/page, triées par popularité, classement parcouru jusqu'au bout)</li>
           <li>${candidatesSeenTotal} candidat${candidatesSeenTotal > 1 ? 's' : ''} au total examiné${candidatesSeenTotal > 1 ? 's' : ''}</li>
+          `}
           <li><b>${foundCount}</b> retenu${foundCount > 1 ? 's' : ''} sur les <b>${target}</b> visé${target > 1 ? 's' : ''}</li>
         </ul>
 
@@ -4554,9 +4582,14 @@
           ${activeFilters.map((l) => `<li>${l}</li>`).join('')}
         </ul>
 
+        ${!isSimilar ? `
         <p style="margin:10px 0 4px"><b>4. Comment le score « pépite » est calculé</b></p>
         ${scoreFormulaSchema()}
         <p style="margin:6px 0 10px;opacity:.85">Une série doit atteindre <b>${CFG.discoverNotableScore}</b> pour « notable » et <b>${CFG.discoverLegendaryScore}</b> pour « légendaire » ${legendary ? '(seul le score légendaire compte pour le quota en mode 🎲 Dé légendaire)' : '(informatif hors mode 🎲, n’écarte aucune série)'}.</p>
+        ` : `
+        <p style="margin:10px 0 4px"><b>4. Comment le classement par proximité fonctionne</b></p>
+        <p style="margin:0 0 10px;opacity:.85">En mode similaire, les séries retenues sont triées par proximité de genres/tags avec « ${escapeHtml(similarTitle)} » — pas par le score « pépite » de Découverte (celui-ci ne s'applique pas ici, sauf combiné au 🎲 Dé légendaire).</p>
+        `}
 
         <p style="margin:10px 0 4px"><b>5. Conseil</b></p>
         <p style="margin:0">${mainAdvice}</p>
@@ -4789,6 +4822,10 @@
     };
     let candidatesSeenTotal = 0;
     let pagesScanned = 0;
+    // (fix) Uniquement rempli en mode similaire — nombre de recommandations AniList reçues
+    // pour la série source, AVANT tout filtre. Sert au rapport de fin de scan, pour lequel
+    // « pages scannées » / « classement popularité » n'ont aucun sens en mode similaire.
+    let similarRecTotal = null;
     // (fix) Scores « pépite » de TOUS les candidats qui ont atteint le calcul de score
     // (mode 🎲 légendaire uniquement — c'est le seul mode où ce calcul a lieu pendant le
     // scan). Sert à afficher la VRAIE distribution des scores obtenus dans le rapport
@@ -5239,6 +5276,11 @@
           { accountId, REJ, D },
           (page, maxP) => onProgress(stepLabel(3, 3, `AniList ${page}/${maxP}`)),
         );
+        // (fix) Sans ça, candidatesSeenTotal restait à 0 en mode similaire (la boucle de scan
+        // popularité CR, seule à l'incrémenter jusqu'ici, ne tourne jamais dans ce mode) — le
+        // rapport de fin de scan affichait alors « 0 candidat examiné » à côté de « 5 retenus ».
+        candidatesSeenTotal += (aniFound.considered || 0);
+        if (aniFound.similarRecTotal != null) similarRecTotal = aniFound.similarRecTotal;
         for (const x of aniFound) {
           if (!D.similarTo && matches.length >= target) break;
           const candidate = {
@@ -5267,8 +5309,16 @@
       }
 
       // Si la boucle n'a pas été coupée en cours (cancel/exhausted), c'est soit la cible
-      // atteinte, soit le plafond de pages.
-      if (stopReason === undefined) stopReason = matches.length >= target ? 'target' : 'maxPages';
+      // atteinte, soit — en mode normal/légendaire — le plafond de pages. En mode similaire,
+      // la boucle de scan popularité CR ci-dessus ne tourne JAMAIS (voir `!D.similarTo` sur
+      // le `for`) : 'maxPages' (qui parle de « classement popularité » et de pages) n'y a donc
+      // aucun sens — le vrai frein est le nombre fini de recommandations/candidats AniList.
+      if (stopReason === undefined && D.cancelRequested) stopReason = 'cancelled';
+      if (stopReason === undefined) {
+        stopReason = matches.length >= target
+          ? 'target'
+          : (D.similarTo ? 'similarExhausted' : 'maxPages');
+      }
 
       // (fix) Curseur de reprise (voir loadLegendaryCursor) : mémorisé pour TOUT arrêt sauf
       // 'exhausted', où on revient à 0 pour rebalayer depuis le haut du classement au
@@ -5341,6 +5391,7 @@
       const shortfallCtx = {
         target, foundCount: found.length, legendary,
         pagesScanned, maxPages, candidatesSeenTotal, rej: REJ, scoreSamples, stopReason,
+        similarRecTotal,
         // (fix) Le rapport parlait toujours de « pépites »/légendaire, même déclenché
         // depuis la baguette magique 🪄 (mode « séries similaires à X ») — vocabulaire
         // de Découverte hors sujet dans ce contexte. On transmet le titre source pour
@@ -5746,6 +5797,12 @@
       if (!nt) return false;
       return knownTitlesNorm.some((k) => k === nt || k.includes(nt) || nt.includes(k) || aniDice(k, nt) >= 0.82);
     };
+    // (fix) Nécessaire pour que le rapport « Pourquoi seulement X/Y » ait un sens en mode
+    // similaire : jusqu'ici candidatesSeenTotal restait à 0 (rempli uniquement par la boucle
+    // de scan popularité CR, jamais exécutée en mode similaire), donnant un rapport avec
+    // « 0 candidat examiné » à côté de « 5 retenus ». `considered` compte ici toute fiche
+    // AniList réellement passée en revue (reco ou repli tag_in), quel que soit le pool.
+    let considered = 0;
 
     // Traitement partagé d'UNE fiche AniList : filtres locaux gratuits → résolution CR →
     // mise en cache AniList → panel CR → évaluation complète. Pousse dans `found` si retenue.
@@ -5755,11 +5812,15 @@
       if (D.cancelRequested || found.length >= target) return;
       if (!m || m.id == null) return;
       if (IGNORED.has('ani:' + m.id)) return;
+      considered++;
       const genresFr = translateAniGenres(m.genres || []);
       if (genresFr.length && categoriesRejectedByGenre(genresFr)) return;
       const title = aniPrimaryTitle(m) || (m.title && m.title.native) || '';
       if (!title) return;
-      if (isKnownTitle(title)) return;
+      // (fix) Rejet silencieux jusqu'ici : le rapport de fin de scan ne pouvait donc jamais
+      // expliquer « déjà connue » comme frein en mode similaire, alors que c'est souvent la
+      // raison n°1 (recommandations d'une série qu'on a déjà vue/suit).
+      if (isKnownTitle(title)) { REJ.known++; return; }
       let cr;
       try { cr = await resolveCrunchyrollForPremiere(m); }
       catch (e) { safeCall.log(e, 'scanAnilistPopularity:resolve'); return; }
@@ -5785,11 +5846,17 @@
     if (D.similarTo && D.similarTo.title) {
       const recMedia = await fetchAnilistSimilar(D.similarTo);
       if (recMedia && recMedia.length) {
-        if (onProgress) onProgress(1, 1);
-        for (const m of recMedia) {
+        found.similarRecTotal = recMedia.length;   // (fix) pour le rapport : « X recos AniList »
+        // (fix) onProgress(1,1) une seule fois avant la boucle figeait la barre sur
+        // « AniList 1/1 » pendant tout le traitement des recommandations (résolution CR +
+        // fiche + évaluation par série, potentiellement long) — on avance maintenant le
+        // compteur À CHAQUE recommandation traitée, comme pour la pagination tag_in plus bas.
+        for (let i = 0; i < recMedia.length; i++) {
           if (D.cancelRequested || anilistCooldownRemainingMs() > 0 || found.length >= target) break;
-          await processMedia(m);
+          if (onProgress) onProgress(i + 1, recMedia.length);
+          await processMedia(recMedia[i]);
         }
+        found.considered = considered;
         if (found.length) return found;   // recommandations exploitées : on s'y tient
         // sinon (aucune reco résolue vers CR) → repli tag_in ci-dessous
       }
@@ -5825,6 +5892,7 @@
         await processMedia(m);
       }
     }
+    found.considered = considered;
     return found;
   }
 
