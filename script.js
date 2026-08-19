@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      2.195.0
+// @version      3.0.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '2.195.0';
+  const SCRIPT_VERSION = '3.0.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -254,23 +254,33 @@
   // anilist.co peut donc être bloqué par le navigateur (« NetworkError when attempting to
   // fetch resource », sans détail CORS/HTTP exploitable). GM_xmlhttpRequest s'exécute hors
   // du contexte de la page (sandbox du gestionnaire de scripts) et n'est PAS soumis à cette
-  // CSP — d'où le grant @connect anilist.co dans l'en-tête. Repli sur fetch() si l'API GM
-  // n'est pas disponible (ancien gestionnaire, ou script lancé hors extension) : ça peut
-  // remarcher selon la CSP réellement en place, mieux vaut essayer que renoncer d'office.
+  // CSP — d'où le grant @connect anilist.co dans l'en-tête.
+  //
+  // (fix v3.0.0) Sur iPhone (Tampermonkey pour Safari iOS), GM_xmlhttpRequest EXISTE (la
+  // fonction est bien présente, donc l'ancienne détection statique la choisissait) mais
+  // échoue ou reste muette pour anilist.co dans certaines configurations — alors que
+  // fetch() direct, lui, passe très bien sur cette même plateforme. Sur Android/desktop
+  // c'est souvent l'inverse : fetch() est bloqué par la CSP et seul GM_xmlhttpRequest
+  // fonctionne. Il n'y a donc pas UN canal correct par OS à coder en dur : le choix doit se
+  // faire dynamiquement, à l'usage. Stratégie : à chaque appel, on essaie le canal qui a
+  // réussi la dernière fois (GM par défaut tant qu'aucun n'a encore réussi) ; s'il rejette
+  // (cas d'un canal « bloqué » qui échoue vite, comme sur iPhone), on bascule aussitôt sur
+  // l'autre canal avant de remonter l'échec à l'appelant — sans délai artificiel ajouté ici,
+  // pour ne pas raccourcir le budget déjà accordé par l'appelant (withDeadline 16 s dans
+  // anilistQuery) aux requêtes simplement lentes mais qui aboutiraient. Le canal gagnant est
+  // mémorisé pour les appels suivants (pas de double tentative permanente une fois le bon
+  // canal identifié), mais on retente l'autre s'il se remet à échouer (réseau qui change,
+  // extension qui se met à jour…). Un canal totalement muet (aucun callback, jamais — cf. le
+  // bug déjà connu des onglets Firefox Android en arrière-plan) reste couvert par ce même
+  // withDeadline de l'appelant, exactement comme avant ce correctif.
   const GM_XHR = (typeof GM_xmlhttpRequest === 'function') ? GM_xmlhttpRequest
     : (typeof GM !== 'undefined' && typeof GM.xmlHttpRequest === 'function') ? GM.xmlHttpRequest
     : null;
 
-  function externalFetch(url, opts = {}) {
-    if (!GM_XHR) {
-      // Canal fetch : on renvoie le MÊME contrat que le canal GM (dont getHeader), pour que
-      // l'appelant n'ait pas à savoir quel canal a servi.
-      return RAW_FETCH(url, opts).then((res) => ({
-        ok: res.ok, status: res.status,
-        json: () => res.json(), text: () => res.text(),
-        getHeader: (nm) => { try { return res.headers.get(nm); } catch (_) { return null; } },
-      }));
-    }
+  let externalChannelPreference = null; // 'gm' | 'fetch' | null (pas encore déterminé)
+
+  function gmFetch(url, opts) {
+    if (!GM_XHR) return Promise.reject(new Error('GM_xmlhttpRequest indisponible'));
     return new Promise((resolve, reject) => {
       const control = GM_XHR({
         method: opts.method || 'GET',
@@ -311,6 +321,42 @@
         opts.signal.addEventListener('abort', () => control.abort());
       }
     });
+  }
+
+  function rawFetchChannel(url, opts) {
+    // Canal fetch : on renvoie le MÊME contrat que le canal GM (dont getHeader), pour que
+    // l'appelant n'ait pas à savoir quel canal a servi.
+    return RAW_FETCH(url, opts).then((res) => ({
+      ok: res.ok, status: res.status,
+      json: () => res.json(), text: () => res.text(),
+      getHeader: (nm) => { try { return res.headers.get(nm); } catch (_) { return null; } },
+    }));
+  }
+
+  async function externalFetch(url, opts = {}) {
+    // (fix v3.0.0) PAS de délai court artificiel ici : l'appelant (anilistQuery) enveloppe
+    // déjà tout l'appel dans un withDeadline de 16 s — ajouter un second couperet plus court
+    // à cet étage couperait aussi des requêtes simplement LENTES (mobile en mauvaise
+    // réception) qui auraient fini par réussir, alors que le vrai bug visé (canal qui
+    // échoue tout de suite, cf. AniList bloqué sur iPhone) se résout déjà par un rejet
+    // rapide et naturel du canal cassé, sans avoir besoin d'un chrono dédié. Un canal qui
+    // resterait totalement muet (aucun callback, jamais) sans jamais rejeter reste couvert
+    // par le withDeadline de l'appelant, exactement comme avant ce correctif.
+    const order = externalChannelPreference === 'fetch' ? ['fetch', 'gm'] : ['gm', 'fetch'];
+    let lastErr = null;
+    for (const channel of order) {
+      if (channel === 'gm' && !GM_XHR) continue;
+      try {
+        const res = channel === 'gm' ? await gmFetch(url, opts) : await rawFetchChannel(url, opts);
+        externalChannelPreference = channel; // mémorisé : les prochains appels partent d'ici
+        return res;
+      } catch (e) {
+        lastErr = e;
+        // Annulation volontaire (scan interrompu, etc.) : inutile d'essayer l'autre canal.
+        if (opts.signal && opts.signal.aborted) throw e;
+      }
+    }
+    throw lastErr || new Error('externalFetch : aucun canal réseau disponible');
   }
 
   // Garde-fou universel « horloge murale ». Certaines requêtes — surtout via
@@ -2480,6 +2526,7 @@
       images: { poster_tall: posterImg ? [[posterImg]] : [] },
       series_metadata: {
         season_count: meta.season_count,
+        episode_count: meta.episode_count,   // total TOUTES saisons (voir panelEpisodeCount)
         // Genres réduits à des chaînes simples (extractGenres les accepte tels quels) :
         // on jette les objets tenant_categories (localization multi-langue, slugs, ids…).
         tenant_categories: extractGenres(panel),
@@ -2520,7 +2567,12 @@
   // quota, voir plus haut).
   async function getSeriesPanel(seriesId) {
     const cached = cacheGet('series:' + seriesId, 180 * DAY);
-    if (cached) return cached;
+    // (fix) Les panels mis en cache AVANT l'ajout d'episode_count (voir slimPanel) n'ont pas
+    // ce champ : on les considère périmés pour forcer UN re-fetch qui le récupérera (puis
+    // re-caché), au lieu de retomber à chaque scan sur l'énumération CR coûteuse des épisodes.
+    // Le nouveau format a TOUJOURS la clé episode_count dans series_metadata (même valeur
+    // undefined si la source ne la donnait pas) → discriminateur fiable ancien/nouveau format.
+    if (cached && cached.series_metadata && ('episode_count' in cached.series_metadata)) return cached;
     const r = await api(`/content/v2/cms/series/${seriesId}`, { locale: CFG.locale });
     const panel = (r.data || [])[0];
     if (!panel) return panel;
@@ -2692,6 +2744,17 @@
   function panelSeasons(p) {
     const m = (p && p.series_metadata) || p || {};
     const n = m.season_count;
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }
+
+  // Nombre TOTAL d'épisodes (toutes saisons confondues) d'après le panel série Crunchyroll
+  // (series_metadata.episode_count) : gratuit (déjà dans la réponse browse / le panel en
+  // cache), et surtout correct pour les séries multi-saisons — contrairement au compte
+  // AniList qui ne reflète qu'une saison/cour. Sert à estimer la durée totale sans récupérer
+  // les épisodes de chaque saison (voir evaluateDiscoverCandidate). null si absent.
+  function panelEpisodeCount(p) {
+    const m = (p && p.series_metadata) || p || {};
+    const n = m.episode_count;
     return Number.isFinite(n) && n > 0 ? n : null;
   }
 
@@ -4441,8 +4504,14 @@
   // pouvoir s'arrêter net sur annulation). Retourne un candidat INTERMÉDIAIRE
   // (categories/tags pas encore complétés par AniList en mode légendaire — géré par
   // l'appelant) ou null si le candidat est rejeté ou le scan annulé en cours de route.
-  async function evaluateDiscoverCandidate(p, ctx) {
+  async function evaluateDiscoverCandidate(p, ctx, opts) {
     const { accountId, REJ, D } = ctx;
+    // (perf) En mode légendaire, on DIFFÈRE la récupération des épisodes (l'étape la plus
+    // chère : saisons + épisodes par saison + playheads) : seul le SCORE décide si une
+    // candidate est légendaire, et il n'utilise pas les épisodes. On ne les paiera donc que
+    // pour les légendaires réellement retenues (voir fetchCandidateEpisodes, appelé après le
+    // filtre de score dans loadDiscover) — pas pour la majorité rejetée ensuite.
+    const deferEpisodes = !!(opts && opts.deferEpisodes);
     // (fix) Points de sortie précoce à CHAQUE étape (pas seulement au tout début) :
     // un candidat déjà en vol au moment d'une annulation s'arrête net à la prochaine
     // étape plutôt que de dérouler tout son pipeline avant de s'arrêter.
@@ -4460,9 +4529,10 @@
     // filtre de genre qui fait AUTORITÉ. Placé avant note/épisodes : on économise
     // ces requêtes pour les séries que le genre écarte de toute façon.
     let categories = extractGenres(p);
+    let fullPanel = null;
     if (!categories.length) {
-      const full = await getSeriesPanel(p.id);
-      if (full) categories = extractGenres(full);
+      fullPanel = await getSeriesPanel(p.id);
+      if (fullPanel) categories = extractGenres(fullPanel);
     }
     // (fix) Fusion GRATUITE avec un éventuel cache AniList déjà présent (même
     // série croisée ailleurs — Suivi, Hors listes, un scan Découverte précédent, OU
@@ -4502,19 +4572,77 @@
     if (aniScore != null && (aniScore / 20) < minRatingAni) { REJ.rating++; return null; }
     if (D.cancelRequested) return null;
 
-    // 4. épisodes + progression : le plus cher, réservé au dernier carré
+    // 4. épisodes + durée. (perf) On n'énumère plus les épisodes de CHAQUE saison côté
+    // Crunchyroll (1 requête /seasons + 1 /episodes par saison — l'étape la plus chère).
+    // On prend le nombre TOTAL d'épisodes (toutes saisons) directement dans le panel série
+    // CR (series_metadata.episode_count, voir panelEpisodeCount) — gratuit et correct pour
+    // les séries multi-saisons — et on estime la durée totale via la durée par épisode
+    // d'AniList : durée totale ≈ nb total d'épisodes × durée/épisode. Estimation assumée
+    // (« durée moyenne × nombre suffit pour Découverte »), mais qui couvre bien TOUTES les
+    // saisons, contrairement au seul compte AniList (une saison/cour).
+    //
+    // Le SEUL besoin qui imposait encore l'énumération CR est le filet « déjà commencée »
+    // (playheads), et il ne tourne que si l'historique est INCOMPLET. Donc :
+    //   • historique complet + episode_count connu → estimation gratuite, zéro requête ;
+    //   • sinon → repli sur l'énumération CR exacte (fetchCandidateEpisodes), différée après
+    //     le filtre de score en mode légendaire (deferEpisodes).
     let episodes = 0;
     let secTotal = 0;
     let maxAir = null;          // date du dernier épisode sorti → tri « publication récente »
+    // Total d'épisodes : panel browse d'abord (gratuit), sinon panel complet (cache 90 j,
+    // souvent déjà récupéré ci-dessus pour les genres).
+    let totalEps = panelEpisodeCount(p);
+    if (totalEps == null) {
+      if (!fullPanel) fullPanel = await getSeriesPanel(p.id);
+      totalEps = panelEpisodeCount(fullPanel);
+    }
+    const haveEstimate = historyComplete && totalEps != null;
+    if (haveEstimate) {
+      episodes = totalEps;
+      secTotal = secTotalFromAni(totalEps, cachedAni);   // 0 si durée AniList pas encore connue → complétée à l'enrichissement
+      maxAir = aniMaxAir(cachedAni);
+    } else if (!deferEpisodes) {
+      const epsOk = await fetchCandidateEpisodes({ p, ctx });
+      if (!epsOk.ok) return null;   // déjà commencée (playheads) ou erreur → exclue par prudence
+      episodes = epsOk.episodes;
+      secTotal = epsOk.secTotal;
+      maxAir = epsOk.maxAir;
+    }
+    if (D.cancelRequested) return null;
+
+    // `epsPending` = énumération CR encore à faire après le filtre de score (mode légendaire
+    // SANS estimation gratuite : historique incomplet, ou panel sans episode_count).
+    return { p, seasons, categories, tags, rating, aniScore, episodes, secTotal, maxAir,
+      epsPending: deferEpisodes && !haveEstimate };
+  }
+
+  // Durée totale ESTIMÉE (secondes) = nb total d'épisodes × durée/épisode déclarée AniList
+  // (minutes). 0 si la durée AniList n'est pas (encore) connue — complétée à l'enrichissement.
+  function secTotalFromAni(episodeCount, ani) {
+    const durMin = ani && ani.duration;
+    if (!episodeCount || !Number.isFinite(durMin) || durMin <= 0) return 0;
+    return episodeCount * Math.round(durMin * 60);
+  }
+  // maxAir approximé depuis AniList : prochain épisode si en cours, sinon fin de saison connue.
+  function aniMaxAir(ani) {
+    if (!ani) return null;
+    const airing = ani.anilistStatus === 'RELEASING';
+    return airing ? (ani.nextEpTs || ani.seasonEndTs || null) : (ani.seasonEndTs || null);
+  }
+
+  // Récupère épisodes + durée + dernière diffusion d'une candidate Découverte, et applique
+  // le filet de sécurité « déjà commencée » (playheads) quand l'historique est incomplet.
+  // Extrait d'evaluateDiscoverCandidate pour pouvoir être appelé SÉPARÉMENT (mode légendaire :
+  // seulement sur les candidates qui ont passé le filtre de score). Renvoie
+  // { ok, episodes, secTotal, maxAir } ; ok=false = à exclure (déjà commencée, ou erreur).
+  async function fetchCandidateEpisodes({ p, ctx }) {
+    const { accountId, REJ, D } = ctx;
+    if (D.cancelRequested) return { ok: false };
     try {
       const eps = await getEpisodesForDiscover(p.id);
-      episodes = eps.episodes.length;
-      secTotal = eps.episodes.reduce((a, e) => a + (e.dur || 0), 0);
-      maxAir = eps.maxAir || null;
-
-      // Filet de sécurité (6) : l'historique peut être incomplet, donc on vérifie
-      // la progression réelle. Inutile quand le scan a couvert TOUT l'historique :
-      // watchedIds fait alors autorité, et on économise une requête par candidat.
+      const episodes = eps.episodes.length;
+      const secTotal = eps.episodes.reduce((a, e) => a + (e.dur || 0), 0);
+      const maxAir = eps.maxAir || null;
       if (eps.episodes.length && !historyComplete) {
         const epIds = [...new Set(eps.episodes.flatMap((e) => e.ids))];
         const ph = await getPlayheads(accountId, epIds);
@@ -4528,20 +4656,14 @@
           }
           return false;
         });
-        if (started) { REJ.progressPlayhead++; return null; }
+        if (started) { REJ.progressPlayhead++; return { ok: false }; }
       }
+      return { ok: true, episodes, secTotal, maxAir };
     } catch (e) {
-      // Une erreur ici laissait passer la série par défaut : on exclut par
-      // prudence, cohérent avec « jamais proposer ce qui est déjà vu ».
+      // Une erreur ici laissait passer la série par défaut : on exclut par prudence.
       console.warn('[reste-à-voir] vérif. impossible pour', p.id, '— exclue par prudence', e);
-      return null;
+      return { ok: false };
     }
-    if (D.cancelRequested) return null;
-
-    // Retourne un candidat INTERMÉDIAIRE (categories/tags pas encore complétés par
-    // AniList en mode légendaire — voir juste après le pool()). p est repris pour
-    // les étapes suivantes (titre, id, popRank…).
-    return { p, seasons, categories, tags, rating, aniScore, episodes, secTotal, maxAir };
   }
 
   async function loadDiscover(onProgress, opts) {
@@ -4741,6 +4863,25 @@
       // cosinus piégé par les tags génériques (d'où Dragon Ball Z proposé pour Blue Lock). Le
       // pool vient alors UNIQUEMENT des recommandations AniList curées (voir scanAnilistPopularity
       // en mode similaire, appelé juste après cette boucle).
+      //
+      // (perf préchargement) AVANT : chaque page attendait son tour — on await le fetch
+      // browse, PUIS on traitait la page (filtrage, pool d'évaluation, enrichissement AniList
+      // par tranche, récupération des épisodes pour les légendaires…) avant même de lancer la
+      // requête de la page suivante. Le réseau et le calcul s'additionnaient donc page après
+      // page, alors que rien n'empêche de les faire chevaucher : le `start` de la page N+1 est
+      // connu dès que la page N est arrivée (pas besoin d'avoir fini de l'ANALYSER). MAINTENANT :
+      // dès que la page courante est reçue, on tire IMMÉDIATEMENT la requête de la page
+      // suivante (`fetchBrowsePage`) AVANT de commencer son traitement — le fetch tourne alors
+      // en tâche de fond pendant tout le travail (souvent le plus long en 🎲 légendaire) sur la
+      // page courante, et est déjà résolu (ou presque) quand on en a besoin au tour suivant.
+      // Un seul niveau d'avance suffit : le traitement d'une page dépasse quasi toujours la
+      // durée d'un aller-retour réseau, donc empiler un 2e niveau n'apporterait rien de plus
+      // tout en compliquant l'arrêt propre (annulation/exhausted).
+      const fetchBrowsePage = (s) => api('/content/v2/discover/browse', {
+        sort_by: 'popularity', n: CFG.discoverPageSize, start: s,
+        locale: CFG.locale, type: 'series',
+      });
+      let pendingPage = !D.similarTo ? fetchBrowsePage(start) : null;
       for (let page = 0; !D.similarTo && page < maxPages && matches.length < target; page++) {
         if (D.cancelRequested) { stopReason = 'cancelled'; break; }
         // Progression du scan en état STRUCTURÉ plutôt qu'en chaîne à re-parser : le bandeau
@@ -4755,13 +4896,15 @@
         // erreur, cf. renderActivityBar plus bas qui n'en fait plus une barre % / ETA).
         D.scan = { page: page + 1, maxPages, found: matches.length, target, legendary };
         onProgress(stepLabel(3, 3, `page ${page + 1}`));
-        const r = await api('/content/v2/discover/browse', {
-          sort_by: 'popularity', n: CFG.discoverPageSize, start,
-          locale: CFG.locale, type: 'series',
-        });
+        const r = await pendingPage;
         const data = r.data || [];
         if (!data.length) { stopReason = 'exhausted'; break; }
         start += data.length;
+        // Précharge la page suivante ICI, avant tout traitement de la page courante — c'est
+        // cette seule ligne déplacée qui fait chevaucher réseau et calcul. Inutile de la
+        // lancer si on sort de la boucle au prochain tour (maxPages atteint) : ce garde-fou
+        // n'est en pratique jamais actif (POPULAR_SCAN_SAFETY_CAP), mais évite un fetch perdu.
+        pendingPage = (page + 1 < maxPages) ? fetchBrowsePage(start) : null;
 
         pagesScanned = page + 1;
         const candidates = data
@@ -4794,7 +4937,7 @@
           if (D.cancelRequested) break;
           const slice = candidates.slice(c, c + 8);
           const got = await pool(slice,
-            (p) => evaluateDiscoverCandidate(p, { accountId, REJ, D }),
+            (p) => evaluateDiscoverCandidate(p, { accountId, REJ, D }, { deferEpisodes: legendary }),
             CFG.concurrency, undefined, () => D.cancelRequested);
 
           let survivors = got.filter(Boolean);
@@ -4853,6 +4996,13 @@
                   if (result.genres && result.genres.length) x.categories = mergeGenreLists(x.categories, result.genres);
                   if (result.tags && result.tags.length) x.tags = mergeTagLists(x.tags, result.tags);
                   if (result.meanScore != null) x.aniScore = result.meanScore;
+                  // (durée) Complète la durée totale estimée dès que la durée/épisode AniList
+                  // est connue : nb total d'épisodes (CR, toutes saisons) × durée/ép. Ne touche
+                  // pas une durée déjà obtenue (secTotal > 0, estimation ou énumération réelle).
+                  if (x.episodes && !x.secTotal) {
+                    const st = secTotalFromAni(x.episodes, result);
+                    if (st) { x.secTotal = st; x.maxAir = aniMaxAir(result) || x.maxAir; }
+                  }
                 }
               } catch (_) { /* best-effort : les survivants gardent leurs seuls genres CR (et pas de tags) */ }
             }
@@ -4880,32 +5030,49 @@
             return true;
           });
 
-          const finalResults = [];
-          for (const x of survivors) {
-            if (D.cancelRequested) break;
-            const candidate = {
-              id: x.p.id,
-              title: x.p.title,
-              slug: x.p.slug_title,
-              poster: posterOf(x.p),
-              synopsis: x.p.description || '',
-              rating: x.rating, seasons: x.seasons,
-              categories: x.categories, tags: x.tags, aniScore: x.aniScore ?? null,
-              episodes: x.episodes, secTotal: x.secTotal, maxAir: x.maxAir,
-              order: seenCandidate.size,
-            };
-            // 🎲 5. dernier filtre, coûteux nulle part (calcul local) : en mode légendaire,
-            // seules les pépites au score ≥ CFG.discoverLegendaryScore comptent dans le
-            // quota. Une candidate qui a passé tous les filtres précédents mais n'est
-            // « que » notable/pref est rejetée ici — c'est ELLE qui fait que le scan va
-            // chercher plus loin.
-            if (legendary) {
-              const sig = discoverSignals(candidate, tasteProfile);
+          // (perf légendaire) Le filtre de score AVANT la récupération des épisodes : on ne
+          // paie getEpisodesForDiscover + getPlayheads (≈ 3-4 requêtes/candidate) QUE pour les
+          // légendaires retenues, au lieu de toutes les candidates ayant passé la note (la
+          // plupart rejetées ici). C'était la cause des « 10 s par page ». En mode normal, les
+          // épisodes ont déjà été récupérés dans evaluate (pas de filtre de score à passer).
+          let kept;
+          if (legendary) {
+            kept = [];
+            for (const x of survivors) {
+              if (D.cancelRequested) break;
+              const sig = discoverSignals(
+                { categories: x.categories, tags: x.tags, rating: x.rating, aniScore: x.aniScore },
+                tasteProfile);
               scoreSamples.push(sig.score);
               if (!sig.legendary) { REJ.legendaryScore++; continue; }
+              kept.push(x);
             }
-            finalResults.push(candidate);
+            // Épisodes + progression UNIQUEMENT pour les légendaires (étape chère différée).
+            if (kept.length && !D.cancelRequested) {
+              const checked = await pool(kept, async (x) => {
+                if (!x.epsPending) return x;   // déjà récupérés (ne devrait pas arriver ici)
+                const r = await fetchCandidateEpisodes({ p: x.p, ctx: { accountId, REJ, D } });
+                if (!r.ok) return null;
+                x.episodes = r.episodes; x.secTotal = r.secTotal; x.maxAir = r.maxAir; x.epsPending = false;
+                return x;
+              }, CFG.concurrency, undefined, () => D.cancelRequested);
+              kept = checked.filter(Boolean);
+            }
+          } else {
+            kept = survivors;   // mode normal : épisodes déjà récupérés dans evaluate
           }
+
+          const finalResults = kept.map((x) => ({
+            id: x.p.id,
+            title: x.p.title,
+            slug: x.p.slug_title,
+            poster: posterOf(x.p),
+            synopsis: x.p.description || '',
+            rating: x.rating, seasons: x.seasons,
+            categories: x.categories, tags: x.tags, aniScore: x.aniScore ?? null,
+            episodes: x.episodes, secTotal: x.secTotal, maxAir: x.maxAir,
+            order: seenCandidate.size,
+          }));
           results.push(...finalResults);
           D.scan = { page: page + 1, maxPages, found: matches.length + results.length, target, legendary };
           onProgress(stepLabel(3, 3, `page ${page + 1}`));
@@ -5028,6 +5195,12 @@
               if (result.genres && result.genres.length) x.categories = mergeGenreLists(x.categories, result.genres);
               if (result.tags && result.tags.length) x.tags = mergeTagLists(x.tags, result.tags);
               if (result.meanScore != null) x.aniScore = result.meanScore;
+              // (durée) Complète la durée totale estimée = nb total d'épisodes (CR, toutes
+              // saisons) × durée/épisode AniList, une fois cette dernière connue.
+              if (x.episodes && !x.secTotal) {
+                const st = secTotalFromAni(x.episodes, result);
+                if (st) { x.secTotal = st; x.maxAir = aniMaxAir(result) || x.maxAir; }
+              }
             }
           } catch (_) { /* best-effort : sans note AniList, la carte garde sa seule note CR */ }
           render();   // note + tags apparaissent au fur et à mesure
