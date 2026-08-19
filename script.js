@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.2.0
+// @version      3.3.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.2.0';
+  const SCRIPT_VERSION = '3.3.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -4401,7 +4401,11 @@
     const scoreStats = legendary ? scoreDistributionStats(scoreSamples) : null;
     const f = STATE.filters;
     const REASON_LABELS = {
-      known: 'Déjà connue (une de tes listes, ton historique de visionnage, ignorée à la main, ou déjà proposée lors d’une relance précédente)',
+      knownTracked: 'Déjà dans « Reste à voir » (ta watchlist)',
+      knownList: 'Déjà dans une de tes listes personnalisées (Crunchylists)',
+      knownHistory: 'Déjà présente dans ton historique de visionnage',
+      knownIgnored: 'Écartée à la main (ignorée)',
+      knownRelance: 'Déjà proposée lors d’une relance précédente',
       genrePreBrowse: 'Genre écarté (vérification rapide, avant toute requête)',
       seasonsPreBrowse: 'Trop de saisons (vérification rapide, avant toute requête)',
       seasons: `Trop de saisons (> ${CFG.discoverMaxSeasons}, après vérification précise)`,
@@ -4409,6 +4413,8 @@
       rating: `Note absente, ou sous le minimum (CR ${CFG.discoverMinRatingCr}★ / AniList ${CFG.discoverMinRatingAni}★)`,
       progressPlayhead: 'Déjà commencée d’après ta progression réelle (filet de sécurité)',
       legendaryScore: `Score « pépite » sous le seuil légendaire (${CFG.discoverLegendaryScore})`,
+      noCrMatch: 'Aucune fiche Crunchyroll identifiable (pas licenciée, ou correspondance pas assez sûre)',
+      duplicate: 'Doublon rencontré pendant ce même scan (recommandations qui se recoupent)',
     };
     const rows = Object.entries(rej)
       .filter(([k, n]) => n > 0 && (legendary || k !== 'legendaryScore'))
@@ -4438,11 +4444,16 @@
 
     // Conseils ciblés sur la cause de rejet dominante — chaque conseil pointe vers le
     // réglage exact à modifier dans Réglages → Découverte.
+    const KNOWN_REASON_KEYS = ['knownTracked', 'knownList', 'knownHistory', 'knownIgnored', 'knownRelance'];
+    const knownAdvice = isSimilar
+      ? "La plupart des séries proposées comme proches sont des séries que tu connais déjà (Reste à voir, listes, historique, ignorées, ou déjà proposées lors d'une relance précédente). C'est sain — il n'y a simplement plus beaucoup d'inconnues proches de cette série précise."
+      : "La plupart des candidats croisés sont des séries que tu connais déjà (Reste à voir, listes, historique, ignorées, ou déjà proposées lors d'une relance précédente). C'est sain — essaie « 🔄 30 autres pépites » ou « 🎲 Dé légendaire » pour puiser plus profond dans le classement popularité.";
+    const knownParamFix = isSimilar
+      ? 'aucun réglage à toucher — ce sont des séries que tu connais déjà'
+      : 'aucun réglage à toucher — ce sont des séries que tu connais déjà ; utilise « 🔄 30 autres pépites » ou « 🎲 Dé légendaire » pour puiser plus loin';
     const ADVICE = {
       // (fix) « 🔄 30 autres pépites »/« 🎲 Dé légendaire » n'existent pas en mode similaire.
-      known: isSimilar
-        ? "La plupart des séries proposées comme proches sont des séries que tu connais déjà (listes, historique, ignorées). C'est sain — il n'y a simplement plus beaucoup d'inconnues proches de cette série précise."
-        : "La plupart des candidats croisés sont des séries que tu connais déjà (listes, historique, ignorées). C'est sain — essaie « 🔄 30 autres pépites » ou « 🎲 Dé légendaire » pour puiser plus profond dans le classement popularité.",
+      ...Object.fromEntries(KNOWN_REASON_KEYS.map((k) => [k, knownAdvice])),
       genrePreBrowse: "Beaucoup de séries sont écartées par le filtre de genre. Vérifie tes chips « garder uniquement »/« exclure » sous les résultats, ou élargis « Genres exclus par défaut » dans Réglages → Découverte.",
       seasonsPreBrowse: `Beaucoup de séries dépassent ${CFG.discoverMaxSeasons} saison${CFG.discoverMaxSeasons > 1 ? 's' : ''}. Monte « Saisons maximum » dans Réglages → Découverte si tu es prêt·e à rattraper des séries plus longues.`,
       seasons: `Beaucoup de séries dépassent ${CFG.discoverMaxSeasons} saison${CFG.discoverMaxSeasons > 1 ? 's' : ''}. Monte « Saisons maximum » dans Réglages → Découverte.`,
@@ -4452,6 +4463,8 @@
       legendaryScore: scoreStats
         ? `Beaucoup de candidats passent les filtres mais restent sous le score légendaire (${CFG.discoverLegendaryScore}). Sur ce scan, le score max réellement atteint était de <b>${scoreStats.max.toFixed(2)}</b> — si c'est en-dessous ou tout juste au-dessus du seuil, baisse « Score minimum — légendaire » (par exemple vers ${Math.max(0, scoreStats.top25).toFixed(1)}, la borne des 25% meilleurs candidats de ce scan) ou monte « Poids du goût dans le score final » dans Réglages → Découverte.`
         : `Beaucoup de candidats passent les filtres mais restent sous le score légendaire (${CFG.discoverLegendaryScore}). Baisse « Score minimum — légendaire » ou monte « Poids du goût dans le score final » dans Réglages → Découverte.`,
+      noCrMatch: "Beaucoup de recommandations/tags AniList n'ont pas de fiche Crunchyroll identifiable (série pas licenciée chez CR, ou correspondance pas assez fiable pour être proposée). Rien à régler ici — c'est une limite du catalogue Crunchyroll, pas de tes filtres.",
+      duplicate: "Beaucoup de candidats se recoupent entre plusieurs recommandations AniList pendant ce même scan. Rien à régler — ce sont juste des doublons évités, pas des candidats perdus.",
     };
     const mainAdvice = topReason ? ADVICE[topReason] : (isSimilar
       ? "Élargis un des filtres ci-dessous, ou réessaie avec une autre série proche comme point de départ : le nombre de vraies recommandations AniList pour un titre donné est limité."
@@ -4473,9 +4486,7 @@
       target: '',
     };
     const PARAM_FIX = {
-      known: isSimilar
-        ? 'aucun réglage à toucher — ce sont des séries que tu connais déjà'
-        : 'aucun réglage à toucher — ce sont des séries que tu connais déjà ; utilise « 🔄 30 autres pépites » ou « 🎲 Dé légendaire » pour puiser plus loin',
+      ...Object.fromEntries(KNOWN_REASON_KEYS.map((k) => [k, knownParamFix])),
       genrePreBrowse: '« Genres exclus par défaut » (Réglages → Découverte) ou les chips de genre sous les résultats',
       seasonsPreBrowse: `« Saisons maximum » — actuellement ${CFG.discoverMaxSeasons} (Réglages → Découverte)`,
       seasons: `« Saisons maximum » — actuellement ${CFG.discoverMaxSeasons} (Réglages → Découverte)`,
@@ -4483,6 +4494,8 @@
       rating: `« Note minimale Crunchyroll »/« Note minimale AniList » — actuellement ${CFG.discoverMinRatingCr}★ / ${CFG.discoverMinRatingAni}★ (Réglages → Découverte)`,
       progressPlayhead: 'aucun réglage — séries déjà commencées d’après ta progression réelle',
       legendaryScore: `« Score minimum — légendaire » à BAISSER (actuellement ${CFG.discoverLegendaryScore}) — ou « Poids du goût dans le score final » à monter (Réglages → Découverte)`,
+      noCrMatch: 'aucun réglage — limite du catalogue Crunchyroll (série non licenciée ou correspondance pas assez fiable)',
+      duplicate: 'aucun réglage — doublons évités entre recommandations, pas des candidats perdus',
     };
     const stopTxt = STOP[stopReason] || '';
 
@@ -4812,13 +4825,25 @@
     const REJ = {
       genrePreBrowse: 0,   // écarté avant toute requête (genre déjà connu dans le panel browse)
       seasonsPreBrowse: 0, // écarté avant toute requête (nb saisons déjà connu dans le panel browse)
-      known: 0,            // déjà dans une liste, ta watchlist, ton historique de visionnage,
-                            // ignorée à la main, ou déjà proposée lors d'une relance précédente
+      // (fix) Éclaté depuis l'ancien compteur unique « known » fourre-tout, pour que le
+      // rapport détaille PRÉCISÉMENT où sont passés les candidats déjà connus, au lieu d'un
+      // seul chiffre agrégé (voir classifyKnownReason dans loadDiscover).
+      knownTracked: 0,      // déjà dans « Reste à voir » (watchlist)
+      knownList: 0,         // déjà dans une de tes listes perso (Crunchylists)
+      knownHistory: 0,      // déjà dans ton historique de visionnage
+      knownIgnored: 0,      // écartée à la main (ignorée)
+      knownRelance: 0,      // déjà proposée lors d'une relance précédente
       seasons: 0,          // trop de saisons (après requête /seasons)
       genre: 0,            // genre exclu / hors du filtre « garder uniquement » (après panel complet)
       rating: 0,           // note absente ou sous le seuil minimum
       progressPlayhead: 0, // progression réelle détectée via /playheads (filet de sécurité historique incomplet)
       legendaryScore: 0,   // survit à tous les filtres mais score « pépite » sous le seuil légendaire
+      // (fix) Mode similaire uniquement (scanAnilistPopularity) : ces deux cas passaient avant
+      // en `return` silencieux, sans toucher aucun compteur — le rapport « Pourquoi seulement
+      // X/Y » ne pouvait alors jamais expliquer où passaient tous les candidats manquants
+      // (candidatesSeenTotal - somme des rejets - trouvés ne tombait pas juste).
+      noCrMatch: 0,         // reco/tag AniList sans fiche Crunchyroll identifiable (pas licenciée, ou correspondance pas assez sûre)
+      duplicate: 0,         // déjà rencontrée PENDANT ce même scan (doublon entre recos AniList, ou avec le bassin CR)
     };
     let candidatesSeenTotal = 0;
     let pagesScanned = 0;
@@ -4861,14 +4886,18 @@
 
 
       // Séries déjà connues via la watchlist / les listes personnalisées.
-      const knownIds = new Set(STATE.series.map((s) => s.id));
+      // (fix) Sets séparés par ORIGINE (au lieu d'un seul knownIds fusionné) pour que le
+      // rapport de fin de scan puisse détailler PRÉCISÉMENT pourquoi une série est déjà
+      // connue (Reste à voir ? liste perso ? historique ? ignorée à la main ? relance
+      // précédente ?) au lieu d'un unique compteur « known » fourre-tout.
+      const watchlistIds = new Set(STATE.series.map((s) => s.id));
       for (const it of STATE.raw) {
         const ref = extractSeriesRef(it);
-        if (ref && ref.id) knownIds.add(ref.id);
+        if (ref && ref.id) watchlistIds.add(ref.id);
       }
       // Séries écartées à la main : retirées AVANT la recherche, sinon elles
       // consommeraient le quota de pépites pour être jetées ensuite à l'affichage.
-      for (const id of IGNORED.keys()) knownIds.add(id);
+      const ignoredIds = new Set(IGNORED.keys());
 
       // Membres ACTUELS de tes listes (watchlist + Crunchylists), relus à chaud : une
       // série que tu viens d'ajouter à une liste ne doit plus apparaître ici. STATE.series
@@ -4876,7 +4905,6 @@
       let listMemberIds = new Set();
       try {
         listMemberIds = await getListMemberIds(accountId);
-        listMemberIds.forEach((id) => knownIds.add(id));
       } catch (_) { /* best-effort */ }
 
       // Si une de ces séries n'est pas encore dans « Reste à voir » (STATE.series), c'est
@@ -4902,7 +4930,20 @@
           "Découverte n'exclut que les séries de tes listes.";
       }
 
-      const excluded = new Set([...knownIds, ...watchedIds, ...D.excludedIds]);
+      // (fix) Ordre de priorité pour attribuer UNE seule raison à un id présent dans
+      // plusieurs bassins à la fois (ex. dans la watchlist ET vue dans l'historique) :
+      // ignorée à la main d'abord (action la plus délibérée), puis Reste à voir, listes,
+      // historique, et enfin relance précédente (le plus « accessoire » des cinq).
+      const classifyKnownReason = (id) => {
+        if (ignoredIds.has(id)) return 'knownIgnored';
+        if (watchlistIds.has(id)) return 'knownTracked';
+        if (listMemberIds.has(id)) return 'knownList';
+        if (watchedIds.has(id)) return 'knownHistory';
+        if (D.excludedIds.has(id)) return 'knownRelance';
+        return 'knownTracked'; // filet : ne devrait jamais arriver (id forcément dans un des sets ci-dessus)
+      };
+
+      const excluded = new Set([...watchlistIds, ...ignoredIds, ...listMemberIds, ...watchedIds, ...D.excludedIds]);
       const seenCandidate = new Set();
       const matches = [];
 
@@ -5049,7 +5090,7 @@
           .filter((p) => {
             if (!p || !p.id) return false;
             if (excluded.has(p.id) || seenCandidate.has(p.id)) {
-              if (p && p.id && excluded.has(p.id)) REJ.known++;
+              if (p && p.id && excluded.has(p.id)) REJ[classifyKnownReason(p.id)]++;
               return false;
             }
             candidatesSeenTotal++;
@@ -5273,7 +5314,7 @@
         const aniTarget = D.similarTo ? target : (target - matches.length);
         const aniFound = await scanAnilistPopularity(
           aniProfile, excluded, seenCandidate, knownTitlesNorm, aniTarget,
-          { accountId, REJ, D },
+          { accountId, REJ, D, classifyKnownReason },
           (page, maxP) => onProgress(stepLabel(3, 3, `AniList ${page}/${maxP}`)),
         );
         // (fix) Sans ça, candidatesSeenTotal restait à 0 en mode similaire (la boucle de scan
@@ -5783,15 +5824,15 @@
   // bassins. knownTitlesNorm : titres déjà suivis, normalisés (aniNorm), pour le
   // pré-filtre local — même logique que isKnown() dans loadNewPremieres. target :
   // nombre de candidats encore nécessaires (quota déjà entamé par le bassin CR).
-  // ctx : { accountId, REJ, D } (mêmes compteurs/état que le bassin CR, voir
-  // evaluateDiscoverCandidate). Retourne un tableau de candidats INTERMÉDIAIRES, au
+  // ctx : { accountId, REJ, D, classifyKnownReason } (mêmes compteurs/état que le bassin CR,
+  // voir evaluateDiscoverCandidate). Retourne un tableau de candidats INTERMÉDIAIRES, au
   // même format que ceux produits par le bassin CR (voir evaluateDiscoverCandidate).
   async function scanAnilistPopularity(profile, exclude, seenCandidate, knownTitlesNorm, target, ctx, onProgress) {
     const found = [];
     if (!CFG.discoverAnilistEnabled || target <= 0) return found;
     if (anilistCooldownRemainingMs() > 0) return found;   // coupe-circuit déjà en place : on n'insiste pas
 
-    const { accountId, REJ, D } = ctx;
+    const { accountId, REJ, D, classifyKnownReason } = ctx;
     const isKnownTitle = (title) => {
       const nt = aniNorm(title);
       if (!nt) return false;
@@ -5814,18 +5855,26 @@
       if (IGNORED.has('ani:' + m.id)) return;
       considered++;
       const genresFr = translateAniGenres(m.genres || []);
-      if (genresFr.length && categoriesRejectedByGenre(genresFr)) return;
+      if (genresFr.length && categoriesRejectedByGenre(genresFr)) { REJ.genrePreBrowse++; return; }
       const title = aniPrimaryTitle(m) || (m.title && m.title.native) || '';
-      if (!title) return;
+      if (!title) { REJ.noCrMatch++; return; }
       // (fix) Rejet silencieux jusqu'ici : le rapport de fin de scan ne pouvait donc jamais
       // expliquer « déjà connue » comme frein en mode similaire, alors que c'est souvent la
-      // raison n°1 (recommandations d'une série qu'on a déjà vue/suit).
-      if (isKnownTitle(title)) { REJ.known++; return; }
+      // raison n°1 (recommandations d'une série qu'on a déjà vue/suit). Comparaison de titre
+      // uniquement contre STATE.series (knownTitlesNorm) → toujours « Reste à voir ».
+      if (isKnownTitle(title)) { REJ.knownTracked++; return; }
       let cr;
       try { cr = await resolveCrunchyrollForPremiere(m); }
-      catch (e) { safeCall.log(e, 'scanAnilistPopularity:resolve'); return; }
-      if (!cr || !cr.id) return;   // pas de fiche CR assez sûre : rien à évaluer ici
-      if (exclude.has(cr.id) || seenCandidate.has(cr.id)) return;
+      catch (e) { safeCall.log(e, 'scanAnilistPopularity:resolve'); REJ.noCrMatch++; return; }
+      if (!cr || !cr.id) { REJ.noCrMatch++; return; }   // pas de fiche CR assez sûre : rien à évaluer ici
+      // (fix) `exclude` contient watchlistIds ∪ ignoredIds ∪ listMemberIds ∪ watchedIds ∪
+      // D.excludedIds (voir loadDiscover) : watchlist, listes, historique de visionnage,
+      // ignorées ET pépites déjà proposées lors d'une relance précédente. Jusqu'ici ce test
+      // était muet : ces candidats disparaissaient sans qu'aucun compteur ne les explique
+      // (candidats examinés - rejets affichés ≠ retenus). classifyKnownReason() attribue
+      // maintenant la raison PRÉCISE plutôt qu'un seul compteur « known » fourre-tout.
+      if (exclude.has(cr.id)) { REJ[classifyKnownReason(cr.id)]++; return; }
+      if (seenCandidate.has(cr.id)) { REJ.duplicate++; return; }
       seenCandidate.add(cr.id);
       // Genres/tags AniList déjà en main (zéro requête de plus) : mis en cache tout de suite,
       // pour que evaluateDiscoverCandidate (qui relit ce cache) les récupère automatiquement.
@@ -5833,8 +5882,8 @@
       Object.assign(aniResult, computeAniSchedule(m, {}), { matched: true, aniId: m.id, aniTitle: title });
       cacheSet('anilist:' + cr.id, aniResult);
       let panel;
-      try { panel = await getSeriesPanel(cr.id); } catch (e) { safeCall.log(e, 'scanAnilistPopularity:panel'); return; }
-      if (!panel) return;
+      try { panel = await getSeriesPanel(cr.id); } catch (e) { safeCall.log(e, 'scanAnilistPopularity:panel'); REJ.noCrMatch++; return; }
+      if (!panel) { REJ.noCrMatch++; return; }
       const evald = await evaluateDiscoverCandidate(panel, { accountId, REJ, D });
       if (evald) found.push(evald);
     };
