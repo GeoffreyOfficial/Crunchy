@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      2.186.0
+// @version      2.187.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '2.186.0';
+  const SCRIPT_VERSION = '2.187.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -4161,7 +4161,13 @@
   }
 
   function buildDiscoverShortfallReport(ctx) {
-    const { target, foundCount, legendary, pagesScanned, maxPages, candidatesSeenTotal, rej, scoreSamples, stopReason } = ctx;
+    const { target, foundCount, legendary, pagesScanned, maxPages, candidatesSeenTotal, rej, scoreSamples, stopReason, similarTitle } = ctx;
+    // (fix) Vocabulaire adapté : « pépite(s) » a du sens pour la Découverte générale
+    // (dénicher des séries populaires jamais vues), mais pas pour la baguette magique 🪄
+    // (chercher des séries PROCHES d'une série précise) — d'où les retours « ça parle de
+    // pépites, ça donne l'impression de chercher des découvertes » en mode similaire.
+    const isSimilar = !!similarTitle;
+    const itemWord = (n) => isSimilar ? `série${n > 1 ? 's' : ''} similaire${n > 1 ? 's' : ''}` : `pépite${n > 1 ? 's' : ''}`;
     const scoreStats = legendary ? scoreDistributionStats(scoreSamples) : null;
     const f = STATE.filters;
     const REASON_LABELS = {
@@ -4276,7 +4282,7 @@
 
     return `
       <div class="crrav-msg crrav-shortfall" style="text-align:left;background:rgba(244,117,33,.06);border:1px solid rgba(244,117,33,.35);border-radius:12px;padding:16px 18px;margin-top:14px">
-        <h3 style="margin:0 0 6px">🔎✨ Pourquoi seulement ${foundCount}/${target} pépite${target > 1 ? 's' : ''} ${legendary ? 'légendaire' + (target > 1 ? 's' : '') : ''} ?</h3>
+        <h3 style="margin:0 0 6px">🔎${isSimilar ? '🪄' : '✨'} Pourquoi seulement ${foundCount}/${target} ${itemWord(target)} ${isSimilar ? `proches de « ${escapeHtml(similarTitle)} »` : (legendary ? 'légendaire' + (target > 1 ? 's' : '') : '')} ?</h3>
         <p style="margin:0 0 10px;opacity:.85">Détail complet du scan, des filtres et du scoring — pour ajuster tes réglages en connaissance de cause plutôt qu'à tâtons.</p>
         ${verdictHtml}
 
@@ -4878,6 +4884,11 @@
       const shortfallCtx = {
         target, foundCount: found.length, legendary,
         pagesScanned, maxPages, candidatesSeenTotal, rej: REJ, scoreSamples, stopReason,
+        // (fix) Le rapport parlait toujours de « pépites »/légendaire, même déclenché
+        // depuis la baguette magique 🪄 (mode « séries similaires à X ») — vocabulaire
+        // de Découverte hors sujet dans ce contexte. On transmet le titre source pour
+        // que buildDiscoverShortfallReport adapte son texte.
+        similarTitle: D.similarTo ? (D.similarTo.title || '') : null,
       };
 
       if (D.cancelRequested) {
@@ -5733,16 +5744,19 @@
 
     const simProfile = activeSimilarProfile();
     const profile = simProfile || buildTasteProfile();
-    // Baguette magique 🪄 uniquement : le filtre genre (ET strict, ci-dessus) ne suffit
-    // pas à lui seul à garantir des séries VRAIMENT proches — deux séries peuvent
-    // recouper tous leurs genres larges tout en étant très différentes dans le fond.
-    // On écarte donc ici, en plus du tri, les candidates dont la similarité de tags
-    // (cosinus, voir tasteScore) tombe sous le seuil « bon goût » : un simple tri ne
-    // suffisait pas puisqu'une candidate mal assortie pouvait quand même apparaître
-    // faute de mieux.
-    if (simProfile) {
-      list = list.filter((s) => tasteScore(s, simProfile) >= CFG.discoverGoodTasteThreshold);
-    }
+    // (fix) Baguette magique 🪄 : SUPPRESSION du filtre dur qui existait ici. Il excluait
+    // toute candidate dont tasteScore(s, simProfile) < CFG.discoverGoodTasteThreshold —
+    // mais ce seuil (0.4 par défaut) est calibré pour le profil de goût AGRÉGÉ (dizaines
+    // de séries, voir buildTasteProfile), pas pour le profil MONO-SÉRIE utilisé ici
+    // (buildSingleSeriesProfile). Un profil mono-série vit dans un espace de tags bien
+    // plus épars : même un très bon match plafonne en pratique vers un cosinus de
+    // 0.5-0.6 (cf. commentaires sur CFG.discoverTasteNeutralCos/discoverLegendaryScore),
+    // ce qui, après conversion en goût net, ne dépasse quasiment jamais 0.4. Conséquence
+    // réelle observée : le scan trouvait bien des candidats (matches.length > 0, visible
+    // dans le rapport « Pourquoi seulement X/Y »), mais CE filtre les évacuait TOUS avant
+    // affichage — d'où « Similaire ne trouve jamais rien », peu importe la série source.
+    // Le tri par pertinence (sorters.relevance, sigScore ci-dessous) suffit à faire
+    // remonter les meilleurs matchs en tête sans avoir besoin d'un couperet dur ici.
     const sigScore = (s) => discoverSignals(s, profile).score;
     const sorters = {
       // Meilleur score « pépite » d'abord (goût net + note + popularité), note en
