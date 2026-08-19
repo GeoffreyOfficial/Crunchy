@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      2.192.0
+// @version      2.195.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '2.192.0';
+  const SCRIPT_VERSION = '2.195.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -78,16 +78,16 @@
     // votants très différentes (CR souvent plus généreux/moins de votants), un seuil
     // unique appliqué aux deux était soit trop laxiste sur l'un, soit trop strict sur
     // l'autre. Une note manquante côté source ne bloque toujours pas (voir plus bas).
-    discoverMinRatingCr: 4.3,
-    discoverMinRatingAni: 3.5,
+    discoverMinRatingCr: 4.2,
+    discoverMinRatingAni: 3.3,
     // Seuils 🏆/badge « très bien notée » — désormais UN PAR SOURCE (CR et AniList),
     // FIXES et INDÉPENDANTS des minimums d'entrée ci-dessus (voir discoverSignals).
     // Pour décrocher le bonus, la note CR (si connue) doit dépasser son propre seuil ET
     // la note AniList (si connue) doit dépasser le sien — pas juste l'une des deux.
     discoverWellRatedThresholdCr: 4.3,
-    discoverWellRatedThresholdAni: 3.8,
-    discoverSuperRatedThresholdCr: 4.7,
-    discoverSuperRatedThresholdAni: 4.1,
+    discoverWellRatedThresholdAni: 3.7,
+    discoverSuperRatedThresholdCr: 4.5,
+    discoverSuperRatedThresholdAni: 4,
     // Bonus de score ajoutés quand la note franchit ces seuils (voir discoverSignals).
     // Avant, +0.5 fixe et invisible dans le code — désormais réglable au même titre que
     // les seuils eux-mêmes, pour que le poids de la note dans le score soit ajustable.
@@ -117,7 +117,7 @@
     // ce multiplicateur.
     // (fix) Valeur adoptée comme défaut d'après tes essais : 2.5 — le goût pèse un peu moins,
     // laissant relativement plus de place aux bonus de note/genre dans le score final.
-    discoverTasteWeight: 2.5,
+    discoverTasteWeight: 3,
     // (fix) Point de bascule du cosinus tasteScore : le cosinus est converti en goût net
     // (-1..1) en comparant cos à CE seuil, PAS à 0.5 comme avant. Diagnostic sur un scan de
     // 241 candidats : score moyen -0.40, médiane -0.31, alors que légendaire/notable étaient
@@ -199,9 +199,9 @@
     newPremieresPageSize: 50,     // taille de page AniList (plafond de l'API : 50)
     newPremieresMaxPages: 2,      // garde-fou pages — largement assez pour une fenêtre de
                                    // quelques jours, même en pleine saison de simulcasts
-    newPremieresTarget: 18,       // nombre de nouveautés affichées
+    newPremieresTarget: 30,       // nombre de nouveautés affichées
     newPremieresWindowDays: 10,   // « déjà sorties » : épisode 1 sorti il y a moins de … jours
-    newPremieresUpcomingDays: 7,  // « à venir » : épisode 1 prévu dans moins de … jours (pas
+    newPremieresUpcomingDays: 30, // « à venir » : épisode 1 prévu dans moins de … jours (pas
                                    // encore diffusé) — les deux cas cohabitent dans le bloc,
                                    // visuellement distingués (voir newPremiereCard)
     historyGenreEnrichMax: 80,   // Stats : nb max de séries hors-listes dont on va chercher les
@@ -664,7 +664,17 @@
   function migrateRecalibratedDefaults() {
     const saved = APP_STATE.settings;
     if (!saved || typeof saved !== 'object') return;
-    const recal = { discoverGoodTasteThreshold: [0.4, 0.15] };  // 💚 quasi jamais atteint à 0.4
+    const recal = {
+      discoverGoodTasteThreshold: [0.4, 0.15],       // 💚 quasi jamais atteint à 0.4
+      discoverMinRatingCr: [4.3, 4.2],
+      discoverMinRatingAni: [3.5, 3.3],
+      discoverTasteWeight: [2.5, 3],
+      discoverWellRatedThresholdAni: [3.8, 3.7],
+      discoverSuperRatedThresholdCr: [4.7, 4.5],
+      discoverSuperRatedThresholdAni: [4.1, 4],
+      newPremieresUpcomingDays: [7, 30],
+      newPremieresTarget: [18, 30],
+    };
     let changed = false;
     for (const [k, [oldD, newD]] of Object.entries(recal)) {
       if (saved[k] !== undefined && saved[k] === oldD) { saved[k] = newD; changed = true; }
@@ -4675,7 +4685,7 @@
       // AniList pour un premier lot de résultats : coût nul, immédiat, puis complété par les
       // bassins CR/AniList ci-dessous pour aller plus loin que ce pool déjà connu.
       const knownPool = (opts && opts.knownPool) || [];
-      if (knownPool.length) {
+      if (knownPool.length && !D.similarTo) {
         for (const c of knownPool) {
           if (!c || !c.id || excluded.has(c.id) || seenCandidate.has(c.id)) continue;
           seenCandidate.add(c.id);
@@ -4726,7 +4736,12 @@
 
       // Interruption : on sort proprement dès que l'utilisateur demande d'arrêter, en
       // gardant ce qui a déjà été trouvé.
-      for (let page = 0; page < maxPages && matches.length < target; page++) {
+      // (fix similaire) En mode baguette magique 🪄, on SAUTE le classement popularité CR : il
+      // ne remontait que des séries populaires filtrées par un genre commun, re-triées par un
+      // cosinus piégé par les tags génériques (d'où Dragon Ball Z proposé pour Blue Lock). Le
+      // pool vient alors UNIQUEMENT des recommandations AniList curées (voir scanAnilistPopularity
+      // en mode similaire, appelé juste après cette boucle).
+      for (let page = 0; !D.similarTo && page < maxPages && matches.length < target; page++) {
         if (D.cancelRequested) { stopReason = 'cancelled'; break; }
         // Progression du scan en état STRUCTURÉ plutôt qu'en chaîne à re-parser : le bandeau
         // (voir renderActivityBar) affiche alors le NOMBRE de pépites trouvées en titre et
@@ -4913,7 +4928,13 @@
       // rempli par le scan CR ci-dessus (jamais un second) : il couvre donc les deux sources
       // et empêche tout doublon d'affichage entre elles.
       if (!D.cancelRequested && CFG.discoverAnilistEnabled && (matches.length < target || D.similarTo)) {
-        const aniProfile = tasteProfile || simProfile || buildTasteProfile();
+        // En mode similaire, le pool vient des recommandations AniList (voir
+        // scanAnilistPopularity) ; le profil ne sert que de REPLI tag_in si la source n'a pas
+        // de reco exploitable — on prend alors le profil de la SÉRIE SOURCE (simProfile), pas
+        // le profil agrégé de l'utilisateur, pour rester cohérent avec « similaire à X ».
+        const aniProfile = D.similarTo
+          ? (simProfile || tasteProfile || buildTasteProfile())
+          : (tasteProfile || simProfile || buildTasteProfile());
         // Titres déjà suivis, pour le pré-filtre local LÉGER de scanAnilistPopularity
         // (même logique que isKnown() dans loadNewPremieres) — évite de dépenser une
         // résolution Crunchyroll pour un titre déjà repéré comme connu.
@@ -5311,6 +5332,75 @@
     return result;
   }
 
+  // ─── Recommandations AniList (mode « séries similaires » 🪄) ────────────────────
+  // La vraie source de similarité : les recommandations « si tu as aimé X, regarde Y »
+  // votées par la communauté AniList. Contrairement au recoupement de tags — piégé par
+  // les tags GÉNÉRIQUES (Shounen, Male Protagonist, Super Power…) communs à des centaines
+  // de shōnen, qui faisaient remonter Dragon Ball Z Kai comme « similaire » à Blue Lock —
+  // ces recommandations reflètent ce que de vrais spectateurs jugent proche (Blue Lock →
+  // Ao Ashi, Days, autres animés de sport). Une seule requête, triée par nombre de votes.
+  const ANILIST_SIMILAR_QUERY = `query ($search: String) {
+    Media(search: $search, type: ANIME, sort: SEARCH_MATCH) {
+      id
+      title { romaji english native }
+      synonyms
+      recommendations(sort: RATING_DESC, perPage: 30) {
+        nodes {
+          rating
+          mediaRecommendation {
+            id
+            title { romaji english native }
+            synonyms
+            genres
+            tags { name rank isMediaSpoiler }
+            format
+            status
+            averageScore
+            meanScore
+            popularity
+            episodes
+            duration
+            season
+            startDate { year }
+            source
+            externalLinks { site url type }
+            nextAiringEpisode { episode airingAt }
+          }
+        }
+      }
+    }
+  }`;
+
+  // Renvoie les fiches AniList recommandées (déjà triées par pertinence communautaire) pour
+  // la série source de la baguette magique, ou [] si introuvable / sans reco exploitable.
+  async function fetchAnilistSimilar(source) {
+    if (!source || !source.title) return [];
+    if (anilistCooldownRemainingMs() > 0) return [];
+    let data;
+    try { data = await anilistQuery(ANILIST_SIMILAR_QUERY, { search: source.title }); }
+    catch (e) { safeCall.log(e, 'fetchAnilistSimilar'); return []; }
+    const m = data && data.Media;
+    if (!m) return [];
+    // Garde-fou anti-mauvais-match : le titre trouvé doit ressembler au titre source
+    // (SEARCH_MATCH se trompe rarement sur un titre précis, mais on évite un dérapage total).
+    const srcNorm = aniNorm(source.title);
+    const okTitle = !srcNorm || aniTitleStrings(m).some((t) => {
+      const n = aniNorm(t);
+      return n === srcNorm || n.includes(srcNorm) || srcNorm.includes(n) || aniDice(n, srcNorm) >= 0.6;
+    });
+    if (!okTitle) return [];
+    const nodes = (m.recommendations && m.recommendations.nodes) || [];
+    const out = [];
+    const seen = new Set();
+    for (const nd of nodes) {
+      const rm = nd && nd.mediaRecommendation;
+      if (!rm || rm.id == null || seen.has(rm.id)) continue;
+      seen.add(rm.id);
+      out.push(rm);   // triées par rating desc : les plus « votées similaires » d'abord
+    }
+    return out;
+  }
+
   // ─── Découverte — second bassin AniList (en complément du classement popularité
   // Crunchyroll, voir loadDiscover) ──────────────────────────────────────────────
   // Requête paginée, CIBLÉE sur le profil de goût (tag_in — voir arbitrage ci-dessous),
@@ -5350,37 +5440,72 @@
   async function scanAnilistPopularity(profile, exclude, seenCandidate, knownTitlesNorm, target, ctx, onProgress) {
     const found = [];
     if (!CFG.discoverAnilistEnabled || target <= 0) return found;
-    // Profil neuf/vide : rien à cibler côté AniList — zéro requête plutôt qu'un scan
-    // large et non pertinent.
-    if (!profile || !profile.size) return found;
-    // On ne cible QUE via tag_in (voir la tâche : n'utiliser genre_in que si les
-    // `genre:` du profil sont sûrement d'origine AniList — un `genre:` peut aussi
-    // venir de Crunchyroll, localisé en CFG.locale, et enverrait alors une chaîne
-    // française à l'enum anglais d'AniList → 0 résultat silencieux). `tag:Nom` vient
-    // TOUJOURS d'AniList (voir buildTasteProfile) : nom directement utilisable.
-    const tagIn = (profile.top || [])
-      .filter((k) => k.startsWith('tag:'))
-      .map((k) => k.slice(4));
-    if (!tagIn.length) return found;   // profil basé uniquement sur des genres : rien d'exploitable ici
     if (anilistCooldownRemainingMs() > 0) return found;   // coupe-circuit déjà en place : on n'insiste pas
 
+    const { accountId, REJ, D } = ctx;
     const isKnownTitle = (title) => {
       const nt = aniNorm(title);
       if (!nt) return false;
       return knownTitlesNorm.some((k) => k === nt || k.includes(nt) || nt.includes(k) || aniDice(k, nt) >= 0.82);
     };
 
-    const { accountId, REJ, D } = ctx;
-    // Bassin 100% AniList : c'est la note AniList (discoverMinRatingAni) qui fait foi ici,
-    // pas la note CR (sans rapport avec cette source de candidats). (fix) Sans seuil du tout
-    // en mode « séries similaires » — voir evaluateDiscoverCandidate pour la raison.
+    // Traitement partagé d'UNE fiche AniList : filtres locaux gratuits → résolution CR →
+    // mise en cache AniList → panel CR → évaluation complète. Pousse dans `found` si retenue.
+    // Utilisé aussi bien par le pool « recommandations » (mode similaire) que par le pool
+    // tag_in + popularité (Découverte normale) — une seule logique à maintenir.
+    const processMedia = async (m) => {
+      if (D.cancelRequested || found.length >= target) return;
+      if (!m || m.id == null) return;
+      if (IGNORED.has('ani:' + m.id)) return;
+      const genresFr = translateAniGenres(m.genres || []);
+      if (genresFr.length && categoriesRejectedByGenre(genresFr)) return;
+      const title = aniPrimaryTitle(m) || (m.title && m.title.native) || '';
+      if (!title) return;
+      if (isKnownTitle(title)) return;
+      let cr;
+      try { cr = await resolveCrunchyrollForPremiere(m); }
+      catch (e) { safeCall.log(e, 'scanAnilistPopularity:resolve'); return; }
+      if (!cr || !cr.id) return;   // pas de fiche CR assez sûre : rien à évaluer ici
+      if (exclude.has(cr.id) || seenCandidate.has(cr.id)) return;
+      seenCandidate.add(cr.id);
+      // Genres/tags AniList déjà en main (zéro requête de plus) : mis en cache tout de suite,
+      // pour que evaluateDiscoverCandidate (qui relit ce cache) les récupère automatiquement.
+      const aniResult = { matched: false, ...EMPTY_ANI, aniId: null, aniTitle: '', av: ANILIST_CACHE_VER };
+      Object.assign(aniResult, computeAniSchedule(m, {}), { matched: true, aniId: m.id, aniTitle: title });
+      cacheSet('anilist:' + cr.id, aniResult);
+      let panel;
+      try { panel = await getSeriesPanel(cr.id); } catch (e) { safeCall.log(e, 'scanAnilistPopularity:panel'); return; }
+      if (!panel) return;
+      const evald = await evaluateDiscoverCandidate(panel, { accountId, REJ, D });
+      if (evald) found.push(evald);
+    };
+
+    // ── Mode SIMILAIRE 🪄 : pool = recommandations AniList curées de la série source ──
+    // Les VRAIS similaires (votés par la communauté), au lieu du tag_in générique qui
+    // remontait des shōnen sans rapport. Repli sur le pool tag_in si la source n'a pas de
+    // recommandations exploitables (ou si aucune ne se résout vers Crunchyroll).
+    if (D.similarTo && D.similarTo.title) {
+      const recMedia = await fetchAnilistSimilar(D.similarTo);
+      if (recMedia && recMedia.length) {
+        if (onProgress) onProgress(1, 1);
+        for (const m of recMedia) {
+          if (D.cancelRequested || anilistCooldownRemainingMs() > 0 || found.length >= target) break;
+          await processMedia(m);
+        }
+        if (found.length) return found;   // recommandations exploitées : on s'y tient
+        // sinon (aucune reco résolue vers CR) → repli tag_in ci-dessous
+      }
+    }
+
+    // ── Découverte normale (ou similaire sans reco exploitable) : tag_in + popularité ──
+    // Profil neuf/vide : rien à cibler côté AniList — zéro requête plutôt qu'un scan large.
+    if (!profile || !profile.size) return found;
+    // On ne cible QUE via tag_in : `tag:Nom` vient TOUJOURS d'AniList (nom directement
+    // utilisable), alors qu'un `genre:` peut venir de Crunchyroll localisé (→ 0 résultat).
+    const tagIn = (profile.top || []).filter((k) => k.startsWith('tag:')).map((k) => k.slice(4));
+    if (!tagIn.length) return found;   // profil basé uniquement sur des genres : rien d'exploitable ici
     const minRatingAni = D.similarTo ? 0 : CFG.discoverMinRatingAni;
-    const scoreMin = minRatingAni > 0
-      ? Math.round(Math.max(0, Math.min(5, minRatingAni)) * 20) : null;
-    // (fix) Plus de plafond réglable (discoverAnilistMaxPages supprimé) : ce bassin va
-    // maintenant au bout du classement AniList disponible, comme le bassin CR — même
-    // garde-fou anti-boucle-infinie (jamais atteint en usage normal), interruptible via
-    // le bouton Interrompre.
+    const scoreMin = minRatingAni > 0 ? Math.round(Math.max(0, Math.min(5, minRatingAni)) * 20) : null;
     const maxPages = POPULAR_SCAN_SAFETY_CAP;
     const perPage = Math.min(50, Math.max(10, CFG.discoverPageSize || 50));
 
@@ -5390,65 +5515,16 @@
       if (onProgress) onProgress(page, maxPages);
       let data;
       try {
-        data = await anilistQuery(ANILIST_DISCOVER_QUERY, {
-          page, perPage, tagIn, scoreMin, formatIn: ANILIST_DISCOVER_FORMATS,
-        });
-      } catch (e) { safeCall.log(e, 'scanAnilistPopularity'); break; }   // 429/mur d'accès : on s'arrête net, comme le bassin CR
+        data = await anilistQuery(ANILIST_DISCOVER_QUERY, { page, perPage, tagIn, scoreMin, formatIn: ANILIST_DISCOVER_FORMATS });
+      } catch (e) { safeCall.log(e, 'scanAnilistPopularity'); break; }   // 429/mur d'accès : on s'arrête net
       const pageData = data && data.Page;
       const media = (pageData && pageData.media) || [];
       hasNext = !!(pageData && pageData.pageInfo && pageData.pageInfo.hasNextPage);
       page++;
       if (!media.length) continue;
-
       for (const m of media) {
         if (D.cancelRequested || found.length >= target) break;
-        if (!m || m.id == null) continue;
-
-        // ── Filtre local, GRATUIT (aucune requête) — rejeté ici = aucune requête
-        // CR dépensée pour ce candidat. ──────────────────────────────────────────
-        // Déjà ignoré côté Calendrier (bloc Nouveautés, voir loadNewPremieres) sous
-        // la clé 'ani:'+id — même convention réutilisée ici pour reconnaître le même
-        // anime, quelle que soit la vue depuis laquelle il a été ignoré.
-        if (IGNORED.has('ani:' + m.id)) continue;
-        // Genre exclu en permanence (ex. hentai — déjà bloqué aussi par isAdult:false
-        // côté requête, ceci est une seconde barrière) — toujours en OR, jamais strict,
-        // même logique que browseRejectedByGenre pour le bassin CR.
-        const genresFr = translateAniGenres(m.genres || []);
-        if (genresFr.length && categoriesRejectedByGenre(genresFr)) continue;
-        const title = aniPrimaryTitle(m) || (m.title && m.title.native) || '';
-        if (!title) continue;
-        if (isKnownTitle(title)) continue;
-
-        // ── Résolution vers Crunchyroll (réutilise resolveCrunchyrollForPremiere
-        // telle quelle — cache crmatch: déjà géré par cette fonction). ──────────
-        let cr;
-        try { cr = await resolveCrunchyrollForPremiere(m); }
-        catch (e) { safeCall.log(e, 'scanAnilistPopularity:resolve'); continue; }
-        if (!cr || !cr.id) continue;   // pas de fiche CR assez sûre : rien à évaluer ici
-
-        // Vérification IMMÉDIATE contre les exclusions les plus fraîches ET contre
-        // les candidats déjà vus (CR ou AniList) DANS CE MÊME scan, AVANT tout appel
-        // coûteux (saisons/genres/note/épisodes). Verrou posé tout de suite après.
-        if (exclude.has(cr.id) || seenCandidate.has(cr.id)) continue;
-        seenCandidate.add(cr.id);
-
-        // Genres/tags AniList déjà en main (zéro requête de plus, on les a via `m`) :
-        // mis en cache tout de suite, pour que evaluateDiscoverCandidate (qui relit
-        // ce même cache, voir readAnilistCached) les récupère automatiquement, ET
-        // pour qu'un futur scan (CR ou AniList) n'ait plus jamais à les redemander.
-        const aniResult = { matched: false, ...EMPTY_ANI, aniId: null, aniTitle: '', av: ANILIST_CACHE_VER };
-        Object.assign(aniResult, computeAniSchedule(m, {}), { matched: true, aniId: m.id, aniTitle: title });
-        cacheSet('anilist:' + cr.id, aniResult);
-
-        // Panel complet CR (déjà en cache 7 j si la série a déjà été croisée ailleurs,
-        // voir getSeriesPanel) — seule façon d'obtenir jaquette/résumé/genres CR/nombre
-        // de saisons pour ce candidat, au même format que les candidats du bassin CR.
-        let panel;
-        try { panel = await getSeriesPanel(cr.id); } catch (e) { safeCall.log(e, 'scanAnilistPopularity:panel'); continue; }
-        if (!panel) continue;
-
-        const evald = await evaluateDiscoverCandidate(panel, { accountId, REJ, D });
-        if (evald) found.push(evald);
+        await processMedia(m);
       }
     }
     return found;
@@ -6729,15 +6805,29 @@
     const score = tasteContrib + prefBonusVal + wellBonusVal + superBonusVal;
 
     const lead = prefBoost ? 'pref' : goodTaste ? 'aff' : wellRated ? 'rated' : '';
-    const legendary = score >= CFG.discoverLegendaryScore;
-    const notable = !legendary && score >= CFG.discoverNotableScore;
-    // Décomposition chiffrée du score, pour l'affichage détaillé optionnel (voir
-    // scoreDetailHtml / CFG.discoverShowScoreDetail) : chaque terme réellement appliqué.
+    // (fix arrondi) Le PALIER (notable/légendaire) est décidé sur le score ARRONDI au dixième
+    // — le même chiffre que celui affiché sur la carte — et non sur le brut. Sinon deux séries
+    // affichant toutes deux « +1.7 » pouvaient tomber dans des paliers différents (l'une à
+    // 1.73 → légendaire, l'autre à 1.69 → notable, mais les deux affichées « 1.7 »). On somme
+    // les termes EUX-MÊMES arrondis (comme le schéma de score), pour que le total montré
+    // s'additionne toujours à partir de ce qu'on lit, et que le palier corresponde à ce total.
+    const r1 = (v) => Math.round(v * 10) / 10;
+    const tasteShown = r1(tasteContrib);
+    const prefShown = r1(prefBonusVal);
+    const wellShown = r1(wellBonusVal);
+    const superShown = r1(superBonusVal);
+    const scoreShown = tasteShown + prefShown + wellShown + superShown;
+    const legendary = scoreShown >= CFG.discoverLegendaryScore;
+    const notable = !legendary && scoreShown >= CFG.discoverNotableScore;
+    // Décomposition chiffrée AFFICHÉE (termes arrondis, somme = scoreShown) pour l'affichage
+    // détaillé optionnel (voir scoreDetailHtml / CFG.discoverShowScoreDetail).
     const parts = {
-      taste, tasteWeight: tw, tasteContrib,
-      prefBonus: prefBonusVal, wellBonus: wellBonusVal, superBonus: superBonusVal,
+      taste, tasteWeight: tw, tasteContrib: tasteShown,
+      prefBonus: prefShown, wellBonus: wellShown, superBonus: superShown,
     };
-    return { badges, lead, legendary, notable, score, parts };
+    // `score` (brut) reste pour le TRI (pertinence, fin) ; `scoreShown` sert à l'affichage ET
+    // au palier, pour que chiffre montré et badge soient toujours cohérents.
+    return { badges, lead, legendary, notable, score, scoreShown, parts };
   }
 
   // (32) Schéma horizontal du calcul du score « pépite », affiché en haut du sous-groupe
@@ -6938,7 +7028,8 @@
   // soient vérifiables série par série, pas seulement devinés depuis les badges.
   function scoreChip(sig) {
     const cls = sig.legendary ? ' legendary' : sig.notable ? ' notable' : '';
-    const signed = (sig.score >= 0 ? '+' : '') + sig.score.toFixed(1);
+    const shown = sig.scoreShown != null ? sig.scoreShown : sig.score;   // même chiffre que le palier
+    const signed = (shown >= 0 ? '+' : '') + shown.toFixed(1);
     return `<span class="crrav-scorechip${cls}" title="Score pépite obtenu — légendaire ≥ ${CFG.discoverLegendaryScore}, notable ≥ ${CFG.discoverNotableScore} (réglable dans Réglages → Découverte)">${signed}</span>`;
   }
 
@@ -6946,6 +7037,7 @@
   function scoreDetailHtml(sig) {
     if (!CFG.discoverShowScoreDetail || !sig.parts) return '';
     const p = sig.parts;
+    const shown = sig.scoreShown != null ? sig.scoreShown : sig.score;
     const fs = (v) => (v >= 0 ? '+' : '\u2212') + Math.abs(v).toFixed(1);
     const chips = [
       `<span class="crrav-scd-term" title="Goût net ${p.taste.toFixed(2)} × poids ${p.tasteWeight.toFixed(1)}">Goût ${p.taste >= 0 ? '+' : '\u2212'}${Math.abs(p.taste).toFixed(2)}×${p.tasteWeight.toFixed(1)} = <b>${fs(p.tasteContrib)}</b></span>`,
@@ -6953,9 +7045,9 @@
     if (p.prefBonus) chips.push(`<span class="crrav-scd-term" title="Bonus genre/tag préféré">🎯 ${fs(p.prefBonus)}</span>`);
     if (p.wellBonus) chips.push(`<span class="crrav-scd-term" title="Bonus très bien notée">🏆 ${fs(p.wellBonus)}</span>`);
     if (p.superBonus) chips.push(`<span class="crrav-scd-term" title="Bonus note exceptionnelle">✨ ${fs(p.superBonus)}</span>`);
-    const tier = sig.legendary ? '✨ Légendaire' : sig.notable ? '◆ Notable' : sig.score >= 0 ? 'Ordinaire' : '✕ Hors goûts';
+    const tier = sig.legendary ? '✨ Légendaire' : sig.notable ? '◆ Notable' : shown >= 0 ? 'Ordinaire' : '✕ Hors goûts';
     return `<div class="crrav-scoredetail">${chips.join('<span class="crrav-scd-op">+</span>')}
-      <span class="crrav-scd-op">=</span><span class="crrav-scd-total ${sig.legendary ? 'legendary' : sig.notable ? 'notable' : ''}">${fs(sig.score)} · ${tier}</span></div>`;
+      <span class="crrav-scd-op">=</span><span class="crrav-scd-total ${sig.legendary ? 'legendary' : sig.notable ? 'notable' : ''}">${fs(shown)} · ${tier}</span></div>`;
   }
 
   function discoverCard(s, profile) {
