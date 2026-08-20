@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.10.1
+// @version      3.10.3
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.10.1';
+  const SCRIPT_VERSION = '3.10.3';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -8384,8 +8384,9 @@
      c'est le ruban qu'on décale SOUS lui quand les deux coexistent (sélecteur de fratrie : le
      ruban est toujours écrit avant la note dans le HTML), ce qui élimine le chevauchement
      quelle que soit la largeur du texte, au prix d'un décalage vertical du ruban plutôt que
-     de la note.*/
-  .crrav-rating ~ .crrav-legribbon,.crrav-rating ~ .crrav-notaribbon{top:34px}
+     de la note. (fix) Décalé un peu plus bas (34→46px) pour laisser la place au bouton
+     « + » (ajout à une liste), lui aussi ancré en haut à droite (top:8px) juste au-dessus. */
+  .crrav-rating ~ .crrav-legribbon,.crrav-rating ~ .crrav-notaribbon{top:46px}
   .crrav-info{position:absolute;right:8px;bottom:8px;z-index:2;width:32px;height:32px;border-radius:50%;
     background:rgba(10,10,12,.92);border:1px solid rgba(255,255,255,.22);
     color:#f2f2f4;font:700 15px/1 Georgia,serif;cursor:pointer;padding:0;
@@ -8548,7 +8549,13 @@
   .crrav-airing{left:8px}
 
   /* ajout direct à une Crunchylist depuis Découverte */
-  .crrav-addlist{position:absolute;right:8px;bottom:48px;z-index:2;width:32px;height:32px;border-radius:50%;
+  /* (fix) Remonté en haut à droite plutôt qu'empilé juste au-dessus du bouton « i »
+     (bottom:8px, même colonne) : les deux étaient trop proches, cause de faux-clics
+     (viser « i » et toucher « + » par erreur). Reste fixe en top:8px (place libre à
+     droite du pavé de note, qui est ancré à gauche) — c'est plutôt le ruban Légendaire/
+     Notable qui se décale sous lui quand les deux coexistent, voir .crrav-rating ~
+     .crrav-legribbon plus haut. */
+  .crrav-addlist{position:absolute;top:8px;right:8px;z-index:2;width:32px;height:32px;border-radius:50%;
     background:rgba(10,10,12,.92);border:1px solid rgba(255,255,255,.22);
     color:#c9c9d2;font:700 16px/1 system-ui;cursor:pointer;padding:0;opacity:1;transition:opacity .15s,background .15s}
   .crrav-addlist::before{content:'';position:absolute;inset:-6px;border-radius:50%}
