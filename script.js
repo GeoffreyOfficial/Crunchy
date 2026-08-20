@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.9.0
+// @version      3.9.1
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.9.0';
+  const SCRIPT_VERSION = '3.9.1';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -9370,7 +9370,13 @@
   .crrav-ignrow:last-child{border-bottom:0}
   .crrav-ignrow-main{flex:1 1 auto;min-width:0}
   .crrav-ignrow-head{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-  .crrav-ignrow-t{flex:1 1 auto;color:#f2f2f4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  /* min-width:0 est indispensable ici : sans lui, un flex-item refuse par défaut de
+     rétrécir sous la largeur de son texte non tronqué (min-width:auto implicite), donc
+     l'ellipsis ne se déclenchait jamais sur un titre long — la ligne débordait et
+     repoussait la pastille source / la date / le bouton i / le bouton ↺ à la ligne
+     suivante. Un titre court, lui, ne débordait pas et tout restait sur une ligne : d'où
+     la mise en page qui semblait « mélangée » selon la longueur du titre. */
+  .crrav-ignrow-t{flex:1 1 auto;min-width:0;color:#f2f2f4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .crrav-ignrow-src{flex:0 0 auto;color:#8a8a94;font:600 10px/1 system-ui;text-transform:uppercase;
     letter-spacing:.04em}
   /* (43) date relative d'ignore (fmtRelDay) — absente sur les entrées migrées d'avant
