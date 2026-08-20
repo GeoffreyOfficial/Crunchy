@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.7.0';
+  const SCRIPT_VERSION = '3.6.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -4123,6 +4123,7 @@
     newPremCatsIn: [], newPremCatsEx: [],
     onlyAiring: false,         // uniquement les séries encore en diffusion
     onlyRated: false,          // uniquement celles que tu as notées 4★ ou plus
+    onlyFavorite: false,       // uniquement tes favoris (notées 5★ par TOI)
     onlyShort: false,          // séries courtes : 12 épisodes ou moins au total
     quickFinish: false,        // il te reste 3 épisodes ou moins
   };
@@ -6495,6 +6496,7 @@
   function applyCommonFilters(list, f, catsIn, catsEx) {
     if (f.onlyAiring) list = list.filter((s) => s.airing);
     if (f.onlyRated) list = list.filter((s) => (s.rating ?? 0) >= 4);
+    if (f.onlyFavorite) list = list.filter((s) => s.favorite);
     if (f.onlyShort) list = list.filter((s) => s.total > 0 && s.total <= 12);
     if (f.quickFinish) list = list.filter((s) => s.remaining > 0 && s.remaining <= 3);
     if (catsIn.length) list = list.filter((s) => (s.categories || []).some((c) => catsIn.includes(c)));
@@ -6530,11 +6532,14 @@
   function quickChips(f) {
     return [
       ['onlyAiring', 'En diffusion', 'Uniquement les séries dont un épisode sort encore'],
+      ['onlyFavorite', '★ Favoris', 'Uniquement tes favoris — celles que TU as notées 5 étoiles'],
       ['onlyRated', 'Notées 4★+', 'Uniquement celles que tu as notées 4 étoiles ou plus'],
       ['onlyShort', 'Courtes (≤12 ép.)', 'Séries de 12 épisodes ou moins au total'],
       ['quickFinish', 'Finissable (≤3 ép.)', 'Il te reste 3 épisodes ou moins'],
     ].map(([k, label, title]) =>
-      `<button class="crrav-chip" data-toggle="${k}" aria-pressed="${!!f[k]}"
+      // (37) crrav-chip-toggle : voir renderSuivi, distingue visuellement les toggles
+      // indépendants des chips de statut (filtre exclusif).
+      `<button class="crrav-chip crrav-chip-toggle" data-toggle="${k}" aria-pressed="${!!f[k]}"
         title="${title}">${label}</button>`).join('');
   }
 
@@ -6754,7 +6759,8 @@
   // le texte « X restant (sur Y prévus) » qui alourdissait la carte (voir plannedInfo).
   function ticks(s) {
     if (s.total > 120) {
-      return `<div class="crrav-bar"><i style="width:${s.pct}%"></i></div>`;
+      // (4) dégradé animé tant qu'il reste des épisodes à voir (pct < 100).
+      return `<div class="crrav-bar${s.pct < 100 ? ' crrav-bar-active' : ''}"><i style="width:${s.pct}%"></i></div>`;
     }
     const tg = s.total <= 30 ? 2 : s.total <= 60 ? 1 : 0;   // gouttière entre épisodes
     const sg = s.total <= 30 ? 6 : s.total <= 60 ? 4 : 3;   // gouttière entre saisons
@@ -6940,6 +6946,7 @@
   // un peu plus bas) tant que l'onglet reste ouvert. Réinitialisé au rechargement.
   const statsAccordionOpen = new Set();
   let settingsSearchQ = '';        // (30) requête de recherche interne aux Réglages
+  let settingsSheetTab = 'settings'; // (41) sous-onglet actif de la sheet Réglages (settings|ignored|diag)
   let suppressAccToggle = false;   // évite de polluer statsAccordionOpen lors d'ouvertures programmatiques
   safeCall(() => {
     const raw = JSON.parse(localStorage.getItem(LS + 'hues') || '{}');
@@ -7077,7 +7084,7 @@
     return `<span class="${cls}" title="Tu l'as notée 5★ — favori">★</span>`;
   }
 
-  function card(s) {
+  function card(s, i) {
     if (STATE.filters.view === 'list') return listRow(s);
     const seriesUrl = crSeriesUrl(s.id, s.slug);
     const done = s.remaining === 0;
@@ -7087,7 +7094,10 @@
     const state = done && s.airing ? '<span class="crrav-airing">À jour</span>'
       : !done && s.airing ? '<span class="crrav-airing">En diffusion</span>' : '';
     const hue = HUE_CACHE.get(s.id);
-    const styleVars = `--prog:${progColor(s)}${hue ? `;--hue:${hue}` : ''}`;
+    // (2) --i pilote le délai de la cascade d'entrée (voir .crrav-card, animation crrav-card-in) ;
+    // plafonné côté JS car calc(min(...)) sur des ms n'est pas fiable partout.
+    const idx = Math.min(i || 0, 13);
+    const styleVars = `--prog:${progColor(s)}${hue ? `;--hue:${hue}` : ''};--i:${idx}`;
     const pinfo = plannedInfo(s);
     return `<article class="crrav-card${s.isNew ? ' isnew' : ''}${hue ? ' has-hue' : ''}" style="${styleVars}" data-hue-id="${s.id}"${hue ? ' data-hue-done="1"' : ''}>
       <div class="crrav-thumb">
@@ -7686,10 +7696,17 @@
     </div>`;
   }
 
+  // (39) Badges de signal (🎯/💚/🏆) cliquables/tappables : révèlent à la demande le
+  // détail chiffré du score de CETTE série (sinon visible uniquement en activant le
+  // réglage global Réglages → « Afficher le détail du score sur les cartes »). Le clic
+  // ne fait que basculer la classe 'show' du bloc .crrav-scoredetail déjà présent dans
+  // la carte (voir scoreDetailHtml juste après) — aucun re-render, même pattern que le
+  // bouton « i » du synopsis (voir handler data-act="toggle-scoredetail").
   function sigMarkup(sig) {
     return sig && sig.badges.length
       ? `<div class="crrav-sigs">${sig.badges.map(([ic, lbl]) =>
-          `<span class="crrav-sig-dot" title="${lbl}">${ic}</span>`).join('')}</div>`
+          `<button type="button" class="crrav-sig-dot" data-act="toggle-scoredetail"
+            aria-expanded="false" title="${lbl} — touche pour voir le détail du score">${ic}</button>`).join('')}</div>`
       : '';
   }
 
@@ -7704,9 +7721,12 @@
     return `<span class="crrav-scorechip${cls}" title="Score pépite obtenu — légendaire ≥ ${CFG.discoverLegendaryScore}, notable ≥ ${CFG.discoverNotableScore} (réglable dans Réglages → Découverte)">${signed}</span>`;
   }
 
-  // Détail chiffré du score « pépite » d'une carte (option CFG.discoverShowScoreDetail).
+  // (39) Détail chiffré du score « pépite » d'une carte. Toujours rendu dans le DOM dès
+  // que sig.parts existe : masqué par défaut via CSS et révélé au clic sur un badge de
+  // signal (voir sigMarkup), SAUF si CFG.discoverShowScoreDetail est actif — auquel cas
+  // il reste visible en permanence comme avant, classe 'show' posée d'entrée.
   function scoreDetailHtml(sig) {
-    if (!CFG.discoverShowScoreDetail || !sig.parts) return '';
+    if (!sig.parts) return '';
     const p = sig.parts;
     const shown = sig.scoreShown != null ? sig.scoreShown : sig.score;
     const fs = (v) => (v >= 0 ? '+' : '\u2212') + Math.abs(v).toFixed(1);
@@ -7717,7 +7737,7 @@
     if (p.wellBonus) chips.push(`<span class="crrav-scd-term" title="Bonus très bien notée">🏆 ${fs(p.wellBonus)}</span>`);
     if (p.superBonus) chips.push(`<span class="crrav-scd-term" title="Bonus note exceptionnelle">✨ ${fs(p.superBonus)}</span>`);
     const tier = sig.legendary ? '✨ Légendaire' : sig.notable ? '◆ Notable' : shown >= 0 ? 'Ordinaire' : '✕ Hors goûts';
-    return `<div class="crrav-scoredetail">${chips.join('<span class="crrav-scd-op">+</span>')}
+    return `<div class="crrav-scoredetail${CFG.discoverShowScoreDetail ? ' show' : ''}">${chips.join('<span class="crrav-scd-op">+</span>')}
       <span class="crrav-scd-op">=</span><span class="crrav-scd-total ${sig.legendary ? 'legendary' : sig.notable ? 'notable' : ''}">${fs(shown)} · ${tier}</span></div>`;
   }
 
@@ -7745,7 +7765,8 @@
       <div class="crrav-body">
         <a class="crrav-title" href="${seriesUrl}">${escapeHtml(s.title)}</a>
         <div class="crrav-sigs">${sig.badges.map(([ic, lbl]) =>
-          `<span class="crrav-sig-dot" title="${lbl}">${ic}</span>`).join('')}${scoreChip(sig)}</div>
+          `<button type="button" class="crrav-sig-dot" data-act="toggle-scoredetail"
+            aria-expanded="false" title="${lbl} — touche pour voir le détail du score">${ic}</button>`).join('')}${scoreChip(sig)}</div>
         ${scoreDetailHtml(sig)}
         <div class="crrav-meta"><span>${info}</span></div>
         ${(s.categories || []).length
@@ -7931,6 +7952,12 @@
     background:radial-gradient(1200px 600px at 50% -10%,rgba(244,117,33,.10),transparent 60%),#0a0a0c;
     color-scheme:dark;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;
     -webkit-font-smoothing:antialiased;animation:crrav-in .22s ease}
+  /* (10) grain très discret sur tout le panneau : z-index:-1 le place derrière le contenu
+     normal (.crrav-top, cartes…) mais devant le fond de .crrav-overlay lui-même — pas
+     besoin de toucher au z-index des enfants. */
+  .crrav-overlay::before{content:'';position:fixed;inset:0;z-index:-1;pointer-events:none;
+    opacity:.025;mix-blend-mode:overlay;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")}
   @keyframes crrav-in{from{opacity:0;transform:scale(.99)}to{opacity:1;transform:none}}
   @media (prefers-reduced-motion:reduce){
     .crrav-overlay,.crrav-fab,.crrav-card,.crrav-card::after,.crrav-skel,.crrav-skel div,
@@ -7952,6 +7979,24 @@
      « actions & app » (droite : actualiser, TV, réglages, fermer). */
   .crrav-hpush{margin-left:auto}
   .crrav-row-main::-webkit-scrollbar{display:none}
+  /* (35) Indice de défilement horizontal sur .crrav-row-main : la scrollbar est
+     volontairement masquée (voir commentaire plus haut sur l'avalement de boutons hors-
+     écran), donc rien ne signalait qu'il fallait swiper. Technique CSS pure (« scroll
+     shadows ») : 2 caches de la couleur du fond, collés au contenu (local — donc
+     invisibles tant qu'on est déjà au bord), par-dessus 2 fondus de couleur accent,
+     fixes par rapport au conteneur (scroll — donc révélés dès qu'il y a du contenu cache
+     de ce côté). Aucun JS, aucun recalcul au (re)rendu. */
+  .crrav-row-main{
+    background-image:
+      linear-gradient(to right,rgba(10,10,12,1) 40%,rgba(10,10,12,0)),
+      linear-gradient(to left,rgba(10,10,12,1) 40%,rgba(10,10,12,0)),
+      linear-gradient(to right,rgba(244,117,33,.65),rgba(244,117,33,0)),
+      linear-gradient(to left,rgba(244,117,33,.65),rgba(244,117,33,0));
+    background-repeat:no-repeat;
+    background-size:24px 100%,24px 100%,10px 100%,10px 100%;
+    background-position:left center,right center,left center,right center;
+    background-attachment:local,local,scroll,scroll;
+  }
   .crrav-brand{font:800 15px/1 system-ui;letter-spacing:-.02em;margin:0;flex:0 0 auto;
     display:flex;align-items:center;gap:6px;white-space:nowrap}
   .crrav-logo{flex:0 0 auto;display:block}
@@ -8076,11 +8121,24 @@
     background-repeat:no-repeat;background-position:right 11px center}
   .crrav-select option{background:#1c1c22;color:#f2f2f4}
   .crrav-select option:checked{background:#f47521;color:#12120f}
+  /* (36) Étiquette de groupe des <optgroup> (voir renderSuivi) — discrète, non sélectionnable. */
+  .crrav-select optgroup{background:#1c1c22;color:#f47521;font:700 12px/1 system-ui;font-style:normal}
+  .crrav-select optgroup option{color:#f2f2f4;font-weight:400}
   .crrav-chips{display:flex;gap:6px;flex-wrap:wrap;width:100%}
   .crrav-chip{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.12);color:#c9c9d2;
     border-radius:999px;padding:6px 13px;font:600 12.5px/1 system-ui;cursor:pointer;text-decoration:none;
     display:inline-flex;align-items:center;gap:5px}
   .crrav-chip[aria-pressed="true"]{background:#f47521;border-color:#f47521;color:#12120f}
+  /* (37) Groupes de chips de renderSuivi — voir commentaire dans la fonction. Le groupe
+     statut (filtre exclusif) garde le style plein plat existant ; le groupe toggle
+     (indépendants) prend une bordure tiretée + une puce carrée avant le libellé, pour
+     se lire comme des cases à cocher plutôt que comme des choix qui s'excluent entre eux. */
+  .crrav-chipgroup{width:100%}
+  .crrav-chipgroup+.crrav-chipgroup{margin-top:2px}
+  .crrav-chip-toggle{border-style:dashed}
+  .crrav-chip-toggle::before{content:'';width:7px;height:7px;flex:0 0 auto;border-radius:2px;
+    border:1.5px solid currentColor;opacity:.65}
+  .crrav-chip-toggle[aria-pressed="true"]::before{background:#12120f;border-color:#12120f;opacity:1}
   .crrav-chip:focus-visible{outline:2px solid #fff;outline-offset:2px}
   .crrav-catlegend{font:600 11px/1 system-ui;color:#8a8a94;align-self:center;
     text-transform:uppercase;letter-spacing:.06em}
@@ -8088,6 +8146,16 @@
   .crrav-cat.in{background:#f47521;border-color:#f47521;color:#12120f}
   .crrav-cat.ex{background:rgba(224,87,74,.16);border-color:rgba(224,87,74,.55);color:#ff9a8f;
     text-decoration:line-through}
+  /* (38) Le double-état des puces de genre (1 clic = garder, 2 clics = exclure) n'était
+     signalé qu'une fois, par le texte statique .crrav-catlegend au-dessus de la grille —
+     invisible dès qu'on ne relève pas les yeux. On ajoute un indice permanent sur la puce
+     elle-même : mini repère ✓/✕ discret même à l'état neutre, qui se détache au
+     survol/focus pour rappeler l'interaction avant le clic. Purement cosmétique, aucun
+     changement de comportement ni de structure des puces déjà « in »/« ex ». */
+  .crrav-cat:not(.in):not(.ex)::after{content:'✓ ✕';margin-left:4px;font-size:9px;
+    letter-spacing:1px;opacity:.32;transition:opacity .15s ease}
+  .crrav-cat:not(.in):not(.ex):hover::after,
+  .crrav-cat:not(.in):not(.ex):focus-visible::after{opacity:.9}
   .crrav-cats{font:500 10.5px/1.3 system-ui;color:#8a8a94;
     display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
     overflow:hidden;text-overflow:ellipsis}
@@ -8100,7 +8168,12 @@
        c'est le gain le plus net — et il rend les effets ci-dessous « gratuits ». */
     content-visibility:auto;contain-intrinsic-size:auto 320px;
     transition:transform .18s cubic-bezier(.2,.7,.3,1),border-color .18s ease,
-      box-shadow .18s ease,background .4s ease}
+      box-shadow .18s ease,background .4s ease;
+    /* (2) cascade d'entrée : même esprit que crrav-in (fade+scale du panneau), décliné en
+       fade+translateY par carte, avec délai croissant plafonné via --i (voir card()). */
+    animation:crrav-card-in .32s ease backwards;
+    animation-delay:calc(var(--i,0) * 30ms)}
+  @keyframes crrav-card-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
   /* (#6) teinte tirée de la jaquette, très discrète pour rester lisible */
   .crrav-card.has-hue{background:
     linear-gradient(160deg,rgba(var(--hue),.16),rgba(20,20,25,.6) 62%),#141419}
@@ -8128,7 +8201,13 @@
   .crrav-lactions .crrav-similar{width:32px;height:32px}
   /* Coloration Découverte : pastilles de signaux + liseré coloré (couleur = signal dominant) */
   .crrav-sigs{display:flex;gap:5px;margin:3px 0 2px;font-size:13px;line-height:1;min-height:15px}
-  .crrav-sig-dot{cursor:default}
+  /* (39) Badge devenu <button> (voir sigMarkup/discoverCard) : cercle tappable discret,
+     qui se détache légèrement au survol/focus pour indiquer qu'il fait quelque chose. */
+  .crrav-sig-dot{cursor:pointer;background:transparent;border:0;padding:2px;border-radius:6px;
+    line-height:1;transition:background .15s ease,transform .12s ease}
+  .crrav-sig-dot:hover{background:rgba(255,255,255,.1);transform:scale(1.12)}
+  .crrav-sig-dot:active{transform:scale(.94)}
+  .crrav-sig-dot:focus-visible{outline:2px solid #fff;outline-offset:2px}
   .crrav-sig-pref{--sig:#b98bff}
   .crrav-sig-aff{--sig:#4ade80}
   .crrav-sig-rated{--sig:#ffd166}
@@ -8141,9 +8220,12 @@
      plus bas) — au lieu d'un gris quasi neutre qui se distinguait à peine du chip par défaut. */
   .crrav-scorechip.notable{background:rgba(159,214,255,.16);border-color:rgba(159,214,255,.5);color:#9fd6ff}
   .crrav-scorechip.legendary{background:rgba(255,179,71,.18);border-color:rgba(255,179,71,.55);color:#ffd48a}
-  /* Détail chiffré du score (option) : puces fines sous les badges */
-  .crrav-scoredetail{display:flex;flex-wrap:wrap;align-items:center;gap:3px 5px;margin-top:6px;
+  /* Détail chiffré du score : puces fines sous les badges. (39) Masqué par défaut —
+     révélé en cliquant un badge de signal (classe 'show'), sauf si le réglage global
+     CFG.discoverShowScoreDetail pose déjà la classe 'show' au rendu (voir scoreDetailHtml). */
+  .crrav-scoredetail{display:none;flex-wrap:wrap;align-items:center;gap:3px 5px;margin-top:6px;
     font:600 10px/1.4 system-ui;font-variant-numeric:tabular-nums;color:#9a9aa6}
+  .crrav-scoredetail.show{display:flex}
   .crrav-scd-term{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);
     border-radius:6px;padding:2px 5px;white-space:nowrap}
   .crrav-scd-term b{color:#d6d6de}
@@ -8321,6 +8403,13 @@
   .crrav-bar{height:6px;border-radius:3px;background:rgba(255,255,255,.12);overflow:hidden;
     box-shadow:inset 0 1px 2px rgba(0,0,0,.35)}
   .crrav-bar i{display:block;height:100%;background:var(--prog)}
+  /* (4) dégradé animé uniquement tant que la série n'est pas finie (crrav-bar-active,
+     posé dans le template ligne ~6768) — --prog reste la seule source de teinte. */
+  .crrav-bar-active i{
+    background:linear-gradient(90deg,var(--prog),rgba(255,255,255,.55),var(--prog));
+    background-size:200% 100%;animation:crrav-bar-flow 2.6s linear infinite}
+  @keyframes crrav-bar-flow{from{background-position:200% 0}to{background-position:0 0}}
+  @media (prefers-reduced-motion:reduce){.crrav-bar-active i{animation:none!important;background:var(--prog)}}
 
   /* (6) anneau de progression */
   .crrav-ringwrap{position:absolute;top:6px;right:6px;width:40px;height:40px;display:grid;place-items:center}
@@ -8614,6 +8703,19 @@
     display:flex;align-items:center;gap:10px}
   .crrav-sheethead h2::before{content:'';flex:0 0 auto;width:4px;height:20px;border-radius:3px;
     background:linear-gradient(#ffb347,#f47521);box-shadow:0 0 10px rgba(244,117,33,.55)}
+  /* (41) Sous-onglets de la sheet Réglages (Réglages / Ignorées / Diagnostic) — barre
+     fixe entre l'en-tête et le corps défilant, donc toujours visible sans avoir à
+     remonter en haut du scroll pour changer de panneau. Style dérivé de .crrav-tabs,
+     en un peu plus compact vu l'espace réduit d'une sheet. */
+  .crrav-subtabs{flex:0 0 auto;display:flex;gap:6px;padding:10px max(16px,calc((100% - 900px)/2)) 0;
+    background:#0a0a0c}
+  .crrav-subtab{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.12);color:#c9c9d2;
+    border-radius:10px 10px 0 0;padding:9px 15px;font:700 12.5px/1 system-ui;cursor:pointer;
+    border-bottom:0;transition:background .15s ease,color .15s ease}
+  .crrav-subtab:hover{background:rgba(255,255,255,.1)}
+  .crrav-subtab[aria-selected="true"]{background:rgba(244,117,33,.14);color:#f47521;
+    border-color:rgba(244,117,33,.4)}
+  .crrav-subtab:focus-visible{outline:2px solid #fff;outline-offset:2px}
   .crrav-sheetbody{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;
     overscroll-behavior:contain;padding:2px max(14px,calc((100% - 900px)/2)) 72px}
   .crrav-sheetbody .crrav-settings{max-height:none;overflow:visible;border:0;background:none;
@@ -9343,8 +9445,9 @@
     color:#f2f2f4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .crrav-sg-n{flex:0 0 auto;font:800 10px/1 system-ui;color:#a8a8b4;background:rgba(255,255,255,.06);
     border:1px solid rgba(255,255,255,.1);border-radius:999px;padding:3px 8px;font-variant-numeric:tabular-nums}
-  .crrav-diagsection{margin-top:22px;padding-top:16px;border-top:2px dashed rgba(255,255,255,.14)}
-  .crrav-diagsection .crrav-probe:first-child{margin-top:14px}
+  /* (41) crrav-diagsection : plus utilisée depuis le passage aux sous-onglets (voir
+     diagnosticPanel), règle conservée un temps pour compat puis retirée — voir historique
+     si besoin de la retrouver. */
   .crrav-biggrid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(130px,1fr))}
   .crrav-bigstat{background:#141419;border:1px solid rgba(255,255,255,.08);border-radius:14px;
     padding:16px;text-align:center}
@@ -9517,6 +9620,15 @@
   .crrav-caltime b{font:800 14px/1.1 system-ui;color:#f47521;font-variant-numeric:tabular-nums}
   .crrav-calrow.out .crrav-caltime b{color:#5ce6a0}
   .crrav-caltime small{margin-top:2px;font:600 9.5px/1.1 system-ui;color:#8a8a94;text-align:center}
+  /* (40) Date/heure estimée (voir rowHtml, e.hasTime) : italique + soulignement pointillé
+     sur l'heure ET son style de fond en pointillés, pour se distinguer d'un simple coup
+     d'œil des dates confirmées AniList — sans dépendre uniquement du badge à droite qui
+     peut être hors du champ de vision sur une ligne dense. Réutilisée aussi pour la date
+     de fin de saison estimée (voir seasonEnd/crrav-planned dans rowHtml). */
+  .crrav-caltime.crrav-date-est{background:transparent;border:1px dashed rgba(154,154,164,.4)}
+  .crrav-caltime.crrav-date-est b{font-style:italic;color:#9a9aa4;
+    border-bottom:1px dotted currentColor;padding-bottom:1px}
+  span.crrav-date-est{font-style:italic;border-bottom:1px dotted currentColor;padding-bottom:1px}
   .crrav-calposter{flex:0 0 44px;width:44px;height:62px;border-radius:8px;overflow:hidden;background:#1d1d24;display:block}
   .crrav-calposter img{width:100%;height:100%;object-fit:cover;display:block}
   .crrav-calmain{flex:1;min-width:0}
@@ -9625,6 +9737,17 @@
     .crrav-caltitle{font-size:15.5px}
     .crrav-calweekstat{padding:13px 20px;min-width:118px}
     .crrav-calweekstat b{font-size:24px}
+  }
+
+  /* ── Palier intermédiaire : 2200-2600px, entre le 2K (≥1900px) et l'ultra-large
+     (≥2600px) — cartes et stats un cran plus généreuses avant le plafonnement en
+     largeur du palier suivant. */
+  @media (min-width:2200px){
+    .crrav-grid{grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:30px;padding:38px 52px}
+    /* Les stats passent à trois colonnes ; le hero reste sur toute la largeur comme
+       au palier précédent. */
+    .crrav-statsgrid{grid-template-columns:repeat(3,1fr)}
+    .crrav-statsgrid .crrav-statshero{grid-column:1/-1}
   }
 
   /* ── Ultra-large (≥2600px) : on centre plutôt que d'étirer à l'infini ───── */
@@ -10559,9 +10682,9 @@
     const in7 = events.filter((e) => e.whenTs - now < 7 * DAY).length;
     const behindTotal = events.reduce((a, e) => a + (e.r.s.remaining || 0), 0);
     const weekBar = `<div class="crrav-calweek">
-      <div class="crrav-calweekstat"><b>${events.length}</b><small>séries en cours</small></div>
-      <div class="crrav-calweekstat"><b>${in7}</b><small>cette semaine</small></div>
-      ${behindTotal ? `<div class="crrav-calweekstat hot"><b>${behindTotal}</b><small>épisodes de retard</small></div>` : ''}
+      <div class="crrav-calweekstat"><b data-countup="${events.length}">${events.length}</b><small>séries en cours</small></div>
+      <div class="crrav-calweekstat"><b data-countup="${in7}">${in7}</b><small>cette semaine</small></div>
+      ${behindTotal ? `<div class="crrav-calweekstat hot"><b data-countup="${behindTotal}">${behindTotal}</b><small>épisodes de retard</small></div>` : ''}
     </div>`;
 
     const dayKey = (ts) => { const d = new Date(ts); return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`; };
@@ -10600,10 +10723,21 @@
       if (aniLeft != null && aniLeft > 0) endBits.push(`${aniLeft} restant${aniLeft > 1 ? 's' : ''}`);
       if (s.seasonEndTs && s.seasonEndTs > now - DAY) endBits.push(`fin ${s.plannedApprox ? '~' : ''}${fmtShortDate(s.seasonEndTs)}`);
       const seasonEnd = endBits.length
-        ? `<span class="crrav-planned" title="Épisodes restants et fin de saison — AniList">🗓 ${endBits.join(' · ')}</span>` : '';
+        // (40) « fin ~date » est elle-même une date estimée quand plannedApprox — même
+        // traitement visuel (italique + pointillé, voir .crrav-date-est) que l'heure/date
+        // estimée du prochain épisode juste en dessous, pour rester cohérent partout où
+        // une date n'est pas garantie exacte.
+        ? `<span class="crrav-planned" title="Épisodes restants et fin de saison — AniList">🗓 ${
+            endBits.map((b) => (s.plannedApprox && b.startsWith('fin')) ? `<span class="crrav-date-est">${b}</span>` : b).join(' · ')}</span>` : '';
       const soon = diffH < 24;
+      // (40) e.hasTime (ex-exactTime) distingue une heure connue avec certitude (AniList,
+      // ou heure relevée sur le dernier épisode pour une estimation au rythme hebdo) d'une
+      // date purement estimée sans heure fiable. Jusqu'ici, seul le badge « estimé »/
+      // « AniList » à droite portait cette info — la date/heure elle-même, à gauche,
+      // ne s'en distinguait jamais visuellement. Ajout d'une classe dédiée, italique +
+      // soulignement pointillé, directement sur le bloc heure.
       return `<a class="crrav-calrow${soon ? ' soon' : ''}" href="${seriesUrl(s.id, s.slug)}">
-        <div class="crrav-caltime">
+        <div class="crrav-caltime${e.hasTime ? '' : ' crrav-date-est'}"${e.hasTime ? '' : ' title="Date/heure estimée — pas confirmée par AniList"'}>
           <b>${heure === 'heure inconnue' ? '—' : escapeHtml(heure)}</b>
           <small>${escapeHtml(countdown)}</small>
         </div>
@@ -10755,7 +10889,15 @@
     const totalRemaining = list.reduce((a, s) => a + s.remaining, 0);
     const secLeft = list.reduce((a, s) => a + s.secLeft, 0);
 
-    const chips = [
+    // (37) Chips de statut (filtre EXCLUSIF : un seul actif à la fois — À finir / En
+    // cours / Pas commencées / À jour / Terminées / Tout) vs toggles INDÉPENDANTS
+    // (chacun s'active/désactive séparément) : jusqu'ici rendus avec le même style de
+    // chip, ce qui laissait croire à tort que « Masquer les saisons en cours » ou
+    // « Ignorées » faisaient partie du même groupe exclusif que les statuts. Séparés en
+    // deux groupes visuellement distincts (voir .crrav-chips-status / .crrav-chips-toggle
+    // et leur classe commune .crrav-chipgroup) ; data-status / data-toggle et la logique
+    // de filtrage existante ne changent pas.
+    const statusChips = [
       ['todo', 'À finir'],
       ['started', 'En cours'],
       ['notstarted', 'Pas commencées'],
@@ -10764,11 +10906,13 @@
       ['all', 'Tout'],
     ].map(([v, label]) =>
       `<button class="crrav-chip" data-status="${v}" aria-pressed="${f.status === v}">${label}</button>`
-    ).join('') +
-      `<button class="crrav-chip" data-toggle="hideAiringSeason" aria-pressed="${f.hideAiringSeason}"
+    ).join('');
+
+    const toggleChips =
+      `<button class="crrav-chip crrav-chip-toggle" data-toggle="hideAiringSeason" aria-pressed="${f.hideAiringSeason}"
         title="Masque les séries dont la saison où tu en es sort encore chaque semaine"
         >Masquer les saisons en cours</button>` +
-      `<button class="crrav-chip" data-toggle="showIgnored" aria-pressed="${f.showIgnored}"
+      `<button class="crrav-chip crrav-chip-toggle" data-toggle="showIgnored" aria-pressed="${f.showIgnored}"
         title="Affiche uniquement les séries que tu as ignorées, pour les restaurer"
         >Ignorées${ignoredCount('watchlist') ? ` (${ignoredCount('watchlist')})` : ''}</button>` +
       quickChips(f);
@@ -10803,28 +10947,43 @@
               Affichage du dernier état connu — actualisation en cours…</p>` : ''}
         ${toastMsg ? `<div class="crrav-toast">${escapeHtml(toastMsg)}</div>` : ''}
         <div class="crrav-stats">
-          <div class="crrav-stat"><b>${list.length}</b><small>séries</small></div>
-          <div class="crrav-stat hot"><b>${totalRemaining}</b><small>épisodes restants</small></div>
+          <div class="crrav-stat"><b data-countup="${list.length}">${list.length}</b><small>séries</small></div>
+          <div class="crrav-stat hot"><b data-countup="${totalRemaining}">${totalRemaining}</b><small>épisodes restants</small></div>
           <div class="crrav-stat"><b>${fmtDuration(secLeft)}</b><small>à regarder</small></div>
         </div>
         <div class="crrav-controls">
+          <!-- (36) Options regroupées par thème (temps / date / titre) plutôt qu'à plat —
+               13 options plates étaient difficiles à scanner dans un simple <select>. Les
+               value et la logique de tri (voir sortSuivi) restent inchangées : seul le
+               regroupement visuel via <optgroup> change. -->
           <select class="crrav-select" data-act="sort">
-            <option value="remaining"${f.sort === 'remaining' ? ' selected' : ''}>Le plus d'épisodes à voir</option>
-            <option value="time"${f.sort === 'time' ? ' selected' : ''}>Le plus de temps à voir</option>
-            <option value="quickest"${f.sort === 'quickest' ? ' selected' : ''}>Finissable ce soir</option>
-            <option value="closest"${f.sort === 'closest' ? ' selected' : ''}>Bientôt fini</option>
-            <option value="progress"${f.sort === 'progress' ? ' selected' : ''}>Progression</option>
-            <option value="lastWatched"${f.sort === 'lastWatched' ? ' selected' : ''}>Dernier vu</option>
-            <option value="title"${f.sort === 'title' ? ' selected' : ''}>Titre A→Z</option>
-            <option value="recent"${f.sort === 'recent' ? ' selected' : ''}>Publication récente</option>
-            <option value="oldest"${f.sort === 'oldest' ? ' selected' : ''}>Publication ancienne</option>
-            <option value="leastProgress"${f.sort === 'leastProgress' ? ' selected' : ''}>Les plus délaissées</option>
-            <option value="longest"${f.sort === 'longest' ? ' selected' : ''}>Série la plus longue</option>
-            <option value="shortest"${f.sort === 'shortest' ? ' selected' : ''}>Série la plus courte</option>
-            <option value="titleDesc"${f.sort === 'titleDesc' ? ' selected' : ''}>Titre Z→A</option>
-            <option value="added"${f.sort === 'added' ? ' selected' : ''}>Ajout récent</option>
+            <optgroup label="Par temps">
+              <option value="remaining"${f.sort === 'remaining' ? ' selected' : ''}>Le plus d'épisodes à voir</option>
+              <option value="time"${f.sort === 'time' ? ' selected' : ''}>Le plus de temps à voir</option>
+              <option value="quickest"${f.sort === 'quickest' ? ' selected' : ''}>Finissable ce soir</option>
+              <option value="closest"${f.sort === 'closest' ? ' selected' : ''}>Bientôt fini</option>
+              <option value="progress"${f.sort === 'progress' ? ' selected' : ''}>Progression</option>
+              <option value="leastProgress"${f.sort === 'leastProgress' ? ' selected' : ''}>Les plus délaissées</option>
+              <option value="longest"${f.sort === 'longest' ? ' selected' : ''}>Série la plus longue</option>
+              <option value="shortest"${f.sort === 'shortest' ? ' selected' : ''}>Série la plus courte</option>
+            </optgroup>
+            <optgroup label="Par date">
+              <option value="lastWatched"${f.sort === 'lastWatched' ? ' selected' : ''}>Dernier vu</option>
+              <option value="recent"${f.sort === 'recent' ? ' selected' : ''}>Publication récente</option>
+              <option value="oldest"${f.sort === 'oldest' ? ' selected' : ''}>Publication ancienne</option>
+              <option value="added"${f.sort === 'added' ? ' selected' : ''}>Ajout récent</option>
+            </optgroup>
+            <optgroup label="Par titre">
+              <option value="title"${f.sort === 'title' ? ' selected' : ''}>Titre A→Z</option>
+              <option value="titleDesc"${f.sort === 'titleDesc' ? ' selected' : ''}>Titre Z→A</option>
+            </optgroup>
           </select>
-          <div class="crrav-chips">${chips}</div>
+          <div class="crrav-chipgroup crrav-chipgroup-status">
+            <div class="crrav-chips crrav-chips-status">${statusChips}</div>
+          </div>
+          <div class="crrav-chipgroup crrav-chipgroup-toggle">
+            <div class="crrav-chips crrav-chips-toggle">${toggleChips}</div>
+          </div>
           ${catChips(categoriesOf(STATE.series), f.catsIn, f.catsEx, 'suivi')}
         </div>
       </div>
@@ -10906,8 +11065,8 @@
         </div>` : ''}
         ${D.warning ? `<p class="crrav-warn">${escapeHtml(D.warning)}</p>` : ''}
         <div class="crrav-stats">
-          <div class="crrav-stat"><b>${list.length}</b><small>pépites trouvées</small></div>
-          <div class="crrav-stat hot"><b>${list.reduce((a, s) => a + (s.episodes || 0), 0)}</b><small>épisodes à voir</small></div>
+          <div class="crrav-stat"><b data-countup="${list.length}">${list.length}</b><small>pépites trouvées</small></div>
+          <div class="crrav-stat hot"><b data-countup="${list.reduce((a, s) => a + (s.episodes || 0), 0)}">${list.reduce((a, s) => a + (s.episodes || 0), 0)}</b><small>épisodes à voir</small></div>
           <div class="crrav-stat"><b>${fmtDuration(list.reduce((a, s) => a + (s.secTotal || 0), 0))}</b><small>à regarder</small></div>
         </div>
         <div class="crrav-controls">
@@ -11001,8 +11160,8 @@
         </p>
         ${O.warning ? `<p class="crrav-warn">${escapeHtml(O.warning)}</p>` : ''}
         <div class="crrav-stats">
-          <div class="crrav-stat"><b>${list.length}</b><small>séries</small></div>
-          <div class="crrav-stat hot"><b>${totalRemaining}</b><small>épisodes restants</small></div>
+          <div class="crrav-stat"><b data-countup="${list.length}">${list.length}</b><small>séries</small></div>
+          <div class="crrav-stat hot"><b data-countup="${totalRemaining}">${totalRemaining}</b><small>épisodes restants</small></div>
           <div class="crrav-stat"><b>${fmtDuration(secLeft)}</b><small>à regarder</small></div>
         </div>
         <div class="crrav-controls">
@@ -12032,7 +12191,10 @@
   function diagnosticPanel() {
     const open = statsAccordionOpen.has('set-diag');
     const detailOpen = statsAccordionOpen.has('set-diag-detail');
-    return `<div class="crrav-settings crrav-diagsection">
+    // (41) crrav-diagsection (marge/séparateur pointillé) retirée : elle signalait la
+    // transition visuelle avec le panneau précédent quand les 3 panneaux étaient
+    // empilés. Diagnostic vit maintenant seul sur son propre sous-onglet.
+    return `<div class="crrav-settings">
       <details class="crrav-accordion crrav-setgroup" data-acc="set-diag" ${open ? 'open' : ''}>
         <summary>🩺 Diagnostic <small style="font-weight:500;color:#8a8a94">— dépannage, pas nécessaire au quotidien</small></summary>
         <div class="crrav-accordion-body">
@@ -13029,6 +13191,18 @@
       false, 'isTvScreen') || false;
   }
 
+  // (4) ≥1900px, la place ne manque plus dans l'en-tête : la recherche globale reste
+  // visible en permanence, sans dépendre du réglage CFG.showSearchBar ni du forçage
+  // ponctuel. Choix : évaluer matchMedia ici plutôt que restructurer le HTML pour
+  // toujours injecter le champ et le masquer en CSS — le champ n'est de toute façon
+  // injecté que si `searchVisible` est vrai (voir plus bas), et renderNow() est déjà
+  // ré-exécuté à chaque redimensionnement franchissant un seuil (voir onResize) :
+  // pas besoin d'un écouteur resize dédié, la valeur se recalcule au prochain rendu.
+  function isWideSearchScreen() {
+    return safeCall(() => window.matchMedia('(min-width:1900px)').matches,
+      false, 'isWideSearchScreen') || false;
+  }
+
   // État de lissage par source de progression (clé stable par item de la barre —
   // 'main'/'history'/'anilist'/'historyGenre', voir renderActivityBar). Persiste entre
   // les rendus (variable de module), remis à zéro quand `total` change (nouvelle passe)
@@ -13333,13 +13507,33 @@
           STATE.discover.legendaryHunt ? 'Encore des légendaires' : 'Dé légendaire'}</span></button>`
       : '';
 
+    // (41) Sous-onglets internes à la sheet Réglages : les 3 panneaux (Réglages /
+    // Ignorées / Diagnostic) étaient jusqu'ici concaténés en un seul empilement vertical
+    // dans .crrav-sheetbody — un scroll interminable pour atteindre le diagnostic. Chaque
+    // panneau reste intact en contenu (settingsPanel/ignoredPanel/diagnosticPanel ne sont
+    // pas touchées) : seul UN SEUL des trois est désormais rendu à la fois, sélectionné
+    // par settingsSheetTab (survit aux re-renders, comme settingsSearchQ juste au-dessus).
+    // Le pied de sheet (reset/save) reste commun aux trois, il porte sur l'objet réglages
+    // entier et non sur le panneau affiché.
+    const settingsSubtabs = [
+      ['settings', '⚙ Réglages'],
+      ['ignored', `⊘ Ignorées${IGNORED.size ? ` (${IGNORED.size})` : ''}`],
+      ['diag', '🩺 Diagnostic'],
+    ].map(([v, label]) =>
+      `<button class="crrav-subtab" data-settingstab="${v}" role="tab" aria-selected="${settingsSheetTab === v}">${label}</button>`
+    ).join('');
+    const settingsSheetBody = settingsSheetTab === 'ignored' ? ignoredPanel()
+      : settingsSheetTab === 'diag' ? diagnosticPanel()
+      : settingsPanel();
+
     const settingsSheet = STATE.settingsOpen ? `
       <div class="crrav-settingssheet">
         <div class="crrav-sheethead">
           <h2>Réglages</h2>
           <button class="crrav-close" data-act="settings" aria-label="Fermer les réglages">✕</button>
         </div>
-        <div class="crrav-sheetbody">${settingsPanel() + ignoredPanel() + diagnosticPanel()}</div>
+        <div class="crrav-subtabs" role="tablist">${settingsSubtabs}</div>
+        <div class="crrav-sheetbody">${settingsSheetBody}</div>
         <div class="crrav-sheetfoot">
           <button class="crrav-btn ghost" data-act="settings-reset">Valeurs par défaut</button>
           <button class="crrav-btn primary" data-act="settings-save">Enregistrer et actualiser</button>
@@ -13349,8 +13543,10 @@
     const listPickerSheet = listPickerHtml();
 
     // Recherche masquée par défaut (voir CFG.showSearchBar) : visible si le réglage
-    // permanent est actif, ou si affichée ponctuellement cette session (🔍 dans l'en-tête).
-    const searchVisible = CFG.showSearchBar || searchBarForcedOpen;
+    // permanent est actif, si affichée ponctuellement cette session (🔍 dans l'en-tête),
+    // ou si l'écran est assez large pour l'accueillir en permanence (voir isWideSearchScreen).
+    const wideSearch = isWideSearchScreen();
+    const searchVisible = CFG.showSearchBar || searchBarForcedOpen || wideSearch;
     // Une requête restée active alors que la barre est maintenant masquée (ex. réglage
     // désactivé après coup) laisserait l'affichage bloqué en mode « résultats de
     // recherche » sans aucun champ visible pour la voir ou l'effacer — on la vide.
@@ -13360,7 +13556,7 @@
       <div class="crrav-top">
         <div class="crrav-row crrav-row-main">
           <h1 class="crrav-brand">${logoSvg('panel', 18)}<span class="crrav-brand-text">Mon <span>Crunchy</span></span></h1>
-          ${!CFG.showSearchBar ? `<button class="crrav-sync crrav-icobtn" data-act="togglesearch"
+          ${!CFG.showSearchBar && !wideSearch ? `<button class="crrav-sync crrav-icobtn" data-act="togglesearch"
             aria-pressed="${searchBarForcedOpen}" title="${searchBarForcedOpen ? 'Masquer la recherche' : 'Chercher partout'}"
             >🔍<span class="crrav-btn-label">Recherche</span></button>` : ''}
           <button class="crrav-filtersbtn crrav-icobtn" data-act="filters" aria-pressed="${STATE.filters.headerCollapsed}"
@@ -13401,6 +13597,11 @@
       const sheetEl = content.querySelector('.crrav-sheetbody');
       if (sheetEl) sheetEl.scrollTop = prevSheetScroll;
     }
+
+    // (9) compteurs animés : uniquement les valeurs numériques pures posées via
+    // data-countup dans les templates (list.length, totalRemaining, events.length, in7…) —
+    // les stats formatées par fmtDuration ("12h 30") en sont volontairement exclues.
+    animateCountUps(content);
 
     // Liens vers l'appli Crunchyroll (intent://) : sur Chromium (Edge/Chrome), un scheme
     // externe n'est routé hors du conteneur PWA standalone vers l'OS QUE sur un vrai clic
@@ -13571,6 +13772,29 @@
     return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
   }
 
+  // (9) compteurs animés : compte de 0 (ou de l'ancienne valeur si déjà affichée) jusqu'à
+  // la cible en ~700ms, easing simple. Écriture directe si prefers-reduced-motion.
+  const PREFERS_REDUCED_MOTION = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function animateCountUp(el, target, duration = 700) {
+    if (PREFERS_REDUCED_MOTION() || !(target > 0)) { el.textContent = String(target); return; }
+    const start = performance.now();
+    const from = 0;
+    const step = (now) => {
+      const t = Math.min(1, (now - start) / duration);
+      const eased = 1 - Math.pow(1 - t, 3); // ease-out cubic
+      el.textContent = String(Math.round(from + (target - from) * eased));
+      if (t < 1) requestAnimationFrame(step);
+      else el.textContent = String(target);
+    };
+    requestAnimationFrame(step);
+  }
+  function animateCountUps(root) {
+    root.querySelectorAll('[data-countup]').forEach((el) => {
+      const target = Number(el.getAttribute('data-countup'));
+      if (Number.isFinite(target)) animateCountUp(el, target);
+    });
+  }
+
   const refresh = () => loadAll((m) => { progressMsg = m; render(); });
   const refreshDiscover = (opts) => loadDiscover((m) => { progressMsgDiscover = m; render(); }, opts);
   // Relance explicite : on force la fraîcheur (historique + ajouts récents en liste).
@@ -13660,6 +13884,21 @@
           e.preventDefault();
           const syn = info.parentElement.querySelector('.crrav-syn');
           if (syn) info.setAttribute('aria-expanded', String(syn.classList.toggle('show')));
+          return;
+        }
+        // (39) Badge de signal (🎯/💚/🏆) tappé : révèle/masque le détail chiffré du score
+        // de CETTE carte. Même pattern que le bouton « i » ci-dessus (pas de re-render) —
+        // on remonte jusqu'à la carte/ligne entière car .crrav-scoredetail n'est pas
+        // toujours un sibling direct du badge (structure différente grille vs liste).
+        const sigDot = e.target.closest('.crrav-sig-dot');
+        if (sigDot) {
+          e.preventDefault();
+          const scope = sigDot.closest('.crrav-card, .crrav-lrow-discover');
+          const detail = scope && scope.querySelector('.crrav-scoredetail');
+          if (detail) {
+            const shown = detail.classList.toggle('show');
+            scope.querySelectorAll('.crrav-sig-dot').forEach((b) => b.setAttribute('aria-expanded', String(shown)));
+          }
           return;
         }
         // (8) ignorer / restaurer : pas de rechargement, juste un re-rendu.
@@ -13800,6 +14039,17 @@
             && !STATE.newPremieres.series.length && !STATE.newPremieres.loading) {
             refreshNewPremieres();
           }
+          return;
+        }
+        // (41) Sous-onglet de la sheet Réglages (voir settingsSubtabs) — même principe
+        // que les onglets principaux ci-dessus (state en dehors de STATE/forceRender,
+        // survit au re-render), mais scopé à la sheet : un forceRender() suffit, pas
+        // besoin des à-côtés de chargement des vrais onglets.
+        const settingsTabBtn = e.target.closest('[data-settingstab]');
+        if (settingsTabBtn) {
+          settingsSheetTab = settingsTabBtn.dataset.settingstab;
+          settingsSearchQ = '';   // une recherche Réglages ne doit pas rester active hors de cet onglet
+          forceRender();
           return;
         }
         const act = e.target.closest('[data-act]');
@@ -13965,7 +14215,12 @@
           return;
         }
         if (act.dataset.act === 'settings') {
-          STATE.settingsOpen = !STATE.settingsOpen; forceRender();
+          STATE.settingsOpen = !STATE.settingsOpen;
+          // (41) Rouvrir la sheet repart toujours sur le sous-onglet Réglages — comme
+          // l'ancien empilement, qui affichait toujours ce panneau en premier en haut.
+          // Doit être posé AVANT le forceRender() juste en dessous (synchrone).
+          if (STATE.settingsOpen) { settingsSheetTab = 'settings'; settingsSearchQ = ''; }
+          forceRender();
           // (30) comble jaquette/résumé manquants sur les entrées ignorées avant 2.87
           // (voir backfillIgnoredMeta) — no-op si tout est déjà là.
           if (STATE.settingsOpen) backfillIgnoredMeta();
