@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.5.0
+// @version      3.6.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.5.0';
+  const SCRIPT_VERSION = '3.6.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -1899,7 +1899,7 @@
   // (fix) 'watchedids:' et 'anilist:' inclus : ce sont les entrées les plus volumineuses
   // (historique de visionnage détaillé, et schedule/genres/tags par série) — sans elles,
   // la purge tapait sur des entrées bien plus légères en épargnant les grosses.
-  const EVICTABLE = ['rating:', 'series:', 'series-en:', 'seasoncount:', 'snapshot', 'crmatch:', 'watchedids:', 'anilist:', 'discep:', 'discbrowse:', 'nugget:'];
+  const EVICTABLE = ['rating:', 'myrating:', 'series:', 'series-en:', 'seasoncount:', 'snapshot', 'crmatch:', 'watchedids:', 'anilist:', 'discep:', 'discbrowse:', 'nugget:'];
   function evictOldest(fraction) {
     let evicted = eps3EvictOldest(fraction);
     const entries = Object.keys(BIGCACHE)
@@ -2817,6 +2817,68 @@
       cacheSet('rating:' + seriesId, { r: null });
       return null;
     }
+  }
+
+  // Note PERSONNELLE (celle que TOI tu as postée sur la fiche), distincte de la note
+  // publique ci-dessus. Endpoint non documenté (API CR privée) : scopé par account_id,
+  // comme le reste des données perso (watchlist, playheads…) — même famille d'URL que
+  // `/content-reviews/v2/rating/series/{id}` mais préfixée par l'account_id, à la façon
+  // de `/content/v2/{accountId}/…` utilisé partout ailleurs dans ce script pour le perso.
+  // Réponse tolérée sous plusieurs formes possibles (valeur numérique 1-5, chaîne "5s"
+  // façon « 5 étoiles », ou objet imbriqué) : un format inattendu ne casse rien, la note
+  // est juste traitée comme absente (pas de favori affiché à tort).
+  // Si ça ne marche pas chez toi (endpoint qui a changé), lance
+  // `resteAVoir.probeMyRating('titre de la série')` dans la console pour voir la réponse
+  // brute et ajuster le parsing ci-dessous.
+  const MYRATING_TTL = RATING_TTL;
+  function getMyRatingCached(seriesId) {
+    const c = cacheGet('myrating:' + seriesId, MYRATING_TTL);
+    return (c && 'r' in c) ? c.r : null;
+  }
+  function parseMyRatingResponse(r) {
+    const src = (r && (r.data || r)) || {};
+    let raw = src.rating ?? src.user_rating ?? src.value ?? src.stars ?? null;
+    if (raw && typeof raw === 'object') raw = raw.rating ?? raw.value ?? null;
+    if (raw == null) return null;
+    // Format « 5s » observé côté front CR pour d'autres endpoints de notation par étoiles.
+    const starMatch = /^([1-5])s$/i.exec(String(raw).trim());
+    if (starMatch) return parseInt(starMatch[1], 10);
+    const num = parseFloat(String(raw).replace(',', '.'));
+    return Number.isFinite(num) ? num : null;
+  }
+  async function getMyRating(accountId, seriesId) {
+    const c = cacheGet('myrating:' + seriesId, MYRATING_TTL);
+    if (c && 'r' in c) return c.r;
+    if (!accountId) return null;
+    try {
+      const r = await api(`/content-reviews/v2/${accountId}/rating/series/${seriesId}`);
+      const val = parseMyRatingResponse(r);
+      cacheSet('myrating:' + seriesId, { r: val });
+      return val;
+    } catch (_) {
+      cacheSet('myrating:' + seriesId, { r: null });
+      return null;
+    }
+  }
+
+  // Complète les notes personnelles absentes APRÈS affichage, même logique que
+  // fillMissingRatings (note publique) : pas sur le chemin critique, 1 requête par série
+  // manquante, rafraîchit l'écran seulement si au moins un favori a changé.
+  let myRatingPassRunning = false;
+  async function fillMissingMyRatings(list, accountId) {
+    if (myRatingPassRunning || !accountId) return;
+    const todo = (list || []).filter((s) => s && s.id && cacheGet('myrating:' + s.id, MYRATING_TTL) == null);
+    if (!todo.length) return;
+    myRatingPassRunning = true;
+    try {
+      let changed = 0;
+      await pool(todo, async (s) => {
+        const val = await getMyRating(accountId, s.id);
+        if (val != null) { s.myRating = val; s.favorite = val >= 5; changed++; }
+      }, Math.max(2, Math.min(4, CFG.concurrency)));
+      if (changed) { LOG(`notes perso complétées en fond : ${changed}`); render(); }
+    } catch (e) { safeCall.log(e, 'fillMissingMyRatings'); }
+    finally { myRatingPassRunning = false; }
   }
 
   // Nombre de saisons distinctes, en cache 30 jours (utilisé par l'onglet Découverte).
@@ -4153,7 +4215,7 @@
 
   // Construit l'objet « série » utilisé par les cartes (onglets Reste à voir et
   // Hors listes) à partir du panel, des épisodes, de la note et des playheads.
-  function buildSeriesEntry(panel, episodes, maxAir, rating, order, ph) {
+  function buildSeriesEntry(panel, episodes, maxAir, rating, order, ph, myRating) {
     // Date de visionnage la plus récente, tous épisodes confondus → tri « Dernier vu ».
     let lastWatchedTs = 0;
     const marked = episodes.map((e) => {
@@ -4203,6 +4265,13 @@
       slug: panel.slug_title,
       poster: posterOf(panel),
       rating,
+      // Note perso (1-5, ou null si pas encore notée / pas encore récupérée) et favori
+      // dérivé : 5★ postées par TOI = favori. Concerne uniquement les séries VUES (Reste
+      // à voir / Hors listes) — Découverte utilise un chemin de construction séparé
+      // (evaluateDiscoverCandidate) qui n'appelle jamais buildSeriesEntry, donc les
+      // séries jamais vues n'ont structurellement pas de favori.
+      myRating: myRating != null ? myRating : null,
+      favorite: myRating != null && myRating >= 5,
       synopsis: panel.description || '',
       // Genres de la série : panel Crunchyroll d'abord, complétés par le cache AniList
       // s'il existe déjà (ani.genres) — sinon, tant que le cache AniList reste frais
@@ -4356,7 +4425,8 @@
           if (!panel) return null;
           const eps = await getEpisodes(ref.id);
           const rating = getRatingCached(ref.id);      // sans requête : complété plus tard
-          return { panel, episodes: eps.episodes, maxAir: eps.maxAir, rating, order: i + k };
+          const myRating = getMyRatingCached(ref.id);   // idem, note perso
+          return { panel, episodes: eps.episodes, maxAir: eps.maxAir, rating, myRating, order: i + k };
         }, CFG.concurrency);
 
         const ok = results.filter(Boolean);
@@ -4366,8 +4436,8 @@
         STATS.guids += ids.length;
 
         const ph = ids.length ? await getPlayheads(accountId, ids) : new Map();
-        fresh.push(...ok.map(({ panel, episodes, maxAir, rating, order }) =>
-          buildSeriesEntry(panel, episodes, maxAir, rating, order, ph)));
+        fresh.push(...ok.map(({ panel, episodes, maxAir, rating, myRating, order }) =>
+          buildSeriesEntry(panel, episodes, maxAir, rating, order, ph, myRating)));
 
         // Affichage progressif : la grille se remplit sous les yeux — sauf si un
         // instantané est déjà à l'écran, auquel cas on remplace tout à la fin.
@@ -4378,6 +4448,7 @@
 
       // Notes manquantes : après l'affichage, hors du chemin critique.
       idle(() => fillMissingRatings(fresh));
+      idle(() => fillMissingMyRatings(fresh, accountId));
       // Total prévu + fin de saison + genres (AniList) : en fond, séries en diffusion
       // ET séries aux genres Crunchyroll trop pauvres (voir needsAniGenres).
       idle(() => enrichAnilistSchedule(fresh));
@@ -6340,7 +6411,8 @@
         if (!panel) return null;
         const eps = await getEpisodes(id);
         const rating = getRatingCached(id);            // sans requête : complété plus tard
-        return { panel, episodes: eps.episodes, maxAir: eps.maxAir, rating, order: idx };
+        const myRating = getMyRatingCached(id);         // idem, note perso
+        return { panel, episodes: eps.episodes, maxAir: eps.maxAir, rating, myRating, order: idx };
       }, CFG.concurrency, (done, total) => onProgress(stepLabel(3, 4, `Analyse des épisodes… ${done}/${total}`)));
 
       const ok = results.filter(Boolean);
@@ -6350,13 +6422,14 @@
       const ph = allIds.length ? await getPlayheads(accountId, allIds) : new Map();
 
       O.series = markNew(ok
-        .map(({ panel, episodes, maxAir, rating, order }) => buildSeriesEntry(panel, episodes, maxAir, rating, order, ph)))
+        .map(({ panel, episodes, maxAir, rating, myRating, order }) => buildSeriesEntry(panel, episodes, maxAir, rating, order, ph, myRating)))
         // Double vérification : une série peut apparaître dans l'historique sans qu'aucun
         // épisode ne soit réellement marqué vu (lecture interrompue très tôt, etc.) — on ne
         // garde que celles avec au moins un épisode vu ET au moins un épisode restant.
         .filter((s) => s.total > 0 && s.seen > 0 && s.remaining > 0);
       O.lastSync = new Date();
       idle(() => fillMissingRatings(O.series));
+      idle(() => fillMissingMyRatings(O.series, accountId));
       idle(() => enrichAnilistSchedule(O.series));
     } catch (e) {
       console.error('[reste-à-voir] échec Hors listes', e);
@@ -6845,7 +6918,7 @@
       </a>
       <div class="crrav-hero-info">
         <span class="crrav-hero-tag">Bientôt fini</span>
-        <a class="crrav-hero-title" href="${seriesUrl}">${escapeHtml(s.title)}</a>
+        <a class="crrav-hero-title" href="${seriesUrl}">${favStar(s, 'crrav-favstar')}${escapeHtml(s.title)}</a>
         <div class="crrav-hero-meta">
           ${s.rating != null ? `<span class="crrav-hero-star">★ ${s.rating.toFixed(1)}</span>` : ''}
           <span>${s.seen}/${s.total} vus${plannedTotalHint(s)}</span>
@@ -6998,6 +7071,13 @@
     return [cr, ani].filter(Boolean).join(' · ');
   }
 
+  // Favori = série notée 5★ par TOI personnellement (pas la note publique) — voir
+  // buildSeriesEntry / getMyRating. `cls` distingue le style carte / vue liste.
+  function favStar(s, cls) {
+    if (!s.favorite) return '';
+    return `<span class="${cls}" title="Tu l'as notée 5★ — favori">★</span>`;
+  }
+
   function card(s) {
     if (STATE.filters.view === 'list') return listRow(s);
     const seriesUrl = crSeriesUrl(s.id, s.slug);
@@ -7023,7 +7103,7 @@
         ${synopsisBlock(s)}
       </div>
       <div class="crrav-body">
-        <a class="crrav-title" href="${seriesUrl}">${escapeHtml(s.title)}</a>
+        <a class="crrav-title" href="${seriesUrl}">${favStar(s, 'crrav-favstar')}${escapeHtml(s.title)}</a>
         ${ticks(s)}
         <div class="crrav-meta">
           <span>${s.seen}/${s.total} vus${plannedTotalHint(s)}</span>
@@ -7050,7 +7130,7 @@
       </a>
       <div class="crrav-lmain">
         <div class="crrav-lhead">
-          <a class="crrav-ltitle" href="${seriesUrl}">${escapeHtml(s.title)}</a>
+          <a class="crrav-ltitle" href="${seriesUrl}">${favStar(s, 'crrav-lfavstar')}${escapeHtml(s.title)}</a>
           ${s.isNew ? '<span class="crrav-lnew">nouveau</span>' : ''}
           ${s.airing ? `<span class="crrav-ltag">${done ? 'à jour' : 'en diffusion'}</span>` : ''}
           ${(s.rating != null || s.aniScore != null) ? `<span class="crrav-lrating">${ratingLabel(s)}</span>` : ''}
@@ -8201,6 +8281,7 @@
   .crrav-title{font:700 13.5px/1.3 system-ui;color:inherit;text-decoration:none;display:-webkit-box;
     -webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:2.6em}
   .crrav-title:hover{color:var(--prog)}
+  .crrav-favstar,.crrav-lfavstar{color:#ffcf55;margin-right:4px;text-shadow:0 0 6px rgba(255,207,85,.5)}
   .crrav-lrow{position:relative;transition:transform .16s ease,border-color .16s ease;
     content-visibility:auto;contain-intrinsic-size:auto 92px}
   .crrav-lrow::before{content:'';position:absolute;left:0;top:8px;bottom:8px;width:3px;border-radius:3px;
@@ -14361,6 +14442,22 @@
           '· fin :', sched.seasonEndTs ? new Date(sched.seasonEndTs).toLocaleDateString('fr-FR') : '—',
           sched.plannedApprox ? '(date estimée)' : '(date exacte)');
         return { match: aniPrimaryTitle(best), ...sched };
+      },
+      // Diagnostic note perso (favoris ★) : montre la réponse BRUTE de l'endpoint et ce
+      // que le parsing en tire, pour vérifier/ajuster si CR change son format un jour.
+      // Ex. : resteAVoir.probeMyRating('stugai')
+      async probeMyRating(query) {
+        const s = STATE.series.find((x) => x.title.toLowerCase().includes(String(query || '').toLowerCase()));
+        if (!s) { console.warn('Série introuvable dans les listes chargées (Reste à voir / Hors listes).'); return null; }
+        const accountId = await getAccountId();
+        console.log('%c[reste-à-voir] sonde note perso pour', 'color:#f47521;font-weight:bold', s.title, s.id);
+        try {
+          const r = await api(`/content-reviews/v2/${accountId}/rating/series/${s.id}`);
+          console.log('réponse brute :', r);
+          const parsed = parseMyRatingResponse(r);
+          console.log('parsée →', parsed, parsed >= 5 ? '(favori ✅)' : '(pas favori)');
+          return { raw: r, parsed };
+        } catch (e) { console.error('échec de la requête :', e); return null; }
       },
       ignored: () => Object.fromEntries(IGNORED),
       // Diagnostic ouverture appli Crunchyroll (voir crUrl) : à lancer depuis la console
