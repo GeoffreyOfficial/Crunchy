@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.9.1
+// @version      3.9.5
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.9.1';
+  const SCRIPT_VERSION = '3.9.5';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -8360,7 +8360,10 @@
   .crrav-notaribbon-sm{position:absolute;top:2px;right:2px;font-size:11px;line-height:1;
     background:rgba(10,10,12,.75);border-radius:4px;padding:1px 2px;
     box-shadow:0 0 6px rgba(159,214,255,.7)}
-  .crrav-simbar{display:flex;align-items:center;gap:10px;margin:0 0 10px;padding:9px 12px;border-radius:10px;
+  /* margin-top:10px : le bandeau descriptif juste au-dessus (.crrav-warn) a lui-même
+     margin-bottom:0 — sans ce 10px ici, les deux bandeaux se touchaient directement,
+     sans la moindre respiration entre eux. */
+  .crrav-simbar{display:flex;align-items:center;gap:10px;margin:10px 0 10px;padding:9px 12px;border-radius:10px;
     background:rgba(244,117,33,.1);border:1px solid rgba(244,117,33,.3)}
   .crrav-simbar-txt{flex:1;min-width:0;font-size:13px;color:#ffcfa6;line-height:1.35}
   .crrav-simbar-txt b{color:#fff}
@@ -9370,13 +9373,19 @@
   .crrav-ignrow:last-child{border-bottom:0}
   .crrav-ignrow-main{flex:1 1 auto;min-width:0}
   .crrav-ignrow-head{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-  /* min-width:0 est indispensable ici : sans lui, un flex-item refuse par défaut de
-     rétrécir sous la largeur de son texte non tronqué (min-width:auto implicite), donc
-     l'ellipsis ne se déclenchait jamais sur un titre long — la ligne débordait et
-     repoussait la pastille source / la date / le bouton i / le bouton ↺ à la ligne
-     suivante. Un titre court, lui, ne débordait pas et tout restait sur une ligne : d'où
-     la mise en page qui semblait « mélangée » selon la longueur du titre. */
-  .crrav-ignrow-t{flex:1 1 auto;min-width:0;color:#f2f2f4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  /* flex:1 1 0 (basis 0, pas "auto") au lieu de flex:1 1 auto : avec basis auto, la
+     taille "naturelle" utilisée par l'algorithme de répartition en lignes du flexbox
+     est celle du texte NON tronqué (à cause de white-space:nowrap) — un titre long
+     valait alors à lui seul plus que la largeur de la ligne, et ça repoussait pastille
+     source / date / bouton i / bouton ↺ à la ligne suivante, alors qu'un titre court ne
+     déclenchait jamais ce repli. Avec basis 0, cette taille de référence vaut 0 : les
+     autres éléments (taille fixe) sont casés en premier sur la ligne, et le titre ne
+     récupère qu'ENSUITE l'espace restant via flex-grow — min-width:0 permet alors à
+     l'ellipsis de faire son travail si ce reste est trop petit pour le texte complet.
+     Résultat : tout reste aligné sur une seule ligne, quelle que soit la longueur du
+     titre (le repli à la ligne suivante ne sert plus qu'au résumé déplié, voir .crrav-syn
+     plus bas, flex:1 1 100% + order:9). */
+  .crrav-ignrow-t{flex:1 1 0;min-width:0;color:#f2f2f4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .crrav-ignrow-src{flex:0 0 auto;color:#8a8a94;font:600 10px/1 system-ui;text-transform:uppercase;
     letter-spacing:.04em}
   /* (43) date relative d'ignore (fmtRelDay) — absente sur les entrées migrées d'avant
@@ -12898,8 +12907,8 @@
   async function runFullDiagnostic() {
     STATE.fullDiagRunning = true;
     STATE.fullDiag = { steps: [], startedAt: Date.now() };
-    refreshSheetBody();
-    const addStep = (step) => { STATE.fullDiag.steps.push(step); refreshSheetBody(); };
+    forceRender();
+    const addStep = (step) => { STATE.fullDiag.steps.push(step); forceRender(); };
 
     // 1. Environnement — instantané, aucune requête réseau.
     addStep({
@@ -12979,7 +12988,7 @@
     STATE.fullDiagRunning = false;
     STATE.fullDiag.finishedAt = Date.now();
     STATE.fullDiagText = buildFullDiagnosticText(STATE.fullDiag);
-    refreshSheetBody();
+    forceRender();
   }
 
   // Export texte simple du rapport (pour coller dans un message de support, par ex.) —
@@ -13064,7 +13073,12 @@
     // (43) Puces de filtre par source — une seule par origine réellement présente, plus
     // « Toutes » toujours affichée. Réutilise ignoredCount (déjà utilisé par les chips
     // de Reste à voir/Découverte) plutôt que de recompter entries, qui est déjà filtré.
-    const srcChipsHtml = [{ key: 'all', label: 'Toutes', icon: '' }, ...IGNORE_SOURCES]
+    // Inutile de proposer un filtre par type quand il n'y a qu'UNE SEULE origine parmi
+    // les ignorées (rien à distinguer) : dans ce cas, ni puces, ni option de tri « Par
+    // source », ni regroupement plus bas.
+    const presentSources = IGNORE_SOURCES.filter((s) => ignoredCount(s.key));
+    const singleSource = presentSources.length <= 1;
+    const srcChipsHtml = singleSource ? '' : [{ key: 'all', label: 'Toutes', icon: '' }, ...IGNORE_SOURCES]
       .filter((s) => s.key === 'all' || ignoredCount(s.key))
       .map((s) => {
         const n = s.key === 'all' ? IGNORED.size : ignoredCount(s.key);
@@ -13098,7 +13112,9 @@
     // sinon, la liste ne contient déjà qu'une seule origine), regroupement par source
     // avec en-têtes repliables — évite de tout parcourir en défilant sur une liste plate.
     // État de repli mémorisé dans ignoredCollapsedGroups (hors STATE, voir déclaration).
-    const shouldGroup = IGNORED.size >= 50 && STATE.ignoredSrc === 'all';
+    // Pas de regroupement non plus si une seule origine est présente (singleSource) :
+    // un seul groupe n'apporte rien, juste un en-tête en plus à déplier pour rien.
+    const shouldGroup = !singleSource && IGNORED.size >= 50 && STATE.ignoredSrc === 'all';
     let rowsHtml;
     if (shouldGroup) {
       rowsHtml = IGNORE_SOURCES.map((s) => {
@@ -13127,14 +13143,14 @@
 
     return `<div class="crrav-settings">
       <h3>Séries ignorées (${entries.length}${filtered ? ` sur ${IGNORED.size}` : ''})</h3>
-      <div class="crrav-chips" style="margin-bottom:8px">${srcChipsHtml}</div>
+      ${srcChipsHtml ? `<div class="crrav-chips" style="margin-bottom:8px">${srcChipsHtml}</div>` : ''}
       <div class="crrav-ignctrl">
         <input class="crrav-search crrav-search-ignored" placeholder="Chercher une série ignorée…"
           value="${escapeHtml(STATE.ignoredQ)}">
         <select class="crrav-select crrav-ignoredsort" data-act="ignored-sort">
           <option value="title-asc"${sort === 'title-asc' ? ' selected' : ''}>Titre A→Z</option>
           <option value="title-desc"${sort === 'title-desc' ? ' selected' : ''}>Titre Z→A</option>
-          <option value="source"${sort === 'source' ? ' selected' : ''}>Par source</option>
+          ${singleSource ? '' : `<option value="source"${sort === 'source' ? ' selected' : ''}>Par source</option>`}
           <option value="date-desc"${sort === 'date-desc' ? ' selected' : ''}>Plus récemment ignorée</option>
           <option value="date-asc"${sort === 'date-asc' ? ' selected' : ''}>Plus anciennement ignorée</option>
         </select>
@@ -13359,28 +13375,45 @@
   // sheet réglages est ouverte (changement d'onglet, saisie de réglage, fermeture).
   function forceRender() { FORCE_RENDER = true; renderNow(); }
 
-  // Mise à jour légère du corps de la sheet Réglages, SANS recréer le nœud
-  // .crrav-settingssheet lui-même : un forceRender() classique reconstruit tout
-  // .crrav-content (liste ET sheet) d'un seul bloc via content.innerHTML, ce qui
-  // rejoue à chaque appel l'animation d'entrée de la sheet (crrav-sheet-in, fade +
-  // léger slide, voir CSS). Pendant le diagnostic complet, addStep() appelait
-  // forceRender() à CHAQUE étape (6-7 fois d'affilée) : la sheet se recréait donc
-  // à chaque fois et rejouait son fade-in, avec en dessous — brièvement visible
-  // pendant l'animation — le contenu de l'onglet actif (ex. Reste à voir). D'où le
-  // clignotement où « Réglages » semblait disparaître par intermittence. Ici, seul
-  // le HTML de .crrav-sheetbody est remplacé en place ; le nœud de la sheet reste
-  // le même élément DOM du début à la fin du diagnostic, donc son animation ne se
-  // rejoue qu'une fois, à l'ouverture réelle.
-  function refreshSheetBody() {
-    if (!root || !STATE.settingsOpen) { forceRender(); return; }
-    const content = root.querySelector('.crrav-content');
-    const bodyEl = content && content.querySelector('.crrav-sheetbody');
-    if (!bodyEl) { forceRender(); return; }
-    const prevScroll = bodyEl.scrollTop;
-    bodyEl.innerHTML = settingsSheetTab === 'ignored' ? ignoredPanel()
+  // Sous-onglets de la sheet Réglages (Réglages / Ignorées / Diagnostic) — factorisé car
+  // regénéré à la fois par le rendu complet (renderNow) et par la mise à jour en place
+  // (patchSettingsSheetInPlace), pour ne jamais laisser les deux divirger.
+  function buildSettingsSubtabsHtml() {
+    return [
+      ['settings', '⚙ Réglages'],
+      ['ignored', `⊘ Ignorées${IGNORED.size ? ` (${IGNORED.size})` : ''}`],
+      ['diag', '🩺 Diagnostic'],
+    ].map(([v, label]) =>
+      `<button class="crrav-subtab" data-settingstab="${v}" role="tab" aria-selected="${settingsSheetTab === v}">${label}</button>`
+    ).join('');
+  }
+  function buildSettingsSheetBodyHtml() {
+    return settingsSheetTab === 'ignored' ? ignoredPanel()
       : settingsSheetTab === 'diag' ? diagnosticPanel()
       : settingsPanel();
-    bodyEl.scrollTop = prevScroll;
+  }
+
+  // Met à jour le CONTENU de la sheet Réglages déjà ouverte, sans jamais recréer le nœud
+  // .crrav-settingssheet lui-même : un forceRender() classique reconstruisait tout
+  // .crrav-content (liste ET sheet) d'un seul bloc via content.innerHTML, ce qui rejouait
+  // à CHAQUE appel l'animation d'entrée de la sheet (crrav-sheet-in, fade + léger slide,
+  // voir CSS) — y compris pour de simples interactions internes (cocher une case, changer
+  // le tri, « Tout sélectionner » dans Ignorées, une étape du diagnostic…). Le temps du
+  // fade, le contenu de l'onglet actif en dessous (ex. Reste à voir) redevenait visible
+  // par transparence : le clignotement où « Réglages » semblait disparaître. Ici, seuls
+  // les sous-onglets et le corps sont remplacés en place ; le nœud de la sheet reste le
+  // même élément DOM tant qu'elle reste ouverte, donc son animation ne se rejoue qu'une
+  // fois, à l'ouverture réelle. Appelée automatiquement par renderNow() : aucun site
+  // d'appel n'a besoin de savoir que la sheet est ouverte ou non.
+  function patchSettingsSheetInPlace(sheetEl) {
+    const subtabsEl = sheetEl.querySelector('.crrav-subtabs');
+    if (subtabsEl) subtabsEl.innerHTML = buildSettingsSubtabsHtml();
+    const bodyEl = sheetEl.querySelector('.crrav-sheetbody');
+    if (bodyEl) {
+      const prevScroll = bodyEl.scrollTop;
+      bodyEl.innerHTML = buildSettingsSheetBodyHtml();
+      bodyEl.scrollTop = prevScroll;
+    }
   }
 
   // render() regroupe les appels sur une frame : pendant un chargement, il était invoqué
@@ -13654,12 +13687,16 @@
     const prevSheetEl = content.querySelector('.crrav-sheetbody');
     const prevSheetScroll = prevSheetEl ? prevSheetEl.scrollTop : 0;
 
-    // Si la sheet réglages est déjà affichée et le reste, on ne reconstruit pas le DOM
-    // du contenu principal (masqué derrière elle) : cela évite le clignotement mobile
-    // et la perte de focus. On ne saute QUE les renders de fond (chargement, teinte) :
-    // un changement d'onglet, une saisie, ou la fermeture passent par forceRender().
+    // Si la sheet réglages est déjà affichée et le reste, on ne reconstruit JAMAIS le
+    // nœud .crrav-settingssheet lui-même (recréer ce nœud rejoue son animation d'entrée
+    // CSS, voir patchSettingsSheetInPlace ci-dessus). Un render() de fond (chargement,
+    // teinte) n'a rien à mettre à jour dans la sheet : on saute entièrement, comme avant.
+    // Un forceRender() (case cochée, tri, diagnostic…) met à jour SON CONTENU en place.
+    // Seuls l'ouverture fraîche, la fermeture, ou un changement d'onglet PRINCIPAL (sheet
+    // fermée) passent par la reconstruction complète plus bas.
     const existingSheet = content.querySelector('.crrav-settingssheet');
-    if (STATE.settingsOpen && existingSheet && sheetOpenInDom && !FORCE_RENDER) {
+    if (STATE.settingsOpen && existingSheet && sheetOpenInDom) {
+      if (FORCE_RENDER) { FORCE_RENDER = false; patchSettingsSheetInPlace(existingSheet); }
       return;
     }
     FORCE_RENDER = false;
@@ -13721,16 +13758,8 @@
     // par settingsSheetTab (survit aux re-renders, comme settingsSearchQ juste au-dessus).
     // Le pied de sheet (reset/save) reste commun aux trois, il porte sur l'objet réglages
     // entier et non sur le panneau affiché.
-    const settingsSubtabs = [
-      ['settings', '⚙ Réglages'],
-      ['ignored', `⊘ Ignorées${IGNORED.size ? ` (${IGNORED.size})` : ''}`],
-      ['diag', '🩺 Diagnostic'],
-    ].map(([v, label]) =>
-      `<button class="crrav-subtab" data-settingstab="${v}" role="tab" aria-selected="${settingsSheetTab === v}">${label}</button>`
-    ).join('');
-    const settingsSheetBody = settingsSheetTab === 'ignored' ? ignoredPanel()
-      : settingsSheetTab === 'diag' ? diagnosticPanel()
-      : settingsPanel();
+    const settingsSubtabs = buildSettingsSubtabsHtml();
+    const settingsSheetBody = STATE.settingsOpen ? buildSettingsSheetBodyHtml() : '';
 
     const settingsSheet = STATE.settingsOpen ? `
       <div class="crrav-settingssheet">
