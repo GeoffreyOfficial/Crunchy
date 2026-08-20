@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.9.5
+// @version      3.10.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.9.5';
+  const SCRIPT_VERSION = '3.10.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -9385,7 +9385,11 @@
      Résultat : tout reste aligné sur une seule ligne, quelle que soit la longueur du
      titre (le repli à la ligne suivante ne sert plus qu'au résumé déplié, voir .crrav-syn
      plus bas, flex:1 1 100% + order:9). */
-  .crrav-ignrow-t{flex:1 1 0;min-width:0;color:#f2f2f4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  /* (fix) Titre sur 2 lignes plutôt que tronqué avec « … » sur une seule : flex-basis
+     100% dans l'en-tête (flex-wrap) le fait occuper sa propre ligne, source/date/boutons
+     passent alors sous lui plutôt que de se disputer la largeur avec un titre coupé. */
+  .crrav-ignrow-t{flex:1 1 100%;min-width:0;color:#f2f2f4;font-weight:600;overflow:hidden;
+    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;white-space:normal;word-break:break-word}
   .crrav-ignrow-src{flex:0 0 auto;color:#8a8a94;font:600 10px/1 system-ui;text-transform:uppercase;
     letter-spacing:.04em}
   /* (43) date relative d'ignore (fmtRelDay) — absente sur les entrées migrées d'avant
@@ -12338,9 +12342,9 @@
           découpage en saisons, stockage local — et affiche un rapport unique et
           détaillé ci-dessous. C'est le premier réflexe en cas de souci ; les tests
           ciblés plus bas ne servent qu'à creuser un point précis ensuite.</p>
-        <button class="crrav-btn primary" data-act="full-diag"${STATE.fullDiagRunning ? ' disabled' : ''}>
-          ${STATE.fullDiagRunning ? '⏳ Diagnostic en cours…' : '🩺 Lancer le diagnostic complet'}</button>
         ${renderFullDiagnosticReport()}
+        <button class="crrav-btn primary" data-act="full-diag" style="margin-top:12px"${STATE.fullDiagRunning ? ' disabled' : ''}>
+          ${STATE.fullDiagRunning ? '⏳ Diagnostic en cours…' : '🩺 Lancer le diagnostic complet'}</button>
       </div>
 
       <details class="crrav-accordion" data-acc="set-diag-detail" ${detailOpen ? 'open' : ''} style="margin-top:18px">
@@ -13141,8 +13145,18 @@
     const selectedVisible = entries.filter((e) => ignoredSelected.has(e.id));
     const allVisibleSelected = entries.length > 0 && selectedVisible.length === entries.length;
 
+    // (fix) « Tout réafficher » remonte en haut du panneau (à côté du titre — masqué à
+    // l'intérieur de la sheet, voir CSS, mais ce bloc reste un frère indépendant donc
+    // toujours visible) plutôt qu'en bas de liste, pour rester à portée de main sans
+    // avoir à descendre jusqu'au fond. Masqué pendant une sélection active : le bouton
+    // du bas (« Réafficher la sélection ») prend alors le relais, plus intentionnel.
+    const topRestoreBtn = entries.length && !selectedVisible.length
+      ? `<button class="crrav-btn ghost sm" data-act="ignored-clear"${filtered ? ` data-scope-ids="${entries.map((e) => e.id).join(',')}"` : ''}
+          >${restoreLabel}</button>` : '';
+
     return `<div class="crrav-settings">
       <h3>Séries ignorées (${entries.length}${filtered ? ` sur ${IGNORED.size}` : ''})</h3>
+      ${topRestoreBtn ? `<div class="crrav-ignheadrow" style="display:flex;justify-content:flex-end;margin:-6px 0 8px">${topRestoreBtn}</div>` : ''}
       ${srcChipsHtml ? `<div class="crrav-chips" style="margin-bottom:8px">${srcChipsHtml}</div>` : ''}
       <div class="crrav-ignctrl">
         <input class="crrav-search crrav-search-ignored" placeholder="Chercher une série ignorée…"
@@ -13163,8 +13177,7 @@
         ${selectedVisible.length
           ? `<button class="crrav-btn ghost" data-act="ignored-clear" data-scope-ids="${selectedVisible.map((e) => e.id).join(',')}"
               >Réafficher la sélection (${selectedVisible.length})</button>`
-          : `<button class="crrav-btn ghost" data-act="ignored-clear"${filtered ? ` data-scope-ids="${entries.map((e) => e.id).join(',')}"` : ''}
-              ${entries.length ? '' : 'disabled'}>${restoreLabel}</button>`}
+          : ''}
         <small style="color:#8a8a94;font:400 10.5px/1.4 system-ui;align-self:center">
           Une fois ignorée, une série est masquée partout (Reste à voir, Hors listes et
           Découverte). Chaque onglet a son propre chip « Ignorées » pour restaurer ;
@@ -13414,6 +13427,10 @@
       bodyEl.innerHTML = buildSettingsSheetBodyHtml();
       bodyEl.scrollTop = prevScroll;
     }
+    // (fix) Le pied Enregistrer/Valeurs par défaut ne vit que sur le sous-onglet Réglages,
+    // voir settingsFootVisible plus bas — bascule à chaque changement d'onglet.
+    const footEl = sheetEl.querySelector('.crrav-sheetfoot');
+    if (footEl) footEl.style.display = settingsSheetTab === 'settings' ? '' : 'none';
   }
 
   // render() regroupe les appels sur une frame : pendant un chargement, il était invoqué
@@ -13761,6 +13778,12 @@
     const settingsSubtabs = buildSettingsSubtabsHtml();
     const settingsSheetBody = STATE.settingsOpen ? buildSettingsSheetBodyHtml() : '';
 
+    // (fix) Le pied « Valeurs par défaut / Enregistrer et actualiser » ne concerne QUE le
+    // sous-onglet Réglages (il porte sur CFG) — sur Ignorées/Diagnostic il n'a aucun sens
+    // et pouvait laisser deviner un bouton à la place vide en bas de la sheet. Masqué
+    // (display:none) plutôt que retiré du DOM pour que patchSettingsSheetInPlace n'ait
+    // qu'à basculer un style, sans avoir à re-brancher les handlers.
+    const settingsFootVisible = settingsSheetTab === 'settings';
     const settingsSheet = STATE.settingsOpen ? `
       <div class="crrav-settingssheet">
         <div class="crrav-sheethead">
@@ -13769,7 +13792,7 @@
         </div>
         <div class="crrav-subtabs" role="tablist">${settingsSubtabs}</div>
         <div class="crrav-sheetbody">${settingsSheetBody}</div>
-        <div class="crrav-sheetfoot">
+        <div class="crrav-sheetfoot"${settingsFootVisible ? '' : ' style="display:none"'}>
           <button class="crrav-btn ghost" data-act="settings-reset">Valeurs par défaut</button>
           <button class="crrav-btn primary" data-act="settings-save">Enregistrer et actualiser</button>
         </div>
