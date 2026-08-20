@@ -2820,10 +2820,9 @@
   }
 
   // Note PERSONNELLE (celle que TOI tu as postée sur la fiche), distincte de la note
-  // publique ci-dessus. Endpoint non documenté (API CR privée) : scopé par account_id,
-  // comme le reste des données perso (watchlist, playheads…) — même famille d'URL que
-  // `/content-reviews/v2/rating/series/{id}` mais préfixée par l'account_id, à la façon
-  // de `/content/v2/{accountId}/…` utilisé partout ailleurs dans ce script pour le perso.
+  // publique ci-dessus. Endpoint non documenté (API CR privée) :
+  // `/content-reviews/v3/user/{accountId}/rating/series/{id}` (à ne pas confondre avec
+  // `/content-reviews/v2/rating/series/{id}` utilisé pour la note PUBLIQUE ci-dessus).
   // Réponse tolérée sous plusieurs formes possibles (valeur numérique 1-5, chaîne "5s"
   // façon « 5 étoiles », ou objet imbriqué) : un format inattendu ne casse rien, la note
   // est juste traitée comme absente (pas de favori affiché à tort).
@@ -2851,7 +2850,7 @@
     if (c && 'r' in c) return c.r;
     if (!accountId) return null;
     try {
-      const r = await api(`/content-reviews/v2/${accountId}/rating/series/${seriesId}`);
+      const r = await api(`/content-reviews/v3/user/${accountId}/rating/series/${seriesId}`);
       const val = parseMyRatingResponse(r);
       cacheSet('myrating:' + seriesId, { r: val });
       return val;
@@ -14452,7 +14451,7 @@
         const accountId = await getAccountId();
         console.log('%c[reste-à-voir] sonde note perso pour', 'color:#f47521;font-weight:bold', s.title, s.id);
         try {
-          const r = await api(`/content-reviews/v2/${accountId}/rating/series/${s.id}`);
+          const r = await api(`/content-reviews/v3/user/${accountId}/rating/series/${s.id}`);
           console.log('réponse brute :', r);
           const parsed = parseMyRatingResponse(r);
           console.log('parsée →', parsed, parsed >= 5 ? '(favori ✅)' : '(pas favori)');
