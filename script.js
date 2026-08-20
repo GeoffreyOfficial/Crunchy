@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.3.1
+// @version      3.4.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.3.1';
+  const SCRIPT_VERSION = '3.4.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -113,6 +113,13 @@
     // à partir de la distribution réelle de chaque scan, le seuil exact pour viser N pépites.
     discoverLegendaryScore: 1.7,
     discoverNotableScore: 1.2,
+    // (fix) Désactivé par défaut : le 🎲 Dé légendaire ne remontait QUE les pépites au score
+    // légendaire, rejetant les notables croisées en cours de scan (score payé — genres/tags/
+    // note déjà récupérés — mais résultat jeté). Activé, ces notables sont conservées et
+    // affichées EN PLUS des légendaires, sans jamais compter dans le quota de
+    // CFG.legendaryTarget (qui reste strictement « N pépites légendaires ») : elles sont un
+    // bonus, la relance continue de viser le même nombre de légendaires qu'avant.
+    discoverLegendaryIncludeNotable: false,
     // Poids du GOÛT NET (tasteScore, -1..1) dans le score final : score du goût = taste ×
     // ce multiplicateur.
     // (fix) Valeur adoptée comme défaut d'après tes essais : 2.5 — le goût pèse un peu moins,
@@ -631,6 +638,9 @@
     // arrêter avant.
     { key: 'legendaryTarget', label: 'Nombre visé', type: 'int', min: 3, max: 50,
       help: 'Combien de pépites LÉGENDAIRES (score ≥ CFG.discoverLegendaryScore, réglable ci-dessous) viser quand tu lances le dé légendaire.',
+      impact: 'discover', sub: 'discoverDice' },
+    { key: 'discoverLegendaryIncludeNotable', label: 'Afficher aussi les notables', type: 'bool',
+      help: 'Le 🎲 Dé légendaire évalue le score de chaque candidate croisée pour décider si elle atteint le seuil légendaire — et rejette normalement tout ce qui n’y arrive pas, même les notables (un cran sous légendaire). Active ce réglage pour les garder et les afficher EN PLUS des légendaires, au lieu de les jeter. Elles ne comptent jamais dans le « Nombre visé » ci-dessus : c’est un bonus, la relance continue de chercher le même nombre de légendaires qu’avant. Désactivé par défaut.',
       impact: 'discover', sub: 'discoverDice' },
     // (fix) Réglage « Profondeur de scan » supprimé : le dé légendaire scanne toujours le
     // classement popularité Crunchyroll jusqu'au bout (plus de plafond de pages à régler).
@@ -3087,7 +3097,7 @@
   const EMPTY_ANI = { plannedTotal: null, seasonEndTs: null, plannedApprox: false, anilistStatus: null, nextEpTs: null, nextEpNum: null, genres: [], tags: [], studio: null, meanScore: null, popularity: null, duration: null, season: null, seasonYear: null, source: null, format: null };
   // Version du FORMAT du cache AniList : à incrémenter quand la logique de calcul change,
   // pour re-questionner AniList sans vider tout le reste du cache (pas de rescan complet).
-  const ANILIST_CACHE_VER = 8;   // 4 : ajout du repli titre anglais CR (voir enrichAnilistSchedule)
+  const ANILIST_CACHE_VER = 9;   // 4 : ajout du repli titre anglais CR (voir enrichAnilistSchedule)
                                   // 5 : ajout des genres AniList (voir translateAniGenres)
                                   // 6 : ajout des tags AniList pondérés par rank (voir tasteScore)
                                   // 7 : ajout studio/note/popularité/durée/saison/source/format
@@ -3095,6 +3105,13 @@
                                   // 8 : anilistSearchTerms tente aussi le titre sans diacritiques
                                   //     (voir stripDiacritics) — corrige les ratés type « Itô »
                                   //     (CR) vs « Ito » (index de recherche AniList), ou l'inverse.
+                                  // 9 : table de correspondance manuelle (ANILIST_TITLE_OVERRIDES),
+                                  //     variante « sans année entre parenthèses » dans
+                                  //     anilistSearchTerms, et perPage de recherche augmenté —
+                                  //     corrige les titres localisés sans aucun recoupement lexical
+                                  //     avec AniList (ex. titre FR pur) et les franchises à
+                                  //     nombreuses entrées proches (saisons/spéciaux) qui
+                                  //     évinçaient la bonne fiche du lot de candidats.
                                   // → force un nouvel essai des séries jusque-là non matchées.
 
   // Traduit un corps de réponse d'erreur AniList en raison lisible. Un 403 sur
@@ -3273,6 +3290,48 @@
     airingSchedule(perPage: 60) { nodes { episode airingAt } }
   }`;
 
+  // ─── Table de correspondance manuelle (repli ultime) ────────────────────
+  // Certains titres Crunchyroll n'ont AUCUN recoupement lexical exploitable avec les
+  // titres/synonymes indexés côté AniList, même après repli sur le titre anglais CR :
+  // titre entièrement localisé en français sans synonyme AniList correspondant
+  // (ex. « Madan no Ô to Vanadis » côté CR vs romaji « Madan no Ou to Vanadis » / anglais
+  // « Lord Marksman and Vanadis » côté AniList — aucune variante automatique ne peut deviner
+  // ce lien), ou franchise à tiroirs où la bonne fiche se fait évincer du lot de candidats
+  // par ses propres suites/spéciaux. Dans ces cas, aucune heuristique de score de titre
+  // n'est fiable : on fixe l'ID AniList à la main, une fois pour toutes (un ID ne change
+  // jamais, contrairement à un titre). Clé = aniNorm(titre CR affiché) — voir aniNorm
+  // plus bas. Pour ajouter une entrée : ouvre le diagnostic AniList (réglages du script),
+  // lance-le sur la série en question pour lister les candidats et leurs ID, puis complète
+  // ici. Best-effort : une entrée avec un ID invalide/supprimé est simplement ignorée
+  // (anilistFetchOverride renvoie null → repli sur la recherche normale).
+  const ANILIST_TITLE_OVERRIDES = {};
+  function registerAnilistOverride(crTitle, anilistId) {
+    const key = aniNorm(crTitle);
+    if (key) ANILIST_TITLE_OVERRIDES[key] = anilistId;
+  }
+  registerAnilistOverride('Madan no Ô to Vanadis', 20809);        // AniList : « Lord Marksman and Vanadis »
+  registerAnilistOverride('Madan no O to Vanadis', 20809);        // variante sans accent
+  // registerAnilistOverride('Nina du royaume aux étoiles', 0);   // ← complète l'ID via le diagnostic
+  // registerAnilistOverride('Digimon Adventure: (2020)', 0);     // ← complète l'ID via le diagnostic
+  // registerAnilistOverride('Freaky Girls', 0);                  // ← complète l'ID via le diagnostic
+
+  function anilistOverrideId(title) {
+    const id = ANILIST_TITLE_OVERRIDES[aniNorm(title)];
+    return Number.isFinite(id) && id > 0 ? id : null;
+  }
+  // Récupère UNE fiche AniList complète par ID (mêmes champs que ANILIST_FRAGMENT), pour
+  // les correspondances forcées ci-dessus — aucune recherche texte impliquée, donc aucun
+  // risque de mauvais score de titre. Marque le résultat __forced pour qu'aniPickMatch le
+  // retienne sans discussion (voir plus bas).
+  async function anilistFetchOverride(id) {
+    try {
+      const data = await anilistQuery(`query ($id: Int) { Media(id: $id, type: ANIME) { ...F } }\n${ANILIST_FRAGMENT}`, { id });
+      const m = data && data.Media;
+      if (m) m.__forced = true;
+      return m || null;
+    } catch (_) { return null; }   // best-effort : repli silencieux sur la recherche normale
+  }
+
   // Variantes de recherche à partir du titre Crunchyroll. Problème observé : un titre
   // composé « Tsugai - Daemons of the Shadow Realm » ne correspond à AUCUN titre AniList
   // pris en entier (romaji « Yomi no Tsugai », anglais « Daemons of the Shadow Realm ») →
@@ -3287,6 +3346,17 @@
   function stripDiacritics(s) {
     return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
   }
+  // (fix) Le ô/û accentué français est souvent une romanisation FRANÇAISE d'une voyelle
+  // longue japonaise (ō/ū) — ex. « Madan no Ô to Vanadis » (titre CR en fr-FR) correspond
+  // à la romanisation Hepburn « Madan no Ou to Vanadis » utilisée par AniList, pas à
+  // « Madan no O to Vanadis » qu'obtiendrait un simple retrait d'accent (stripDiacritics
+  // ci-dessus). On ajoute donc une variante DÉDIÉE qui convertit ô→ou / û→uu (au lieu de
+  // les réduire à une seule lettre), pour retrouver ce genre de titre.
+  function frenchToHepburn(s) {
+    return String(s || '')
+      .replace(/ô/g, 'ou').replace(/Ô/g, 'Ou')
+      .replace(/û/g, 'uu').replace(/Û/g, 'Uu');
+  }
   function anilistSearchTerms(title) {
     const t = String(title || '').trim();
     const terms = [];
@@ -3295,12 +3365,24 @@
       if (x.length >= 2 && !terms.some((y) => y.toLowerCase() === x.toLowerCase())) terms.push(x);
     };
     push(t);
+    const hepburn = frenchToHepburn(t);
+    if (hepburn !== t) push(hepburn);
     const stripped = stripDiacritics(t);
     if (stripped !== t) push(stripped);
+    // (fix v9) CR ajoute parfois une année entre parenthèses pour distinguer un remake
+    // (« Digimon Adventure: (2020) ») — absente du titre AniList, elle dilue le score de
+    // similarité. On tente aussi la variante sans ce suffixe.
+    const noYear = t.replace(/\s*\(\s*(19|20)\d{2}\s*\)\s*$/, '').trim();
+    if (noYear && noYear !== t) push(noYear);
     const parts = t.split(/\s+[-–—:|~]\s+/).map((s) => s.trim()).filter((s) => s.length >= 2);
     parts.sort((a, b) => b.length - a.length);
     for (const part of parts) push(part);
-    return terms.slice(0, 3);
+    // (fix v9) Le cap reste à 3 dans le cas courant (rien à gagner à interroger plus de
+    // variantes quand elles sont toutes identiques après dédoublonnage), mais monte à 4
+    // quand la variante ô/û→ou/uu a réellement produit quelque chose de nouveau — sinon
+    // elle se ferait évincer par « noYear »/les parties du titre avant même d'être essayée.
+    const cap = (hepburn !== t) ? 4 : 3;
+    return terms.slice(0, cap);
   }
 
   // Construit UNE requête GraphQL qui lance plusieurs recherches (une par terme) via des
@@ -3308,7 +3390,7 @@
   function anilistBuildMultiQuery(terms) {
     const vars = terms.map((_, i) => `$q${i}: String`).join(', ');
     const pages = terms.map((_, i) =>
-      `p${i}: Page(perPage: 6) { media(search: $q${i}, type: ANIME, sort: SEARCH_MATCH) { ...F } }`
+      `p${i}: Page(perPage: 8) { media(search: $q${i}, type: ANIME, sort: SEARCH_MATCH) { ...F } }`   // (fix v9) 6 → 8, cf. anilistSearchBatch
     ).join('\n');
     return `query (${vars}) {\n${pages}\n}\n${ANILIST_FRAGMENT}`;
   }
@@ -3316,6 +3398,12 @@
   // Recherche AniList tolérante : plusieurs variantes de titre en une requête, résultats
   // fusionnés et dédoublonnés par id. Renvoie { media, terms, perTerm }.
   async function anilistSearch(title) {
+    const overrideId = anilistOverrideId(title);
+    if (overrideId) {
+      const m = await anilistFetchOverride(overrideId);
+      if (m) return { media: [m], terms: [], perTerm: [] };
+      // ID invalide/supprimé : on ne bloque pas, on retombe sur la recherche normale.
+    }
     const terms = anilistSearchTerms(title);
     if (!terms.length) return { media: [], terms: [], perTerm: [] };
     const variables = {};
@@ -3375,10 +3463,27 @@
     const out = new Map();
     const valid = (items || []).filter((it) => it && it.key != null);
     if (!valid.length) return out;
+    // (fix v9) Les titres à correspondance forcée (voir ANILIST_TITLE_OVERRIDES) sortent du
+    // lot texte groupé : ils sont résolus par ID, sans ambiguïté possible, et n'ont donc rien
+    // à gagner à passer par la recherche texte (qui échouerait de toute façon — c'est
+    // justement pour ça qu'ils sont dans la table).
+    const overridden = [];
+    const rest = [];
+    for (const it of valid) {
+      const id = anilistOverrideId(it.title);
+      if (id) overridden.push({ key: it.key, id }); else rest.push(it);
+    }
+    if (overridden.length) {
+      await Promise.all(overridden.map(async ({ key, id }) => {
+        const m = await anilistFetchOverride(id);
+        out.set(key, { media: m ? [m] : [] });
+      }));
+    }
+    if (!rest.length) return out;
     // Chaque série → ses 1-3 variantes de titre.
-    const perItem = valid.map((it) => ({ key: it.key, terms: anilistSearchTerms(it.title) }))
+    const perItem = rest.map((it) => ({ key: it.key, terms: anilistSearchTerms(it.title) }))
       .filter((x) => x.terms.length);
-    if (!perItem.length) { for (const it of valid) out.set(it.key, { media: [] }); return out; }
+    if (!perItem.length) { for (const it of rest) if (!out.has(it.key)) out.set(it.key, { media: [] }); return out; }
 
     const varDecls = [];
     const pages = [];
@@ -3386,7 +3491,10 @@
     perItem.forEach((x, i) => {
       x.terms.forEach((term, j) => {
         varDecls.push(`$q${i}_${j}: String`);
-        pages.push(`s${i}_${j}: Page(perPage: 5) { media(search: $q${i}_${j}, type: ANIME, sort: SEARCH_MATCH) { ...FL } }`);
+        // (fix v9) perPage 5 → 8 : sur une franchise à nombreuses entrées proches (saisons,
+        // spéciaux — ex. « The King's Avatar », « Digimon Adventure »), la bonne fiche se
+        // faisait parfois évincer du lot avant même d'arriver jusqu'à aniPickMatch.
+        pages.push(`s${i}_${j}: Page(perPage: 8) { media(search: $q${i}_${j}, type: ANIME, sort: SEARCH_MATCH) { ...FL } }`);
         variables[`q${i}_${j}`] = term;
       });
     });
@@ -3530,6 +3638,14 @@
   // nom fort, OU un nom correct CORROBORÉ par l'année/le statut — sinon on renonce.
   function aniPickMatch(media, s) {
     if (!Array.isArray(media) || !media.length) return null;
+    // Correspondance forcée (voir ANILIST_TITLE_OVERRIDES) : aucun score de titre à
+    // discuter, on la retient directement — c'est justement pour les titres où le score
+    // de titre échouerait qu'elle existe.
+    const forced = media.find((m) => m && m.__forced);
+    if (forced) {
+      forced.__titleScore = 1; forced.__releasing = forced.status === 'RELEASING'; forced.__yearMatch = true;
+      return forced;
+    }
     const crNorm = aniNorm(s.title || '');
     const crYear = (s.lastAired && s.lastAired.air) ? new Date(s.lastAired.air).getFullYear() : null;
     let best = null, bestComposite = -1;
@@ -4796,20 +4912,20 @@
     // long : il faut brasser plus de popularité pour tomber sur d'authentiques pépites (le
     // scan va désormais jusqu'au bout du classement au besoin, cf. POPULAR_SCAN_SAFETY_CAP).
     const legendary = !!(opts && opts.legendary);
-    // 🎲 Dé légendaire : chaque tirage REMPLACE l'affichage précédent, même en mode « encore
-    // des légendaires » (more=true côté exclusion/curseur, pour continuer à chercher des
-    // pépites jamais montrées). Sans ça, avec le tri actif, les nouvelles pépites se mêlaient
-    // aux anciennes sans qu'on puisse distinguer ce qui vient d'être trouvé. `more` continue
-    // de piloter l'historique d'exclusion et la reprise du curseur (ci-dessous) : seul
-    // l'affichage (D.series) est toujours réinitialisé pour ce mode.
+    // (fix) Chaque relance/tirage REMPLACE l'affichage précédent — normal comme 🎲 légendaire,
+    // « 30 autres pépites » y compris (voir refreshMoreDiscover). Avant, en mode « autres
+    // pépites », les nouvelles pépites se mêlaient aux anciennes sans qu'on puisse distinguer
+    // ce qui vient d'être trouvé : on s'y perdait sur qui avait été ajouté. `more` continue de
+    // piloter l'historique d'exclusion et la reprise du curseur (ci-dessous) : seul
+    // l'affichage (D.series) est désormais toujours réinitialisé.
     const freshDisplay = legendary || !!(opts && opts.freshDisplay);
     const D = STATE.discover;
     D.loading = true;
     // (streaming) Scan frais : on vide la grille tout de suite pour que le PREMIER rendu
     // montre des squelettes propres (et non les résultats du scan précédent qui clignoteraient
-    // avant d'être remplacés). En mode « autres pépites » (more) hors 🎲 légendaire, on garde
-    // au contraire ce qui est affiché : les nouvelles pépites viendront s'y ajouter au fil du
-    // scan.
+    // avant d'être remplacés). Avec freshDisplay désormais systématique (voir plus haut), ce
+    // vidage immédiat couvre aussi bien la relance normale que « 30 autres pépites » et le 🎲
+    // légendaire.
     if (!more || freshDisplay) D.series = [];
     D.error = null;
     D.warning = null;
@@ -4945,6 +5061,17 @@
 
       const excluded = new Set([...watchlistIds, ...ignoredIds, ...listMemberIds, ...watchedIds, ...D.excludedIds]);
       const seenCandidate = new Set();
+      // (fix) 🎲 Dé légendaire — inclusion des notables (CFG.discoverLegendaryIncludeNotable,
+      // désactivé par défaut) : accepte un candidat notable au même titre qu'un légendaire,
+      // SANS jamais le compter dans le quota `target` (strictement légendaire, voir
+      // legendaryFound/legTotal plus bas) — un bonus qui s'affiche, ne pilote pas l'arrêt du
+      // scan.
+      const legendaryAccepts = (sig) => sig.legendary || (CFG.discoverLegendaryIncludeNotable && sig.notable);
+      // Compte uniquement les items RÉELLEMENT légendaires d'un lot (les notables bonus,
+      // marqués `legendary:false`, n'y comptent pas) — sert à toutes les conditions de quota
+      // ci-dessous en mode légendaire, pendant que `matches`/`results` eux-mêmes peuvent
+      // contenir des notables en plus.
+      const legTotal = (arr) => arr.reduce((n, x) => n + ((x && x.legendary) ? 1 : 0), 0);
       const matches = [];
 
       // (fix) Mode « similaire » (🪄) : on recycle D'ABORD les séries déjà croisées lors d'un
@@ -5059,7 +5186,7 @@
       // le scan une fois le curseur suffisamment avancé — alors que ce plafond doit rester
       // un nombre de PAGES PAR SESSION, jamais un plafond absolu dans le classement.
       const startPage = legendary ? Math.floor(start / CFG.discoverPageSize) : 0;
-      for (let i = 0; !D.similarTo && i < maxPages && matches.length < target; i++) {
+      for (let i = 0; !D.similarTo && i < maxPages && (legendary ? legTotal(matches) : matches.length) < target; i++) {
         const page = startPage + i;
         if (D.cancelRequested) { stopReason = 'cancelled'; break; }
         // Progression du scan en état STRUCTURÉ plutôt qu'en chaîne à re-parser : le bandeau
@@ -5072,7 +5199,7 @@
         // la taille réelle n'est pas connue à l'avance (maxPages n'est qu'un filet de
         // sécurité interne, pas une vraie cible de pages — l'afficher comme tel induisait en
         // erreur, cf. renderActivityBar plus bas qui n'en fait plus une barre % / ETA).
-        D.scan = { page: page + 1, maxPages, found: matches.length, target, legendary };
+        D.scan = { page: page + 1, maxPages, found: legendary ? legTotal(matches) : matches.length, target, legendary };
         onProgress(stepLabel(3, 3, `page ${page + 1}`));
         const r = await pendingPage;
         const data = r.data || [];
@@ -5113,7 +5240,7 @@
             // complètes (poster, synopsis, épisodes…) qu'un simple verdict ne contient pas.
             if (legendary && CFG.discoverScoreCacheHours > 0) {
               const cachedVerdict = cacheGet('nugget:' + p.id, CFG.discoverScoreCacheHours * 3600e3);
-              if (cachedVerdict && cachedVerdict.fp === scoreFp && !cachedVerdict.legendary) {
+              if (cachedVerdict && cachedVerdict.fp === scoreFp && !legendaryAccepts(cachedVerdict)) {
                 scoreSamples.push(cachedVerdict.score);
                 REJ.legendaryScore++;
                 return false;
@@ -5127,7 +5254,7 @@
         // Par petits paquets, pour s'arrêter dès que le quota est atteint au lieu
         // d'analyser les 50 candidats de la page.
         const results = [];
-        for (let c = 0; c < candidates.length && matches.length + results.length < target; c += 8) {
+        for (let c = 0; c < candidates.length && (legendary ? legTotal(matches) + legTotal(results) : matches.length + results.length) < target; c += 8) {
           if (D.cancelRequested) break;
           const slice = candidates.slice(c, c + 8);
           const got = await pool(slice,
@@ -5243,7 +5370,8 @@
               if (CFG.discoverScoreCacheHours > 0) {
                 cacheSet('nugget:' + x.p.id, { legendary: sig.legendary, notable: sig.notable, score: sig.score, fp: scoreFp });
               }
-              if (!sig.legendary) { REJ.legendaryScore++; continue; }
+              if (!legendaryAccepts(sig)) { REJ.legendaryScore++; continue; }
+              x.__legendary = sig.legendary; x.__notable = sig.notable;
               kept.push(x);
             }
             // Épisodes + progression UNIQUEMENT pour les légendaires (étape chère différée).
@@ -5271,9 +5399,14 @@
             categories: x.categories, tags: x.tags, aniScore: x.aniScore ?? null,
             episodes: x.episodes, secTotal: x.secTotal, maxAir: x.maxAir,
             order: seenCandidate.size,
+            // (fix) Notables bonus (voir CFG.discoverLegendaryIncludeNotable) : ce flag sert
+            // uniquement à legTotal() pour ne compter QUE les vraies légendaires dans le
+            // quota — l'affichage, lui, recalcule son propre badge légendaire/notable à partir
+            // du score (voir discoverCard/discoverListRow), donc rien à changer côté rendu.
+            legendary: legendary ? !!x.__legendary : undefined,
           }));
           results.push(...finalResults);
-          D.scan = { page: page + 1, maxPages, found: matches.length + results.length, target, legendary };
+          D.scan = { page: page + 1, maxPages, found: legendary ? (legTotal(matches) + legTotal(results)) : (matches.length + results.length), target, legendary };
           onProgress(stepLabel(3, 3, `page ${page + 1}`));
           publishFound(results);   // (streaming) les pépites de cette tranche apparaissent aussitôt
         }
@@ -5293,7 +5426,7 @@
       // tags de la source peut faire remonter. `seenCandidate` est le MÊME Set que celui déjà
       // rempli par le scan CR ci-dessus (jamais un second) : il couvre donc les deux sources
       // et empêche tout doublon d'affichage entre elles.
-      if (!D.cancelRequested && CFG.discoverAnilistEnabled && (matches.length < target || D.similarTo)) {
+      if (!D.cancelRequested && CFG.discoverAnilistEnabled && ((legendary ? legTotal(matches) : matches.length) < target || D.similarTo)) {
         // En mode similaire, le pool vient des recommandations AniList (voir
         // scanAnilistPopularity) ; le profil ne sert que de REPLI tag_in si la source n'a pas
         // de reco exploitable — on prend alors le profil de la SÉRIE SOURCE (simProfile), pas
@@ -5311,7 +5444,7 @@
         // second bassin, plus pertinent par tags que par popularité générale, ait de quoi
         // remonter des candidats qui remplaceront avantageusement les moins pertinents du
         // bassin CR au tri final (voir matches.slice(0, target) plus bas).
-        const aniTarget = D.similarTo ? target : (target - matches.length);
+        const aniTarget = D.similarTo ? target : (target - (legendary ? legTotal(matches) : matches.length));
         const aniFound = await scanAnilistPopularity(
           aniProfile, excluded, seenCandidate, knownTitlesNorm, aniTarget,
           { accountId, REJ, D, classifyKnownReason },
@@ -5323,7 +5456,7 @@
         candidatesSeenTotal += (aniFound.considered || 0);
         if (aniFound.similarRecTotal != null) similarRecTotal = aniFound.similarRecTotal;
         for (const x of aniFound) {
-          if (!D.similarTo && matches.length >= target) break;
+          if (!D.similarTo && (legendary ? legTotal(matches) : matches.length) >= target) break;
           const candidate = {
             id: x.p.id, title: x.p.title, slug: x.p.slug_title, poster: posterOf(x.p),
             synopsis: x.p.description || '',
@@ -5333,7 +5466,9 @@
             order: seenCandidate.size,
           };
           // Même filtre final que le bassin CR (voir plus haut) : en mode légendaire,
-          // seules les pépites au score ≥ CFG.discoverLegendaryScore comptent dans le quota.
+          // seules les pépites au score ≥ CFG.discoverLegendaryScore comptent dans le quota
+          // (les notables ne passent que si CFG.discoverLegendaryIncludeNotable est activé,
+          // voir legendaryAccepts — et ne comptent alors jamais dans legTotal/le quota).
           if (legendary) {
             const sig = discoverSignals(candidate, aniProfile);
             scoreSamples.push(sig.score);
@@ -5342,7 +5477,8 @@
             if (CFG.discoverScoreCacheHours > 0) {
               cacheSet('nugget:' + candidate.id, { legendary: sig.legendary, notable: sig.notable, score: sig.score, fp: scoreFp });
             }
-            if (!sig.legendary) { REJ.legendaryScore++; continue; }
+            if (!legendaryAccepts(sig)) { REJ.legendaryScore++; continue; }
+            candidate.legendary = sig.legendary;
           }
           matches.push(candidate);
           publishFound();          // (streaming) pépite du second bassin AniList affichée aussitôt
@@ -5356,7 +5492,7 @@
       // aucun sens — le vrai frein est le nombre fini de recommandations/candidats AniList.
       if (stopReason === undefined && D.cancelRequested) stopReason = 'cancelled';
       if (stopReason === undefined) {
-        stopReason = matches.length >= target
+        stopReason = (legendary ? legTotal(matches) : matches.length) >= target
           ? 'target'
           : (D.similarTo ? 'similarExhausted' : 'maxPages');
       }
@@ -5379,9 +5515,23 @@
       // qu'ils aient une chance d'être vus. On trie par similarité réelle (même fonction que
       // l'affichage, tasteScore/similarProfile) avant de tronquer, pour garder les meilleurs
       // peu importe leur bassin d'origine.
+      // (fix) En mode légendaire, `matches` peut contenir des notables bonus (voir
+      // CFG.discoverLegendaryIncludeNotable) en plus des légendaires : on ne les compte JAMAIS
+      // dans le quota `target` (voir legTotal ci-dessus), donc un simple `slice(0, target)`
+      // les tronquerait à tort, voire couperait de VRAIES légendaires trouvées après un
+      // notable dans l'ordre du scan. On garde ici tous les notables bonus, et on cap
+      // uniquement le nombre de légendaires à `target` (ordre de découverte préservé).
+      const capLegendaryTarget = (arr) => {
+        let n = 0; const out = [];
+        for (const x of arr) {
+          if (x && x.legendary) { if (n >= target) continue; n++; }
+          out.push(x);
+        }
+        return out;
+      };
       const found = D.similarTo
         ? [...matches].sort((a, b) => tasteScore(b, simProfile) - tasteScore(a, simProfile)).slice(0, target)
-        : matches.slice(0, target);
+        : (legendary ? capLegendaryTarget(matches) : matches.slice(0, target));
 
       // (fix requêtes) Enrichissement AniList DIFFÉRÉ, mode normal / similaire uniquement :
       // on n'interroge AniList que pour les pépites RÉELLEMENT retenues et affichées (≤ target),
@@ -5430,7 +5580,7 @@
       // pas atteint, peu importe la raison (interruption, relance à sec, dé légendaire à
       // sec, ou simplement pas assez de survivants), on l'affiche sous les résultats.
       const shortfallCtx = {
-        target, foundCount: found.length, legendary,
+        target, foundCount: legendary ? legTotal(found) : found.length, legendary,
         pagesScanned, maxPages, candidatesSeenTotal, rej: REJ, scoreSamples, stopReason,
         similarRecTotal,
         // (fix) Le rapport parlait toujours de « pépites »/légendaire, même déclenché
@@ -5460,7 +5610,7 @@
           : "Aucune autre pépite trouvée pour l'instant — le classement popularité n'a " +
             "pas assez changé. Réessaie plus tard.";
         D.shortfallDetail = buildDiscoverShortfallReport(shortfallCtx);
-      } else if (legendary && !found.length) {
+      } else if (legendary && !legTotal(found)) {
         D.warning = "Aucune pépite légendaire trouvée en " + pagesScanned + " page" + (pagesScanned > 1 ? 's' : '') +
           " (classement popularité parcouru jusqu'au bout). Essaie d'élargir tes genres, " +
           "ou relance le dé : le classement popularité bouge et l'historique des pépites déjà vues expire avec le temps.";
@@ -5474,7 +5624,7 @@
         // pendant le scan, et on ne perd plus le batch précédent sous les yeux.
         D.series = [...prevSeries, ...found];
         D.lastSync = new Date();
-        if (found.length < target) D.shortfallDetail = buildDiscoverShortfallReport(shortfallCtx);
+        if ((legendary ? legTotal(found) : found.length) < target) D.shortfallDetail = buildDiscoverShortfallReport(shortfallCtx);
         idle(() => fillMissingRatings(found));
       }
     } catch (e) {
@@ -8214,6 +8364,7 @@
   .crrav-confirm-ok.danger{background:#e0483d;border-color:#e0483d;color:#fff}
   .crrav-ignoreall{color:#e6a9a2}
   .crrav-ignoreall:hover{border-color:#e0483d;color:#f2c4bf}
+  .crrav-ignoreall-bottom{display:flex;justify-content:center;margin:18px 0}
 
   /* (5) vue liste compacte */
   .crrav-grid.crrav-list{grid-template-columns:1fr;gap:8px}
@@ -10525,10 +10676,6 @@
           ${!D.loading && D.series.length && !f.showIgnoredDiscover
             ? '<button class="crrav-sync" data-act="more-discover">🔄 30 autres pépites</button>'
             : ''}
-          ${!D.loading && list.length && !f.showIgnoredDiscover
-            ? `<button class="crrav-sync crrav-ignoreall" data-act="ignore-all-discover"
-                 title="Ignorer toutes les pépites actuellement affichées — elles ne seront plus jamais proposées">🙈 Tout ignorer (${list.length})</button>`
-            : ''}
           ${!D.loading && !f.showIgnoredDiscover
             ? `<button class="crrav-sync" data-act="legendary-discover"
                  title="Scanne beaucoup plus profond dans le classement popularité pour dénicher spécifiquement des pépites légendaires (score élevé)"><span class="crrav-dice-gold">🎲</span> ${
@@ -10560,6 +10707,12 @@
         </div>
       </div>
       ${body}
+      ${!D.loading && list.length && !f.showIgnoredDiscover
+        ? `<div class="crrav-ignoreall-bottom">
+             <button class="crrav-sync crrav-ignoreall" data-act="ignore-all-discover"
+               title="Ignorer toutes les pépites actuellement affichées — elles ne seront plus jamais proposées">🙈 Tout ignorer (${list.length})</button>
+           </div>`
+        : ''}
       ${!D.loading && D.shortfallDetail && !f.showIgnoredDiscover ? D.shortfallDetail : ''}
       <div class="crrav-foot">${D.lastSync
         ? `Synchronisé à ${D.lastSync.toLocaleTimeString('fr-FR')}`
@@ -12473,7 +12626,12 @@
   const refreshDiscover = (opts) => loadDiscover((m) => { progressMsg = m; render(); }, opts);
   // Relance explicite : on force la fraîcheur (historique + ajouts récents en liste).
   const relaunchDiscover = () => loadDiscover((m) => { progressMsg = m; render(); }, { force: true });
-  const refreshMoreDiscover = () => loadDiscover((m) => { progressMsg = m; render(); }, { more: true, force: true });
+  // (fix) « 30 autres pépites » cherchait d'AUTRES séries (jamais montrées, via l'historique
+  // d'exclusion) mais les ADDITIONNAIT à l'affichage précédent — au bout de deux-trois clics,
+  // impossible de distinguer ce qui vient d'être trouvé de ce qui était déjà là. `more: true`
+  // reste nécessaire pour piloter l'exclusion (ne jamais reproposer une pépite déjà montrée) ;
+  // `freshDisplay: true` force en plus le remplacement de l'affichage, comme le 🎲 légendaire.
+  const refreshMoreDiscover = () => loadDiscover((m) => { progressMsg = m; render(); }, { more: true, force: true, freshDisplay: true });
   // 🎲 Dé légendaire : premier clic = recherche fraîche de pépites légendaires uniquement,
   // scan bien plus profond. Un second clic, tant que le tirage précédent était déjà un dé
   // légendaire, en cherche d'AUTRES (même logique que « 30 autres pépites », via `more`).
