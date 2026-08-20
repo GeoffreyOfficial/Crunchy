@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.8.0
+// @version      3.9.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.8.0';
+  const SCRIPT_VERSION = '3.9.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -796,11 +796,13 @@
   applySettings();
 
   // ─── Séries ignorées (masquées sans être marquées vues) ─────
-  // Table id → { titre, source }. La source ('watchlist' ou 'discover') distingue
-  // les exclusions faites depuis Reste à voir/Hors listes de celles faites depuis
-  // Découverte : chaque onglet a sa propre vue "Ignorées" pour restaurer, sans quoi
+  // Table id → { titre, source, ignoredAt }. La source ('watchlist', 'orphan', 'discover'
+  // ou 'newpremieres', voir IGNORE_SOURCES) distingue l'onglet depuis lequel l'exclusion a
+  // été faite : chaque onglet a sa propre vue "Ignorées" pour restaurer, sans quoi
   // une pépite ignorée depuis Découverte (absente de la watchlist) ne réapparaît
-  // nulle part une fois exclue des résultats de recherche.
+  // nulle part une fois exclue des résultats de recherche. (43) ignoredAt (timestamp,
+  // absent sur les entrées migrées d'avant cette version) permet de trier/afficher
+  // depuis quand une série est ignorée dans le panneau Réglages.
   let IGNORED = new Map();
   safeCall(() => {
     const raw = APP_STATE.ignored;
@@ -815,6 +817,7 @@
           IGNORED.set(id, {
             title: val.title || '', source: val.source || 'watchlist',
             poster: val.poster || '', synopsis: val.synopsis || '',
+            ignoredAt: val.ignoredAt || 0,   // (43) 0 = date inconnue (entrée antérieure à cette version)
           });
         } else {
           // Format 2.8.2–2.11 : titre en simple chaîne, source inconnue → on suppose
@@ -836,6 +839,7 @@
     else IGNORED.set(id, {
       title: title || '', source: source || 'watchlist',
       poster: poster || '', synopsis: synopsis || '',
+      ignoredAt: Date.now(),   // (43)
     });
     saveIgnored();
   }
@@ -844,6 +848,18 @@
     for (const v of IGNORED.values()) if (v.source === source) n++;
     return n;
   }
+
+  // (43) Les 4 origines possibles d'une exclusion — partagées par le bouton ⊘ (ignoreBtn),
+  // les puces de filtre et le groupement par source du panneau « Séries ignorées »
+  // (ignoredPanel). Une seule source de vérité pour libellé/icône : éviter qu'un nouvel
+  // onglet ajoute une source sans que le panneau Réglages sache l'afficher proprement.
+  const IGNORE_SOURCES = [
+    { key: 'watchlist', label: 'Reste à voir', icon: '📋' },
+    { key: 'orphan', label: 'Hors listes', icon: '🧭' },
+    { key: 'discover', label: 'Découverte', icon: '✨' },
+    { key: 'newpremieres', label: 'Nouveautés', icon: '🆕' },
+  ];
+  const IGNORE_SOURCE_LABEL = Object.fromEntries(IGNORE_SOURCES.map((s) => [s.key, s.label]));
 
   // Ignore EN BLOC toute une liste de séries (bouton « Tout ignorer » de Découverte), en
   // une SEULE écriture de stockage plutôt qu'une par série. À l'échelle de centaines
@@ -859,6 +875,7 @@
       IGNORED.set(s.id, {
         title: s.title || '', source: source || 'discover',
         poster: s.poster || '', synopsis: s.synopsis || '',
+        ignoredAt: Date.now(),   // (43)
       });
       added++;
     }
@@ -4160,7 +4177,7 @@
     fullDiag: null, fullDiagRunning: false, fullDiagText: '',
     anilistProgress: null,   // { done, total, startedAt } pendant enrichAnilistSchedule (planning + genres), null sinon
     historyGenreProgress: null,   // { done, total, startedAt } pendant enrichHistoryGenres (genres « hors listes »), null sinon
-    ignoredQ: '', ignoredSort: 'title-asc',   // (27) recherche/tri du panneau « Séries ignorées »
+    ignoredQ: '', ignoredSort: 'title-asc', ignoredSrc: 'all',   // (27)(43) recherche/tri/filtre du panneau « Séries ignorées »
     historyProgress: null,   // { done, total, series } pendant le scan, null sinon
     fromSnapshot: false,
     filters: loadFilters(),
@@ -6947,6 +6964,11 @@
   const statsAccordionOpen = new Set();
   let settingsSearchQ = '';        // (30) requête de recherche interne aux Réglages
   let settingsSheetTab = 'settings'; // (41) sous-onglet actif de la sheet Réglages (settings|ignored|diag)
+  // (43) Sélection multiple et sections repliées du panneau « Séries ignorées » (voir
+  // ignoredPanel) — en dehors de STATE comme settingsSheetTab : survit aux re-renders
+  // sans être persisté sur disque (repart de zéro à chaque ouverture de la sheet).
+  let ignoredSelected = new Set();
+  let ignoredCollapsedGroups = new Set();
   let suppressAccToggle = false;   // évite de polluer statsAccordionOpen lors d'ouvertures programmatiques
   safeCall(() => {
     const raw = JSON.parse(localStorage.getItem(LS + 'hues') || '{}');
@@ -7088,8 +7110,8 @@
   // quelles séries ont déjà joué leur animation d'entrée cette session, pour ne la rejouer
   // qu'une fois par série (voir .crrav-fresh) et non à chaque rafraîchissement de fond.
   const cardsAnimatedOnce = new Set();
-  function card(s, i) {
-    if (STATE.filters.view === 'list') return listRow(s);
+  function card(s, i, source) {
+    if (STATE.filters.view === 'list') return listRow(s, source);
     const seriesUrl = crSeriesUrl(s.id, s.slug);
     const done = s.remaining === 0;
     const rating = (s.rating != null || s.aniScore != null)
@@ -7114,7 +7136,7 @@
         ${rating}
         ${state}
         ${s.isNew ? '<span class="crrav-newdot">Nouvel épisode</span>' : ''}
-        ${ignoreBtn(s)}
+        ${ignoreBtn(s, source)}
         ${synopsisBlock(s)}
       </div>
       <div class="crrav-body">
@@ -7135,7 +7157,7 @@
 
   // (5) vue liste compacte : une ligne par série, pensée pour les grosses listes
   // et les petits écrans. Même données, densité très supérieure.
-  function listRow(s) {
+  function listRow(s, source) {
     const seriesUrl = crSeriesUrl(s.id, s.slug);
     const done = s.remaining === 0;
     const pinfo = plannedInfo(s, true);
@@ -7161,7 +7183,7 @@
         ${ring(s)}
         ${resumeLink(s, 'crrav-lresume')}
         ${similarBtn(s)}
-        ${ignoreBtn(s)}
+        ${ignoreBtn(s, source)}
       </div>
     </article>`;
   }
@@ -7934,8 +7956,8 @@
     };
 
     const html = [
-      section('📋', 'Dans tes listes', mSuivi, card, false),
-      section('🧭', 'Hors listes (épisodes non vus)', mOrphan, card, STATE.orphan.loading),
+      section('📋', 'Dans tes listes', mSuivi, (s, i) => card(s, i, 'watchlist'), false),
+      section('🧭', 'Hors listes (épisodes non vus)', mOrphan, (s, i) => card(s, i, 'orphan'), STATE.orphan.loading),
       section('✨', 'Découverte', mDiscover, discoverCard, STATE.discover.loading),
     ].join('');
 
@@ -7976,9 +7998,17 @@
       animation:none!important;transition:none!important;transform:none!important}}
   .crrav-overlay *{box-sizing:border-box}
 
-  .crrav-top{position:sticky;top:0;z-index:5;backdrop-filter:blur(18px);
+  /* (fix lag scroll) sticky + backdrop-filter:blur est le grand classique du bagotage
+     mobile : un élément collé en haut avec flou forcé DOIT être repeint à chaque frame
+     de scroll pour recalculer ce qu'il y a derrière lui, sur TOUT le contenu qui défile
+     dessous — coûteux sur les GPU de milieu/bas de gamme, et présent sur tous les
+     onglets (pas seulement Reste à voir) puisque ce header leur est commun. Le dégradé
+     de fond (déjà bien opaque à .96/.82) reste partout, à coût nul ; le flou proprement
+     dit est réservé aux pointeurs fins (desktop), là où le coût est négligeable.*/
+  .crrav-top{position:sticky;top:0;z-index:5;
     background:linear-gradient(180deg,rgba(10,10,12,.96),rgba(10,10,12,.82));
     border-bottom:1px solid rgba(255,255,255,.08);padding:16px 20px 12px}
+  @media (pointer:fine){.crrav-top{backdrop-filter:blur(18px)}}
   .crrav-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
   /* Ligne principale du header : TOUJOURS sur une seule ligne (nowrap). Le scroll
      horizontal est un filet de sécurité pour un très petit écran + réglages non
@@ -8422,11 +8452,20 @@
   .crrav-bar{height:6px;border-radius:3px;background:rgba(255,255,255,.12);overflow:hidden;
     box-shadow:inset 0 1px 2px rgba(0,0,0,.35)}
   .crrav-bar i{display:block;height:100%;background:var(--prog)}
-  /* (4) dégradé animé uniquement tant que la série n'est pas finie (crrav-bar-active,
-     posé dans le template ligne ~6768) — --prog reste la seule source de teinte. */
-  .crrav-bar-active i{
-    background:linear-gradient(90deg,var(--prog),rgba(255,255,255,.55),var(--prog));
-    background-size:200% 100%;animation:crrav-bar-flow 2.6s linear infinite}
+  /* (4→fix lag scroll) dégradé animé uniquement tant que la série n'est pas finie
+     (crrav-bar-active, posé dans le template ligne ~6768). PERF : animer
+     background-position force un repaint (pas juste un compositing) à CHAQUE frame —
+     et ça tourne en même temps sur toutes les cartes « en cours » visibles, ce qui est
+     justement la majorité des cartes de Reste à voir. Sur téléphone (pointer:coarse),
+     ce repaint permanent pendant le scroll est le principal responsable du bagotage
+     remonté : on désactive donc le chatoiement là, et on garde une barre pleine et
+     colorée (juste statique) — le dégradé animé reste réservé aux pointeurs fins
+     (souris/trackpad), où son coût est négligeable. */
+  @media (pointer:fine){
+    .crrav-bar-active i{
+      background:linear-gradient(90deg,var(--prog),rgba(255,255,255,.55),var(--prog));
+      background-size:200% 100%;animation:crrav-bar-flow 2.6s linear infinite}
+  }
   @keyframes crrav-bar-flow{from{background-position:200% 0}to{background-position:0 0}}
   @media (prefers-reduced-motion:reduce){.crrav-bar-active i{animation:none!important;background:var(--prog)}}
 
@@ -8717,7 +8756,8 @@
     display:flex;flex-direction:column}
   .crrav-sheethead{position:sticky;top:0;display:flex;align-items:center;gap:10px;z-index:2;
     padding:14px max(16px,calc((100% - 900px)/2));border-bottom:1px solid rgba(255,255,255,.1);
-    background:linear-gradient(180deg,rgba(10,10,12,.96),rgba(10,10,12,.82));backdrop-filter:blur(18px)}
+    background:linear-gradient(180deg,rgba(10,10,12,.96),rgba(10,10,12,.82))}
+  @media (pointer:fine){.crrav-sheethead{backdrop-filter:blur(18px)}}
   .crrav-sheethead h2{margin:0;font:800 18px/1 system-ui;letter-spacing:-.02em;flex:1;
     display:flex;align-items:center;gap:10px}
   .crrav-sheethead h2::before{content:'';flex:0 0 auto;width:4px;height:20px;border-radius:3px;
@@ -8747,14 +8787,18 @@
   /* (30) Recherche collée sous l'en-tête, actions collées en bas — toujours à portée de main. */
   .crrav-sheetbody .crrav-setsearch,
   .crrav-sheetbody .crrav-setsearch:focus-within{position:sticky;top:0;z-index:6;
-    background:rgba(16,16,20,.97);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)}
+    background:rgba(16,16,20,.97)}
+  @media (pointer:fine){
+    .crrav-sheetbody .crrav-setsearch,
+    .crrav-sheetbody .crrav-setsearch:focus-within{backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)}
+  }
   /* La barre d'actions « en ligne » du panneau ferait doublon avec le pied collant : masquée. */
   .crrav-sheetbody .crrav-sactions-primary{display:none}
   .crrav-sheetfoot{display:flex;flex:0 0 auto;gap:10px;
     padding:12px max(14px,calc((100% - 900px)/2)) calc(12px + env(safe-area-inset-bottom,0px));
     border-top:1px solid rgba(255,255,255,.1);
-    background:linear-gradient(0deg,rgba(10,10,12,.98),rgba(10,10,12,.84));
-    backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px)}
+    background:linear-gradient(0deg,rgba(10,10,12,.98),rgba(10,10,12,.84))}
+  @media (pointer:fine){.crrav-sheetfoot{backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px)}}
   .crrav-sheetfoot>.crrav-btn{flex:1 1 0;min-width:0;padding:12px 12px;font-size:13px}
   .crrav-sheetfoot>[data-act="settings-save"]{flex:1.7 1 0}
   .crrav-settings h3{margin:0 0 16px;font:800 18px/1.1 system-ui;letter-spacing:-.02em;
@@ -9329,6 +9373,22 @@
   .crrav-ignrow-t{flex:1 1 auto;color:#f2f2f4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .crrav-ignrow-src{flex:0 0 auto;color:#8a8a94;font:600 10px/1 system-ui;text-transform:uppercase;
     letter-spacing:.04em}
+  /* (43) date relative d'ignore (fmtRelDay) — absente sur les entrées migrées d'avant
+     cette version (ignoredAt=0), donc pas de style de "vide" à prévoir. */
+  .crrav-ignrow-date{flex:0 0 auto;color:#6f6f79;font:500 10.5px/1 system-ui}
+  /* (43) case à cocher de sélection multiple — même emplacement que la jaquette,
+     avant elle, pour rester lisible même quand la ligne n'a pas de poster. */
+  .crrav-ignrow-cb{flex:0 0 auto;width:16px;height:16px;accent-color:#f47521;cursor:pointer}
+  .crrav-ignselall{display:flex;align-items:center;gap:6px;margin:0 0 6px;color:#8a8a94;
+    font:600 11px/1 system-ui;cursor:pointer;user-select:none}
+  .crrav-ignselall input{accent-color:#f47521;cursor:pointer}
+  /* (43) en-tête d'une section de source, dans le groupement au-delà de 50 ignorées
+     (voir ignoredPanel) — bouton pour rester accessible au clavier/lecteur d'écran. */
+  .crrav-igngroup+.crrav-igngroup{border-top:1px solid rgba(255,255,255,.08)}
+  .crrav-ignhead{display:block;width:100%;text-align:left;background:rgba(255,255,255,.03);
+    border:0;border-bottom:1px solid rgba(255,255,255,.06);color:#c9c9d2;
+    font:700 11.5px/1 system-ui;padding:8px 10px;cursor:pointer}
+  .crrav-ignhead:hover{color:#f2f2f4}
   /* (30) jaquette en vignette : reprend le poster gardé à l'ignore (voir ignoreBtn) */
   .crrav-ignrow-thumb{flex:0 0 auto;width:34px;height:48px;border-radius:6px;overflow:hidden;
     background:#1d1d24;display:block}
@@ -10992,7 +11052,7 @@
       const skels = STATE.fromSnapshot || STATE.filters.view === 'list' ? ''
         : Array.from({ length: 4 }, () => '<div class="crrav-skel"><div></div></div>').join('');
       body = `<div class="crrav-grid${STATE.filters.view === 'list' ? ' crrav-list' : ''}">${
-        list.map(card).join('')}${skels}</div>
+        list.map((s, i) => card(s, i, 'watchlist')).join('')}${skels}</div>
         <div class="crrav-foot">${escapeHtml(progressMsg)}</div>`;
     } else if (STATE.error) {
       body = `<div class="crrav-msg"><h3>Ça n'a pas marché</h3><p>${escapeHtml(STATE.error)}</p>
@@ -11001,7 +11061,7 @@
       body = `<div class="crrav-msg"><h3>Rien à afficher</h3>
         <p>Aucune série ne correspond à ce filtre.</p></div>`;
     } else {
-      body = `<div class="crrav-grid${STATE.filters.view === 'list' ? ' crrav-list' : ''}">${list.map(card).join('')}</div>`;
+      body = `<div class="crrav-grid${STATE.filters.view === 'list' ? ' crrav-list' : ''}">${list.map((s, i) => card(s, i, 'watchlist')).join('')}</div>`;
     }
 
     return `
@@ -11213,7 +11273,7 @@
           ? 'Aucune série ne correspond à cette recherche.'
           : "Aucune série entamée hors de tes listes pour l'instant."}</p></div>`;
     } else {
-      body = `<div class="crrav-grid${STATE.filters.view === 'list' ? ' crrav-list' : ''}">${list.map(card).join('')}</div>`;
+      body = `<div class="crrav-grid${STATE.filters.view === 'list' ? ' crrav-list' : ''}">${list.map((s, i) => card(s, i, 'orphan')).join('')}</div>`;
     }
 
     return `
@@ -12832,8 +12892,8 @@
   async function runFullDiagnostic() {
     STATE.fullDiagRunning = true;
     STATE.fullDiag = { steps: [], startedAt: Date.now() };
-    forceRender();
-    const addStep = (step) => { STATE.fullDiag.steps.push(step); forceRender(); };
+    refreshSheetBody();
+    const addStep = (step) => { STATE.fullDiag.steps.push(step); refreshSheetBody(); };
 
     // 1. Environnement — instantané, aucune requête réseau.
     addStep({
@@ -12913,7 +12973,7 @@
     STATE.fullDiagRunning = false;
     STATE.fullDiag.finishedAt = Date.now();
     STATE.fullDiagText = buildFullDiagnosticText(STATE.fullDiag);
-    forceRender();
+    refreshSheetBody();
   }
 
   // Export texte simple du rapport (pour coller dans un message de support, par ex.) —
@@ -12965,6 +13025,9 @@
   // (27) Repensé pour les watchlists chargées : liste compacte défilant dans sa PROPRE
   // zone (au lieu d'un nuage de puces qui pousse tout le reste de Réglages vers le bas),
   // avec recherche par titre et tri, pour retrouver une série précise sans tout parcourir.
+  // (43) + puces de filtre par source, date d'ignore, sélection multiple pour restaurer
+  // un lot précis, et groupement par source (repliable) une fois la liste volumineuse —
+  // voir IGNORE_SOURCES, ignoredSelected, ignoredCollapsedGroups.
   function ignoredPanel() {
     if (!IGNORED.size) {
       return `<div class="crrav-settings">
@@ -12975,41 +13038,90 @@
     }
     const needle = STATE.ignoredQ.trim().toLowerCase();
     let entries = [...IGNORED.entries()].map(([id, v]) => ({
-      id, title: v.title || id, source: v.source, poster: v.poster || '', synopsis: v.synopsis || '',
+      id, title: v.title || id, source: v.source || 'watchlist',
+      poster: v.poster || '', synopsis: v.synopsis || '', ignoredAt: v.ignoredAt || 0,
     }));
     if (needle) entries = entries.filter((e) => e.title.toLowerCase().includes(needle));
+    if (STATE.ignoredSrc !== 'all') entries = entries.filter((e) => e.source === STATE.ignoredSrc);
 
     const sort = STATE.ignoredSort;
     const collator = (a, b) => a.title.localeCompare(b.title, 'fr', { sensitivity: 'base' });
     if (sort === 'title-desc') entries.sort((a, b) => collator(b, a));
     else if (sort === 'source') entries.sort((a, b) => (a.source === b.source ? collator(a, b) : a.source.localeCompare(b.source)));
+    else if (sort === 'date-desc') entries.sort((a, b) => b.ignoredAt - a.ignoredAt || collator(a, b));
+    else if (sort === 'date-asc') entries.sort((a, b) => a.ignoredAt - b.ignoredAt || collator(a, b));
     else entries.sort(collator);   // title-asc, par défaut
 
-    const filtered = needle || sort !== 'title-asc';
-    const restoreLabel = needle ? `Réafficher ces ${entries.length}` : 'Tout réafficher';
+    const filtered = needle || STATE.ignoredSrc !== 'all' || sort !== 'title-asc';
+    const restoreLabel = filtered ? `Réafficher ces ${entries.length}` : 'Tout réafficher';
+
+    // (43) Puces de filtre par source — une seule par origine réellement présente, plus
+    // « Toutes » toujours affichée. Réutilise ignoredCount (déjà utilisé par les chips
+    // de Reste à voir/Découverte) plutôt que de recompter entries, qui est déjà filtré.
+    const srcChipsHtml = [{ key: 'all', label: 'Toutes', icon: '' }, ...IGNORE_SOURCES]
+      .filter((s) => s.key === 'all' || ignoredCount(s.key))
+      .map((s) => {
+        const n = s.key === 'all' ? IGNORED.size : ignoredCount(s.key);
+        return `<button class="crrav-chip" data-ignsrc="${s.key}" aria-pressed="${STATE.ignoredSrc === s.key}"
+          >${s.icon ? s.icon + ' ' : ''}${s.label} (${n})</button>`;
+      }).join('');
 
     // Jaquette en vignette + bouton « i » pour déplier le résumé (mémorisés au moment
     // de l'ignore, voir ignoreBtn — pas de rappel réseau possible pour une série exclue).
-    const rows = entries.map((e) =>
-      `<div class="crrav-ignrow">
+    // Case à cocher pour la sélection multiple (restauration groupée, voir plus bas).
+    const row = (e) => `<div class="crrav-ignrow">
+        <input type="checkbox" class="crrav-ignrow-cb" data-ignsel="${e.id}"${ignoredSelected.has(e.id) ? ' checked' : ''}
+          aria-label="Sélectionner ${escapeHtml(e.title)}">
         ${e.poster ? `<span class="crrav-ignrow-thumb">
           <img loading="lazy" crossorigin="anonymous" src="${e.poster}" alt=""
             onerror="this.removeAttribute(&quot;crossorigin&quot;);this.src=this.src"></span>` : ''}
         <div class="crrav-ignrow-main">
           <div class="crrav-ignrow-head">
             <span class="crrav-ignrow-t">${escapeHtml(e.title)}</span>
-            <span class="crrav-ignrow-src">${e.source === 'discover' ? 'Découverte' : 'Watchlist'}</span>
+            <span class="crrav-ignrow-src">${IGNORE_SOURCE_LABEL[e.source] || 'Reste à voir'}</span>
+            ${e.ignoredAt ? `<span class="crrav-ignrow-date">${fmtRelDay(e.ignoredAt)}</span>` : ''}
             ${e.synopsis ? '<button class="crrav-info" aria-expanded="false" aria-label="Lire le résumé">i</button>' : ''}
             <button class="crrav-btn ghost sm" data-ignore="${e.id}" data-title="${escapeHtml(e.title)}"
               data-source="${e.source}" title="Réafficher cette série">↺</button>
             ${e.synopsis ? `<div class="crrav-syn"><p>${escapeHtml(e.synopsis)}</p></div>` : ''}
           </div>
         </div>
-      </div>`
-    ).join('') || `<p class="crrav-probe-err" style="margin:0">Aucune série ignorée ne correspond à « ${escapeHtml(STATE.ignoredQ.trim())} ».</p>`;
+      </div>`;
+
+    // (43) Au-delà de 50 ignorées et tant qu'aucun chip de source n'est actif (redondant
+    // sinon, la liste ne contient déjà qu'une seule origine), regroupement par source
+    // avec en-têtes repliables — évite de tout parcourir en défilant sur une liste plate.
+    // État de repli mémorisé dans ignoredCollapsedGroups (hors STATE, voir déclaration).
+    const shouldGroup = IGNORED.size >= 50 && STATE.ignoredSrc === 'all';
+    let rowsHtml;
+    if (shouldGroup) {
+      rowsHtml = IGNORE_SOURCES.map((s) => {
+        const group = entries.filter((e) => e.source === s.key);
+        if (!group.length) return '';
+        const collapsed = ignoredCollapsedGroups.has(s.key);
+        return `<div class="crrav-igngroup">
+          <button type="button" class="crrav-ignhead" data-act="ignored-group-toggle" data-group="${s.key}"
+            aria-expanded="${!collapsed}">${collapsed ? '▸' : '▾'} ${s.icon} ${s.label} (${group.length})</button>
+          ${collapsed ? '' : group.map(row).join('')}
+        </div>`;
+      }).join('');
+    } else {
+      rowsHtml = entries.map(row).join('');
+    }
+    if (!entries.length) {
+      rowsHtml = `<p class="crrav-probe-err" style="margin:0">Aucune série ignorée ne correspond à ${
+        needle ? `« ${escapeHtml(STATE.ignoredQ.trim())} »` : 'ce filtre'}.</p>`;
+    }
+
+    // (43) Sélection multiple : dès qu'au moins une ligne actuellement visible est
+    // cochée, le bouton principal restaure LA SÉLECTION plutôt que la portée recherche/
+    // tri habituelle — plus intentionnel, donc prioritaire.
+    const selectedVisible = entries.filter((e) => ignoredSelected.has(e.id));
+    const allVisibleSelected = entries.length > 0 && selectedVisible.length === entries.length;
 
     return `<div class="crrav-settings">
-      <h3>Séries ignorées (${entries.length}${needle ? ` sur ${IGNORED.size}` : ''})</h3>
+      <h3>Séries ignorées (${entries.length}${filtered ? ` sur ${IGNORED.size}` : ''})</h3>
+      <div class="crrav-chips" style="margin-bottom:8px">${srcChipsHtml}</div>
       <div class="crrav-ignctrl">
         <input class="crrav-search crrav-search-ignored" placeholder="Chercher une série ignorée…"
           value="${escapeHtml(STATE.ignoredQ)}">
@@ -13017,12 +13129,20 @@
           <option value="title-asc"${sort === 'title-asc' ? ' selected' : ''}>Titre A→Z</option>
           <option value="title-desc"${sort === 'title-desc' ? ' selected' : ''}>Titre Z→A</option>
           <option value="source"${sort === 'source' ? ' selected' : ''}>Par source</option>
+          <option value="date-desc"${sort === 'date-desc' ? ' selected' : ''}>Plus récemment ignorée</option>
+          <option value="date-asc"${sort === 'date-asc' ? ' selected' : ''}>Plus anciennement ignorée</option>
         </select>
       </div>
-      <div class="crrav-ignlist">${rows}</div>
+      ${entries.length ? `<label class="crrav-ignselall">
+        <input type="checkbox" data-act="ignored-select-all" data-scope-ids="${entries.map((e) => e.id).join(',')}"${allVisibleSelected ? ' checked' : ''}>
+        Tout sélectionner${filtered ? ` (${entries.length})` : ''}</label>` : ''}
+      <div class="crrav-ignlist">${rowsHtml}</div>
       <div class="crrav-sactions" style="margin-top:10px">
-        <button class="crrav-btn ghost" data-act="ignored-clear"${filtered ? ` data-scope-ids="${entries.map((e) => e.id).join(',')}"` : ''}
-          ${entries.length ? '' : 'disabled'}>${restoreLabel}</button>
+        ${selectedVisible.length
+          ? `<button class="crrav-btn ghost" data-act="ignored-clear" data-scope-ids="${selectedVisible.map((e) => e.id).join(',')}"
+              >Réafficher la sélection (${selectedVisible.length})</button>`
+          : `<button class="crrav-btn ghost" data-act="ignored-clear"${filtered ? ` data-scope-ids="${entries.map((e) => e.id).join(',')}"` : ''}
+              ${entries.length ? '' : 'disabled'}>${restoreLabel}</button>`}
         <small style="color:#8a8a94;font:400 10.5px/1.4 system-ui;align-self:center">
           Une fois ignorée, une série est masquée partout (Reste à voir, Hors listes et
           Découverte). Chaque onglet a son propre chip « Ignorées » pour restaurer ;
@@ -13232,6 +13352,30 @@
   // Rendu forcé : à utiliser quand une interaction doit reconstruire le DOM même si la
   // sheet réglages est ouverte (changement d'onglet, saisie de réglage, fermeture).
   function forceRender() { FORCE_RENDER = true; renderNow(); }
+
+  // Mise à jour légère du corps de la sheet Réglages, SANS recréer le nœud
+  // .crrav-settingssheet lui-même : un forceRender() classique reconstruit tout
+  // .crrav-content (liste ET sheet) d'un seul bloc via content.innerHTML, ce qui
+  // rejoue à chaque appel l'animation d'entrée de la sheet (crrav-sheet-in, fade +
+  // léger slide, voir CSS). Pendant le diagnostic complet, addStep() appelait
+  // forceRender() à CHAQUE étape (6-7 fois d'affilée) : la sheet se recréait donc
+  // à chaque fois et rejouait son fade-in, avec en dessous — brièvement visible
+  // pendant l'animation — le contenu de l'onglet actif (ex. Reste à voir). D'où le
+  // clignotement où « Réglages » semblait disparaître par intermittence. Ici, seul
+  // le HTML de .crrav-sheetbody est remplacé en place ; le nœud de la sheet reste
+  // le même élément DOM du début à la fin du diagnostic, donc son animation ne se
+  // rejoue qu'une fois, à l'ouverture réelle.
+  function refreshSheetBody() {
+    if (!root || !STATE.settingsOpen) { forceRender(); return; }
+    const content = root.querySelector('.crrav-content');
+    const bodyEl = content && content.querySelector('.crrav-sheetbody');
+    if (!bodyEl) { forceRender(); return; }
+    const prevScroll = bodyEl.scrollTop;
+    bodyEl.innerHTML = settingsSheetTab === 'ignored' ? ignoredPanel()
+      : settingsSheetTab === 'diag' ? diagnosticPanel()
+      : settingsPanel();
+    bodyEl.scrollTop = prevScroll;
+  }
 
   // render() regroupe les appels sur une frame : pendant un chargement, il était invoqué
   // à chaque tronçon et à chaque tick de progression, or il reconstruit TOUT le DOM du
@@ -13993,6 +14137,13 @@
             ign.dataset.poster, ign.dataset.synopsis);
           forceRender(); return;
         }
+        // (43) Puce de filtre par source dans le panneau « Séries ignorées » (voir
+        // ignoredPanel) — indépendant de data-act pour ne pas alourdir cette longue chaîne.
+        const ignSrcChip = e.target.closest('[data-ignsrc]');
+        if (ignSrcChip) {
+          STATE.ignoredSrc = ignSrcChip.dataset.ignsrc;
+          forceRender(); return;
+        }
         // Ajout direct à une Crunchylist depuis Découverte (ou ouverture du choix de
         // liste si CFG.askListEachTime est activé).
         const addBtn2 = e.target.closest('[data-addlist]');
@@ -14120,6 +14271,7 @@
         if (settingsTabBtn) {
           settingsSheetTab = settingsTabBtn.dataset.settingstab;
           settingsSearchQ = '';   // une recherche Réglages ne doit pas rester active hors de cet onglet
+          ignoredSelected.clear();   // (43) sélection multiple du panneau Ignorées, propre à cet onglet
           // Ouvrir le sous-onglet Diagnostic doit lancer le diagnostic complet tout de
           // suite s'il n'y en a pas déjà eu un — sinon l'onglet reste vide tant que
           // l'utilisateur ne pense pas lui-même à cliquer sur « Lancer le diagnostic ».
@@ -14260,14 +14412,36 @@
         if (act.dataset.act === 'ignored-clear') {
           const scopeIds = act.dataset.scopeIds;
           if (scopeIds) {
-            // Recherche/tri actifs : on ne réaffiche QUE les entrées actuellement
-            // listées, pas la totalité des séries ignorées (qui peut être bien plus
-            // large que ce que la recherche montre).
-            for (const id of scopeIds.split(',')) IGNORED.delete(id);
+            // Recherche/tri/sélection actifs : on ne réaffiche QUE les entrées listées
+            // ou cochées, pas la totalité des séries ignorées (qui peut être bien plus
+            // large). Action ciblée et délibérée : pas de confirmation nécessaire.
+            for (const id of scopeIds.split(',')) { IGNORED.delete(id); ignoredSelected.delete(id); }
+            saveIgnored(); forceRender();
           } else {
-            IGNORED.clear();
+            // (2) Pas de portée = restauration de TOUTES les séries ignorées (potentiellement
+            // des centaines, sans lien entre elles) : irréversible en un clic, donc
+            // confirmation avant d'agir — même mécanisme que « Tout ignorer » de Découverte.
+            const n = IGNORED.size;
+            STATE.confirmModal = {
+              title: `Réafficher les ${n} série${n > 1 ? 's' : ''} ignorées ?`,
+              message: `<p>Les <b>${n}</b> série${n > 1 ? 's' : ''} actuellement ignorée${n > 1 ? 's' : ''} `
+                + `${n > 1 ? 'seront' : 'sera'} <b>toutes réaffichée${n > 1 ? 's' : ''}</b>, partout `
+                + `(Reste à voir, Hors listes, Découverte, Nouveautés).</p>`,
+              confirmLabel: '↺ Tout réafficher',
+              danger: true,
+              onConfirm: () => { IGNORED.clear(); ignoredSelected.clear(); saveIgnored(); forceRender(); },
+            };
+            forceRender();
           }
-          saveIgnored(); forceRender();
+          return;
+        }
+        if (act.dataset.act === 'ignored-group-toggle') {
+          // (43) Repli/dépli d'une section de source dans le groupement du panneau
+          // « Séries ignorées » (voir ignoredPanel) — état mémorisé hors STATE.
+          const g = act.dataset.group;
+          if (ignoredCollapsedGroups.has(g)) ignoredCollapsedGroups.delete(g);
+          else ignoredCollapsedGroups.add(g);
+          forceRender(); return;
         }
         if (act.dataset.act === 'cats-clear') {
           const sc = act.dataset.catscope;
@@ -14296,7 +14470,7 @@
           // (41) Rouvrir la sheet repart toujours sur le sous-onglet Réglages — comme
           // l'ancien empilement, qui affichait toujours ce panneau en premier en haut.
           // Doit être posé AVANT le forceRender() juste en dessous (synchrone).
-          if (STATE.settingsOpen) { settingsSheetTab = 'settings'; settingsSearchQ = ''; }
+          if (STATE.settingsOpen) { settingsSheetTab = 'settings'; settingsSearchQ = ''; ignoredSelected.clear(); }
           forceRender();
           // (30) comble jaquette/résumé manquants sur les entrées ignorées avant 2.87
           // (voir backfillIgnoredMeta) — no-op si tout est déjà là.
@@ -14441,6 +14615,22 @@
         if (e.target.dataset.act === 'ignored-sort') {
           STATE.ignoredSort = e.target.value;
           forceRender();
+        }
+        // (43) Case à cocher d'une ligne du panneau « Séries ignorées » (sélection
+        // multiple pour restauration groupée, voir ignoredPanel/ignoredSelected).
+        if (e.target.matches('[data-ignsel]')) {
+          const id = e.target.dataset.ignsel;
+          if (e.target.checked) ignoredSelected.add(id); else ignoredSelected.delete(id);
+          forceRender(); return;
+        }
+        // (43) « Tout sélectionner » — porte sur les entrées actuellement visibles
+        // (recherche/filtre/tri appliqués), transmises via data-scope-ids plutôt que lues
+        // dans le DOM pour rester correct même si des groupes sont repliés.
+        if (e.target.matches('[data-act="ignored-select-all"]')) {
+          const ids = (e.target.dataset.scopeIds || '').split(',').filter(Boolean);
+          if (e.target.checked) ids.forEach((id) => ignoredSelected.add(id));
+          else ids.forEach((id) => ignoredSelected.delete(id));
+          forceRender(); return;
         }
       });
       document.body.appendChild(root);
