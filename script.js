@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.7.0
+// @version      3.8.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.6.0';
+  const SCRIPT_VERSION = '3.8.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -7084,6 +7084,10 @@
     return `<span class="${cls}" title="Tu l'as notée 5★ — favori">★</span>`;
   }
 
+  // Set persistant (survit aux re-renders, comme settingsSheetTab/settingsSearchQ) : mémorise
+  // quelles séries ont déjà joué leur animation d'entrée cette session, pour ne la rejouer
+  // qu'une fois par série (voir .crrav-fresh) et non à chaque rafraîchissement de fond.
+  const cardsAnimatedOnce = new Set();
   function card(s, i) {
     if (STATE.filters.view === 'list') return listRow(s);
     const seriesUrl = crSeriesUrl(s.id, s.slug);
@@ -7099,7 +7103,9 @@
     const idx = Math.min(i || 0, 13);
     const styleVars = `--prog:${progColor(s)}${hue ? `;--hue:${hue}` : ''};--i:${idx}`;
     const pinfo = plannedInfo(s);
-    return `<article class="crrav-card${s.isNew ? ' isnew' : ''}${hue ? ' has-hue' : ''}" style="${styleVars}" data-hue-id="${s.id}"${hue ? ' data-hue-done="1"' : ''}>
+    const fresh = !cardsAnimatedOnce.has(s.id);
+    if (fresh) cardsAnimatedOnce.add(s.id);
+    return `<article class="crrav-card${fresh ? ' crrav-fresh' : ''}${s.isNew ? ' isnew' : ''}${hue ? ' has-hue' : ''}" style="${styleVars}" data-hue-id="${s.id}"${hue ? ' data-hue-done="1"' : ''}>
       <div class="crrav-thumb">
         <a class="crrav-cover" href="${seriesUrl}">
           ${s.poster ? `<img loading="lazy" crossorigin="anonymous" src="${s.poster}" alt="" onerror="this.removeAttribute(&quot;crossorigin&quot;);this.src=this.src">` : ''}
@@ -7750,7 +7756,11 @@
       : '';
     const info = `${s.seasons} saison${s.seasons > 1 ? 's' : ''}${
       s.episodes ? ` · ${s.episodes} ép. · ${fmtDuration(s.secTotal)}` : ''}`;
-    return `<article class="crrav-card${sig.lead ? ' crrav-sig crrav-sig-' + sig.lead : ''}${sig.legendary ? ' crrav-legendary' : sig.notable ? ' crrav-notable' : ''}">
+    // Même logique de « n'animer qu'une fois » que card() ci-dessus (voir cardsAnimatedOnce
+    // et .crrav-fresh) : un même Set partagé, puisque c'est la même classe .crrav-card.
+    const fresh = !cardsAnimatedOnce.has(s.id);
+    if (fresh) cardsAnimatedOnce.add(s.id);
+    return `<article class="crrav-card${fresh ? ' crrav-fresh' : ''}${sig.lead ? ' crrav-sig crrav-sig-' + sig.lead : ''}${sig.legendary ? ' crrav-legendary' : sig.notable ? ' crrav-notable' : ''}">
       <div class="crrav-thumb">
         <a class="crrav-cover" href="${seriesUrl}">
           ${s.poster ? `<img loading="lazy" crossorigin="anonymous" src="${s.poster}" alt="" onerror="this.removeAttribute(&quot;crossorigin&quot;);this.src=this.src">` : ''}
@@ -8167,11 +8177,16 @@
     /* PERF : les cartes hors écran ne sont ni peintes ni calculées. Sur une longue liste
        c'est le gain le plus net — et il rend les effets ci-dessous « gratuits ». */
     content-visibility:auto;contain-intrinsic-size:auto 320px;
+    /* (2→fix bagotage) cascade d'entrée : fade+translateY par carte, avec délai croissant
+       plafonné via --i (voir card()). Volontairement PAS sur .crrav-card directement : le
+       DOM est intégralement remplacé à chaque render (voir renderNow), donc une carte déjà
+       affichée dix fois rejouerait son fondu à chaque rafraîchissement de fond. .crrav-fresh
+       n'est posée par card() que la toute première fois qu'une série apparaît dans la
+       session — les rendus suivants de la même carte n'ont plus cette classe et restent
+       statiques. */
     transition:transform .18s cubic-bezier(.2,.7,.3,1),border-color .18s ease,
-      box-shadow .18s ease,background .4s ease;
-    /* (2) cascade d'entrée : même esprit que crrav-in (fade+scale du panneau), décliné en
-       fade+translateY par carte, avec délai croissant plafonné via --i (voir card()). */
-    animation:crrav-card-in .32s ease backwards;
+      box-shadow .18s ease,background .4s ease}
+  .crrav-card.crrav-fresh{animation:crrav-card-in .32s ease backwards;
     animation-delay:calc(var(--i,0) * 30ms)}
   @keyframes crrav-card-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
   /* (#6) teinte tirée de la jaquette, très discrète pour rester lisible */
@@ -8353,7 +8368,11 @@
     opacity:0;visibility:hidden;transition:opacity .15s ease}
   .crrav-syn p{margin:0;font:400 11.5px/1.5 system-ui;color:#d6d6de}
   .crrav-syn.show{opacity:1;visibility:visible}
-  @media (hover:hover){.crrav-thumb:hover .crrav-syn{opacity:1;visibility:visible}}
+  @media (hover:hover){.crrav-thumb:hover .crrav-syn{opacity:1;visibility:visible}
+    /* Le survol révèle déjà le résumé sur souris/trackpad : le bouton « i » de la
+       jaquette (pas celui des vues liste/ignorées, qui n'ont pas ce survol) fait
+       double emploi et disparaît. */
+    .crrav-thumb .crrav-info{display:none}}
   .crrav-airing{position:absolute;left:8px;top:38px;background:rgba(10,10,12,.92);
     border:1px solid rgba(159,214,255,.3);border-radius:6px;padding:3px 7px;font:700 10px/1 system-ui;
     letter-spacing:.04em;color:#9fd6ff;
@@ -9295,6 +9314,13 @@
   .crrav-ignctrl .crrav-search-ignored{flex:1 1 160px;min-width:140px}
   .crrav-ignlist{max-height:260px;overflow-y:auto;border:1px solid rgba(255,255,255,.08);
     border-radius:10px;background:rgba(255,255,255,.02)}
+  /* (42) Dans la sheet Réglages (sous-onglet Ignorées, voir settingsSheetTab), la liste a
+     désormais tout un onglet plein écran pour elle : le plafond de 260px hérité de l'ancien
+     empilement des 3 panneaux (où il fallait limiter sa hauteur pour laisser de la place
+     au reste) la faisait défiler dans une toute petite fenêtre alors que le sous-onglet
+     entier était vide en dessous. Le scroll de la liste redevient celui du sous-onglet
+     (.crrav-sheetbody s'en charge déjà) plutôt qu'un scroll imbriqué. */
+  .crrav-sheetbody .crrav-ignlist{max-height:none;overflow-y:visible}
   .crrav-ignrow{display:flex;align-items:center;gap:8px;padding:7px 10px;
     border-bottom:1px solid rgba(255,255,255,.06);font:500 12.5px/1.3 system-ui}
   .crrav-ignrow:last-child{border-bottom:0}
@@ -9885,6 +9911,29 @@
     .crrav-lrow:hover{transform:translateX(3px)}
     .crrav-calrow:hover{transform:translateY(-2px) scale(1.004)}
   }
+
+  /* Même animation « carte qui se rapproche » que le survol PC ci-dessus (zoom jaquette,
+     soulèvement, reflet), mais déclenchée par l'ouverture du résumé au tap sur « i » —
+     seul moyen d'ouvrir ce résumé sur tactile, puisque :hover n'existe pas au doigt et
+     que le bouton est justement caché quand :hover est disponible (voir .crrav-info
+     plus haut). :has() lit directement la classe .show déjà posée par le clic, sans JS
+     supplémentaire. Pas de restriction de largeur ici (contrairement au bloc @media
+     1500px ci-dessus) : ça doit marcher sur tous les écrans tactiles, petits inclus. */
+  @media (prefers-reduced-motion:no-preference){
+    .crrav-card:has(> .crrav-thumb > .crrav-syn.show){transform:translateY(-8px) scale(1.015)}
+    .crrav-card:has(> .crrav-thumb > .crrav-syn.show)::after{transition:opacity .25s ease;
+      box-shadow:0 0 0 1px rgba(var(--hue,244,117,33),.6),
+        0 28px 60px -18px rgba(var(--hue,244,117,33),.85)}
+    .crrav-card:has(> .crrav-thumb > .crrav-syn.show) .crrav-thumb{overflow:hidden}
+    .crrav-card:has(> .crrav-thumb > .crrav-syn.show) .crrav-thumb img{
+      transition:transform .45s cubic-bezier(.2,.7,.3,1);transform:scale(1.07)}
+    .crrav-card:has(> .crrav-thumb > .crrav-syn.show) .crrav-thumb::after{content:'';
+      position:absolute;inset:0;pointer-events:none;z-index:3;
+      background:linear-gradient(105deg,transparent 38%,rgba(255,255,255,.16) 50%,transparent 62%);
+      transform:translateX(120%);transition:transform .7s cubic-bezier(.2,.7,.3,1)}
+    .crrav-card:has(> .crrav-thumb > .crrav-syn.show) .crrav-bar{
+      box-shadow:inset 0 1px 2px rgba(0,0,0,.35),0 0 14px -2px var(--prog)}
+  }
   `;
 
   let root = null, fab = null, progressMsg = '';
@@ -10230,8 +10279,17 @@
     const pctDone = g.epSeen + g.epLeft > 0 ? Math.round((g.epSeen / (g.epSeen + g.epLeft)) * 100) : 0;
     const beyondH = (h.hasHistory && h.hasDetail) ? Math.round(h.beyondSeconds / 3600) : 0;
 
-    const bigStat = (val, label, hot) =>
-      `<div class="crrav-bigstat${hot ? ' hot' : ''}"><b>${val}</b><small>${label}</small></div>`;
+    const bigStat = (val, label, hot, opts) => {
+      // (fix bagotage, même protection que les autres compteurs — voir animateCountUps) :
+      // opts.key rend ce chiffre animable (data-countup) avec mémoire de la dernière
+      // valeur affichée ; sans clé, on retombe sur l'ancien affichage statique — utile
+      // pour les valeurs déjà formatées (fmtDuration) qu'on ne veut pas scinder.
+      const { key, suffix = '' } = opts || {};
+      const inner = (typeof val === 'number' && key)
+        ? `<span data-countup="${val}" data-countup-key="${key}">${val}</span>${suffix}`
+        : val;
+      return `<div class="crrav-bigstat${hot ? ' hot' : ''}"><b>${inner}</b><small>${label}</small></div>`;
+    };
 
     // — Genres, sur séries vues uniquement —
     const maxGenre = st.topGenres.length ? st.topGenres[0][1] : 1;
@@ -10393,7 +10451,7 @@
     return `<div class="crrav-statswrap crrav-statsgrid">
 
       <div class="crrav-statshero">
-        <div class="crrav-statshero-num">${heroTotal} h</div>
+        <div class="crrav-statshero-num"><span data-countup="${heroTotal}" data-countup-key="stat-hero">${heroTotal}</span> h</div>
         <div class="crrav-statshero-label">regardées au total sur Crunchyroll</div>
         <div class="crrav-statshero-sub">${heroSub}</div>
         ${heroEq}
@@ -10403,12 +10461,12 @@
         <h2 class="crrav-stath2">📋 Dans tes listes</h2>
         <p class="crrav-schedhint">Séries de ta watchlist et de tes listes personnalisées.</p>
         <div class="crrav-biggrid">
-          ${bigStat(g.count, 'séries suivies')}
-          ${bigStat(g.epSeen, 'épisodes vus')}
-          ${bigStat(hDone + ' h', 'déjà regardées')}
-          ${bigStat(g.epLeft, 'épisodes à voir', true)}
+          ${bigStat(g.count, 'séries suivies', false, { key: 'stat-count' })}
+          ${bigStat(g.epSeen, 'épisodes vus', false, { key: 'stat-epseen' })}
+          ${bigStat(hDone, 'déjà regardées', false, { key: 'stat-hdone', suffix: ' h' })}
+          ${bigStat(g.epLeft, 'épisodes à voir', true, { key: 'stat-epleft' })}
           ${bigStat(fmtDuration(g.secLeft), 'temps restant', true)}
-          ${bigStat(pctDone + ' %', 'de progression')}
+          ${bigStat(pctDone, 'de progression', false, { key: 'stat-pctdone', suffix: ' %' })}
         </div>
 
         ${accordion('repartition', '📊', 'Répartition & genres', `
@@ -10682,9 +10740,9 @@
     const in7 = events.filter((e) => e.whenTs - now < 7 * DAY).length;
     const behindTotal = events.reduce((a, e) => a + (e.r.s.remaining || 0), 0);
     const weekBar = `<div class="crrav-calweek">
-      <div class="crrav-calweekstat"><b data-countup="${events.length}">${events.length}</b><small>séries en cours</small></div>
-      <div class="crrav-calweekstat"><b data-countup="${in7}">${in7}</b><small>cette semaine</small></div>
-      ${behindTotal ? `<div class="crrav-calweekstat hot"><b data-countup="${behindTotal}">${behindTotal}</b><small>épisodes de retard</small></div>` : ''}
+      <div class="crrav-calweekstat"><b data-countup="${events.length}" data-countup-key="cal-events">${events.length}</b><small>séries en cours</small></div>
+      <div class="crrav-calweekstat"><b data-countup="${in7}" data-countup-key="cal-in7">${in7}</b><small>cette semaine</small></div>
+      ${behindTotal ? `<div class="crrav-calweekstat hot"><b data-countup="${behindTotal}" data-countup-key="cal-behind">${behindTotal}</b><small>épisodes de retard</small></div>` : ''}
     </div>`;
 
     const dayKey = (ts) => { const d = new Date(ts); return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`; };
@@ -10797,8 +10855,13 @@
   // vu HORS de tes listes — chargé à la demande, jamais imposé (contrainte de vitesse).
   function historySection(st) {
     const h = st.history;
-    const bigStat = (val, label, hot) =>
-      `<div class="crrav-bigstat${hot ? ' hot' : ''}"><b>${val}</b><small>${label}</small></div>`;
+    const bigStat = (val, label, hot, opts) => {
+      const { key, suffix = '' } = opts || {};
+      const inner = (typeof val === 'number' && key)
+        ? `<span data-countup="${val}" data-countup-key="${key}">${val}</span>${suffix}`
+        : val;
+      return `<div class="crrav-bigstat${hot ? ' hot' : ''}"><b>${inner}</b><small>${label}</small></div>`;
+    };
 
     // Scan en cours : barre de progression en direct, à la place du bouton.
     const prog = STATE.historyProgress;
@@ -10826,7 +10889,7 @@
     }
 
     const beyondBlock = h.hasHistory
-      ? bigStat(h.beyondLists, 'hors de tes listes')
+      ? bigStat(h.beyondLists, 'hors de tes listes', false, { key: 'stat-beyondlists' })
       : `<div class="crrav-bigstat crrav-loadcard">
            <button class="crrav-relaunch" data-act="load-history">Inclure l'historique</button>
            <small>pour compter ce que tu as vu hors de tes listes</small>
@@ -10835,8 +10898,8 @@
     // Détail hors-listes (épisodes, heures) si le scan l'a fourni.
     const beyondDetail = (h.hasHistory && h.hasDetail && h.beyondEpisodes) ? `
       <div class="crrav-biggrid" style="margin-top:12px">
-        ${bigStat(h.beyondEpisodes, 'épisodes vus hors listes')}
-        ${bigStat(Math.round(h.beyondSeconds / 3600) + ' h', 'regardées hors listes')}
+        ${bigStat(h.beyondEpisodes, 'épisodes vus hors listes', false, { key: 'stat-beyondepisodes' })}
+        ${bigStat(Math.round(h.beyondSeconds / 3600), 'regardées hors listes', false, { key: 'stat-beyondhours', suffix: ' h' })}
       </div>` : '';
 
     const topBlock = (h.topSeries && h.topSeries.length) ? `
@@ -10874,7 +10937,7 @@
           ? ' Historique partiel pour le moment — il se complètera au prochain scan.'
           : ''}</p>
       <div class="crrav-biggrid">
-        ${bigStat(h.total, 'séries vues au total')}
+        ${bigStat(h.total, 'séries vues au total', false, { key: 'stat-total' })}
         ${beyondBlock}
       </div>
       ${beyondDetail}
@@ -10947,8 +11010,8 @@
               Affichage du dernier état connu — actualisation en cours…</p>` : ''}
         ${toastMsg ? `<div class="crrav-toast">${escapeHtml(toastMsg)}</div>` : ''}
         <div class="crrav-stats">
-          <div class="crrav-stat"><b data-countup="${list.length}">${list.length}</b><small>séries</small></div>
-          <div class="crrav-stat hot"><b data-countup="${totalRemaining}">${totalRemaining}</b><small>épisodes restants</small></div>
+          <div class="crrav-stat"><b data-countup="${list.length}" data-countup-key="suivi-series">${list.length}</b><small>séries</small></div>
+          <div class="crrav-stat hot"><b data-countup="${totalRemaining}" data-countup-key="suivi-remaining">${totalRemaining}</b><small>épisodes restants</small></div>
           <div class="crrav-stat"><b>${fmtDuration(secLeft)}</b><small>à regarder</small></div>
         </div>
         <div class="crrav-controls">
@@ -11065,8 +11128,8 @@
         </div>` : ''}
         ${D.warning ? `<p class="crrav-warn">${escapeHtml(D.warning)}</p>` : ''}
         <div class="crrav-stats">
-          <div class="crrav-stat"><b data-countup="${list.length}">${list.length}</b><small>pépites trouvées</small></div>
-          <div class="crrav-stat hot"><b data-countup="${list.reduce((a, s) => a + (s.episodes || 0), 0)}">${list.reduce((a, s) => a + (s.episodes || 0), 0)}</b><small>épisodes à voir</small></div>
+          <div class="crrav-stat"><b data-countup="${list.length}" data-countup-key="discover-series">${list.length}</b><small>pépites trouvées</small></div>
+          <div class="crrav-stat hot"><b data-countup="${list.reduce((a, s) => a + (s.episodes || 0), 0)}" data-countup-key="discover-episodes">${list.reduce((a, s) => a + (s.episodes || 0), 0)}</b><small>épisodes à voir</small></div>
           <div class="crrav-stat"><b>${fmtDuration(list.reduce((a, s) => a + (s.secTotal || 0), 0))}</b><small>à regarder</small></div>
         </div>
         <div class="crrav-controls">
@@ -11160,8 +11223,8 @@
         </p>
         ${O.warning ? `<p class="crrav-warn">${escapeHtml(O.warning)}</p>` : ''}
         <div class="crrav-stats">
-          <div class="crrav-stat"><b data-countup="${list.length}">${list.length}</b><small>séries</small></div>
-          <div class="crrav-stat hot"><b data-countup="${totalRemaining}">${totalRemaining}</b><small>épisodes restants</small></div>
+          <div class="crrav-stat"><b data-countup="${list.length}" data-countup-key="orph-series">${list.length}</b><small>séries</small></div>
+          <div class="crrav-stat hot"><b data-countup="${totalRemaining}" data-countup-key="orph-remaining">${totalRemaining}</b><small>épisodes restants</small></div>
           <div class="crrav-stat"><b>${fmtDuration(secLeft)}</b><small>à regarder</small></div>
         </div>
         <div class="crrav-controls">
@@ -12185,83 +12248,76 @@
     return h;
   }
 
-  // (28) Diagnostic entièrement à part des réglages courants : replié par défaut (quel
-  // que soit l'écran), pour ne jamais encombrer ce qu'on vient régler au quotidien.
-  // C'est de l'outillage de dépannage — utile en cas de pépin, pas à chaque visite.
+  // (28→43) Diagnostic vit sur son propre sous-onglet (voir settingsSubtabs) : plus
+  // besoin de l'accordéon extérieur replié par défaut, qui faisait double emploi avec ce
+  // sous-onglet (un clic pour arriver, un second pour déplier — sous-menu pour rien).
+  // Le contenu s'affiche donc directement. Seul « Tests individuels » (au cas par cas,
+  // pas nécessaire au quotidien) reste replié.
   function diagnosticPanel() {
-    const open = statsAccordionOpen.has('set-diag');
     const detailOpen = statsAccordionOpen.has('set-diag-detail');
-    // (41) crrav-diagsection (marge/séparateur pointillé) retirée : elle signalait la
-    // transition visuelle avec le panneau précédent quand les 3 panneaux étaient
-    // empilés. Diagnostic vit maintenant seul sur son propre sous-onglet.
     return `<div class="crrav-settings">
-      <details class="crrav-accordion crrav-setgroup" data-acc="set-diag" ${open ? 'open' : ''}>
-        <summary>🩺 Diagnostic <small style="font-weight:500;color:#8a8a94">— dépannage, pas nécessaire au quotidien</small></summary>
+
+      <div class="crrav-fulldiag-cta">
+        <h3 style="margin:0 0 8px">Diagnostic complet</h3>
+        <p>Enchaîne tous les tests utiles en un clic — session, historique, AniList,
+          découpage en saisons, stockage local — et affiche un rapport unique et
+          détaillé ci-dessous. C'est le premier réflexe en cas de souci ; les tests
+          ciblés plus bas ne servent qu'à creuser un point précis ensuite.</p>
+        <button class="crrav-btn primary" data-act="full-diag"${STATE.fullDiagRunning ? ' disabled' : ''}>
+          ${STATE.fullDiagRunning ? '⏳ Diagnostic en cours…' : '🩺 Lancer le diagnostic complet'}</button>
+        ${renderFullDiagnosticReport()}
+      </div>
+
+      <details class="crrav-accordion" data-acc="set-diag-detail" ${detailOpen ? 'open' : ''} style="margin-top:18px">
+        <summary>Tests individuels <small style="font-weight:500;color:#8a8a94">— pour cibler une série précise</small></summary>
         <div class="crrav-accordion-body">
 
-          <div class="crrav-fulldiag-cta">
-            <h3 style="margin:0 0 8px">Diagnostic complet</h3>
-            <p>Enchaîne tous les tests utiles en un clic — session, historique, AniList,
-              découpage en saisons, stockage local — et affiche un rapport unique et
-              détaillé ci-dessous. C'est le premier réflexe en cas de souci ; les tests
-              ciblés plus bas ne servent qu'à creuser un point précis ensuite.</p>
-            <button class="crrav-btn primary" data-act="full-diag"${STATE.fullDiagRunning ? ' disabled' : ''}>
-              ${STATE.fullDiagRunning ? '⏳ Diagnostic en cours…' : '🩺 Lancer le diagnostic complet'}</button>
-            ${renderFullDiagnosticReport()}
+          <div class="crrav-probe">
+            <h3>Diagnostic — historique de visionnage</h3>
+            <p>Vérifie combien d'entrées ton historique Crunchyroll contient réellement.
+              Sans rapport avec ta watchlist (tes séries suivies), qui est toujours lue en entier.</p>
+            <button class="crrav-btn" data-act="probe-history"${STATE.probeRunning ? ' disabled' : ''}>
+              ${STATE.probeRunning ? '⏳ Test en cours…' : '🔍 Analyser mon historique'}</button>
+            ${renderProbeResult()}
           </div>
 
-          <details class="crrav-accordion" data-acc="set-diag-detail" ${detailOpen ? 'open' : ''} style="margin-top:18px">
-            <summary>Tests individuels <small style="font-weight:500;color:#8a8a94">— pour cibler une série précise</small></summary>
-            <div class="crrav-accordion-body">
+          <div class="crrav-probe">
+            <h3>Diagnostic — AniList (total prévu / fin de saison)</h3>
+            <p>Teste EN DIRECT la récupération du total d'épisodes et de la date de fin sur
+              AniList, pour la série de ton choix. Si le titre affiché (parfois en français)
+              ne matche rien, le script retente automatiquement avec le titre anglais de la
+              même série (redemandé à Crunchyroll) — Crunchyroll ne fournit pas d'identifiant
+              direct vers AniList/MAL/AniDB, donc le rapprochement reste par titre, mais en
+              anglais il colle presque toujours bien mieux qu'en français.</p>
+            ${anilistStatusReadout()}
+            ${anilistDiagSeriesSelect()}
+            <button class="crrav-btn" data-act="probe-anilist"${STATE.anilistDiagRunning ? ' disabled' : ''}>
+              ${STATE.anilistDiagRunning ? '⏳ Test en cours…' : '🔬 Tester AniList'}</button>
+            ${renderAnilistDiag()}
+          </div>
 
-              <div class="crrav-probe">
-                <h3>Diagnostic — historique de visionnage</h3>
-                <p>Vérifie combien d'entrées ton historique Crunchyroll contient réellement.
-                  Sans rapport avec ta watchlist (tes séries suivies), qui est toujours lue en entier.</p>
-                <button class="crrav-btn" data-act="probe-history"${STATE.probeRunning ? ' disabled' : ''}>
-                  ${STATE.probeRunning ? '⏳ Test en cours…' : '🔍 Analyser mon historique'}</button>
-                ${renderProbeResult()}
-              </div>
+          <div class="crrav-probe">
+            <h3>Diagnostic — découpage en saisons (Crunchyroll)</h3>
+            <p>Le « S6 » affiché sur une carte n'est PAS le numéro de saison brut de
+              Crunchyroll : c'est le rang parmi les groupes d'épisodes distincts trouvés
+              (voir ticks/calendrier). Si Crunchyroll découpe une saison officielle en
+              plusieurs blocs (parties, cours), ce rang grimpe plus vite que le numéro de
+              saison « grand public ». Ce tableau montre les groupes bruts, sans y toucher —
+              même sélecteur de série que le diagnostic AniList ci-dessus.</p>
+            ${renderSeasonDiag()}
+          </div>
 
-              <div class="crrav-probe">
-                <h3>Diagnostic — AniList (total prévu / fin de saison)</h3>
-                <p>Teste EN DIRECT la récupération du total d'épisodes et de la date de fin sur
-                  AniList, pour la série de ton choix. Si le titre affiché (parfois en français)
-                  ne matche rien, le script retente automatiquement avec le titre anglais de la
-                  même série (redemandé à Crunchyroll) — Crunchyroll ne fournit pas d'identifiant
-                  direct vers AniList/MAL/AniDB, donc le rapprochement reste par titre, mais en
-                  anglais il colle presque toujours bien mieux qu'en français.</p>
-                ${anilistStatusReadout()}
-                ${anilistDiagSeriesSelect()}
-                <button class="crrav-btn" data-act="probe-anilist"${STATE.anilistDiagRunning ? ' disabled' : ''}>
-                  ${STATE.anilistDiagRunning ? '⏳ Test en cours…' : '🔬 Tester AniList'}</button>
-                ${renderAnilistDiag()}
-              </div>
-
-              <div class="crrav-probe">
-                <h3>Diagnostic — découpage en saisons (Crunchyroll)</h3>
-                <p>Le « S6 » affiché sur une carte n'est PAS le numéro de saison brut de
-                  Crunchyroll : c'est le rang parmi les groupes d'épisodes distincts trouvés
-                  (voir ticks/calendrier). Si Crunchyroll découpe une saison officielle en
-                  plusieurs blocs (parties, cours), ce rang grimpe plus vite que le numéro de
-                  saison « grand public ». Ce tableau montre les groupes bruts, sans y toucher —
-                  même sélecteur de série que le diagnostic AniList ci-dessus.</p>
-                ${renderSeasonDiag()}
-              </div>
-
-              <div class="crrav-probe">
-                <h3>Diagnostic — ouverture de l'appli Crunchyroll</h3>
-                <p>Ce que le script détecte sur cet appareil/navigateur pour décider s'il doit
-                  rediriger les liens série/épisode vers l'appli Crunchyroll (voir le réglage
-                  plus haut). Utile sans avoir à ouvrir la console — impossible sur téléphone.</p>
-                ${renderAppLinkDiag()}
-              </div>
-
-            </div>
-          </details>
+          <div class="crrav-probe">
+            <h3>Diagnostic — ouverture de l'appli Crunchyroll</h3>
+            <p>Ce que le script détecte sur cet appareil/navigateur pour décider s'il doit
+              rediriger les liens série/épisode vers l'appli Crunchyroll (voir le réglage
+              plus haut). Utile sans avoir à ouvrir la console — impossible sur téléphone.</p>
+            ${renderAppLinkDiag()}
+          </div>
 
         </div>
       </details>
+
     </div>`;
   }
 
@@ -13772,13 +13828,20 @@
     return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
   }
 
-  // (9) compteurs animés : compte de 0 (ou de l'ancienne valeur si déjà affichée) jusqu'à
-  // la cible en ~700ms, easing simple. Écriture directe si prefers-reduced-motion.
+  // (9) compteurs animés : compte de l'ancienne valeur connue jusqu'à la cible en ~700ms,
+  // easing simple. Écriture directe si prefers-reduced-motion.
+  // (fix bagotage) Le DOM est intégralement remplacé à chaque render (voir renderNow) :
+  // sans mémoire externe, CET élément est toujours neuf et l'anim repartait de 0 à CHAQUE
+  // rafraîchissement de fond, même quand le chiffre affiché n'avait pas bougé — d'où le
+  // clignotement remonté. countupPrevValues retient la dernière valeur finale par clé
+  // stable (data-countup-key) : si la cible est identique à la dernière fois, on écrit la
+  // valeur directement sans relancer l'anim ; si elle a changé, on anime à partir de
+  // l'ancienne valeur réelle (pas de 0) jusqu'à la nouvelle.
+  const countupPrevValues = new Map();
   const PREFERS_REDUCED_MOTION = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  function animateCountUp(el, target, duration = 700) {
-    if (PREFERS_REDUCED_MOTION() || !(target > 0)) { el.textContent = String(target); return; }
+  function animateCountUp(el, target, from, duration = 700) {
+    if (PREFERS_REDUCED_MOTION() || from === target) { el.textContent = String(target); return; }
     const start = performance.now();
-    const from = 0;
     const step = (now) => {
       const t = Math.min(1, (now - start) / duration);
       const eased = 1 - Math.pow(1 - t, 3); // ease-out cubic
@@ -13791,7 +13854,15 @@
   function animateCountUps(root) {
     root.querySelectorAll('[data-countup]').forEach((el) => {
       const target = Number(el.getAttribute('data-countup'));
-      if (Number.isFinite(target)) animateCountUp(el, target);
+      if (!Number.isFinite(target)) return;
+      const key = el.getAttribute('data-countup-key');
+      // Sans clé stable (ne devrait pas arriver, mais au cas où), on retombe sur l'ancien
+      // comportement plutôt que de planter.
+      if (!key) { animateCountUp(el, target, 0); return; }
+      const prev = countupPrevValues.get(key);
+      countupPrevValues.set(key, target);
+      if (prev === target) { el.textContent = String(target); return; }
+      animateCountUp(el, target, prev ?? 0);
     });
   }
 
@@ -14049,6 +14120,12 @@
         if (settingsTabBtn) {
           settingsSheetTab = settingsTabBtn.dataset.settingstab;
           settingsSearchQ = '';   // une recherche Réglages ne doit pas rester active hors de cet onglet
+          // Ouvrir le sous-onglet Diagnostic doit lancer le diagnostic complet tout de
+          // suite s'il n'y en a pas déjà eu un — sinon l'onglet reste vide tant que
+          // l'utilisateur ne pense pas lui-même à cliquer sur « Lancer le diagnostic ».
+          if (settingsSheetTab === 'diag' && !STATE.fullDiag && !STATE.fullDiagRunning) {
+            runFullDiagnostic();
+          }
           forceRender();
           return;
         }
