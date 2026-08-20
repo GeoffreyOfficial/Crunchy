@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.4.0
+// @version      3.5.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.4.0';
+  const SCRIPT_VERSION = '3.5.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -606,10 +606,10 @@
     { key: 'cacheQuotaEvictPct', label: 'Seuil de purge quota cache', type: 'int', min: 40, max: 98, unit: '%',
       help: 'Au-delà de ce taux, le cache le plus ancien est purgé automatiquement (par petites tranches) pour ne jamais bloquer une écriture. Doit rester au-dessus du seuil d’alerte.',
       impact: 'display' },
-    { key: 'discoverMinRatingCr', label: 'Note minimale Crunchyroll', type: 'float', min: 0, max: 5, step: 0.1,
+    { key: 'discoverMinRatingCr', tuner: true, label: 'Note minimale Crunchyroll', type: 'float', min: 0, max: 5, step: 0.1,
       help: 'Écarte les séries dont la note Crunchyroll est en dessous. 0 = aucun filtre sur cette note.',
       impact: 'discover', sub: 'discoverFilters' },
-    { key: 'discoverMinRatingAni', label: 'Note minimale AniList', type: 'float', min: 0, max: 5, step: 0.1,
+    { key: 'discoverMinRatingAni', tuner: true, label: 'Note minimale AniList', type: 'float', min: 0, max: 5, step: 0.1,
       help: 'Écarte les séries dont la note AniList (quand elle est connue) est en dessous. 0 = aucun filtre sur cette note. Sans effet si AniList n\'a pas encore été croisé pour cette série.',
       impact: 'discover', sub: 'discoverFilters' },
     { key: 'discoverMaxSeasons', label: 'Saisons maximum', type: 'int', min: 1, max: 20, unit: 'saisons',
@@ -644,46 +644,46 @@
       impact: 'discover', sub: 'discoverDice' },
     // (fix) Réglage « Profondeur de scan » supprimé : le dé légendaire scanne toujours le
     // classement popularité Crunchyroll jusqu'au bout (plus de plafond de pages à régler).
-    { key: 'discoverTasteWeight', label: 'Poids du goût dans le score final', type: 'float', min: 0.5, max: 5, step: 0.1,
+    { key: 'discoverTasteWeight', tuner: true, label: 'Poids du goût dans le score final', type: 'float', min: 0.5, max: 5, step: 0.1,
       help: 'Multiplie le goût net (-1 à +1, similarité cosinus entre tes tags/genres et ceux de la candidate) pour obtenir sa part dans le score pépite. Plus haut = le goût domine largement le score ; plus bas = les bonus de note pèsent relativement plus.',
       impact: 'discover', sub: 'discoverScoringTaste' },
-    { key: 'discoverTasteNeutralCos', label: 'Point neutre du cosinus', type: 'float', min: 0.05, max: 0.95, step: 0.05,
+    { key: 'discoverTasteNeutralCos', tuner: true, label: 'Point neutre du cosinus', type: 'float', min: 0.05, max: 0.95, step: 0.05,
       help: 'Valeur de similarité cosinus (0 à 1, avant conversion en goût net -1..+1) considérée comme « neutre ». En-dessous → goût négatif, au-dessus → goût positif. Baisse-la si le score moyen/médian de tes scans reste négatif (2bis dans le rapport « Pourquoi seulement X pépites ») : ça veut dire que le cosinus réel plafonne bien en-dessous de l’ancien neutre théorique de 0.5, typique d’un espace de tags large et épars.',
       impact: 'discover', sub: 'discoverScoringTaste' },
-    { key: 'discoverGoodTasteThreshold', label: 'Seuil du badge 💚 « dans tes goûts »', type: 'float', min: -1, max: 1, step: 0.05,
+    { key: 'discoverGoodTasteThreshold', tuner: true, label: 'Seuil du badge 💚 « dans tes goûts »', type: 'float', min: -1, max: 1, step: 0.05,
       help: 'Goût net (-1 à +1) à partir duquel le badge 💚 s’affiche. N’affecte que le badge, pas le score. Dans l’espace de tags AniList (large et épars), même un bon match dépasse rarement +0,4 de goût net : au-delà de ~0,3 le badge devient très rare. Défaut 0,15 = « nettement au-dessus de la moyenne de tes goûts ».',
       impact: 'discover', sub: 'discoverScoringTaste' },
-    { key: 'discoverShowScoreDetail', label: 'Afficher le détail du score sur les cartes', type: 'bool',
+    { key: 'discoverShowScoreDetail', tuner: true, label: 'Afficher le détail du score sur les cartes', type: 'bool',
       help: 'Affiche sous chaque pépite le calcul chiffré de son score : goût net × poids, puis les bonus 🎯/🏆/✨, et le total. Utile pour comprendre pourquoi une série est (ou n’est pas) notable/légendaire, et pour régler les seuils. Désactivé par défaut.',
       impact: 'discover', sub: 'discoverScoringTaste' },
-    { key: 'discoverPrefGenreBonus', label: 'Bonus « genre préféré » 🎯', type: 'float', min: 0, max: 2, step: 0.1,
+    { key: 'discoverPrefGenreBonus', tuner: true, label: 'Bonus « genre préféré » 🎯', type: 'float', min: 0, max: 2, step: 0.1,
       help: 'Points ajoutés directement au score quand la série contient un de tes 3 tags/genres les plus représentés ET que le goût global reste positif. 0 = 🎯 reste un badge purement informatif, sans effet sur le score.',
       impact: 'discover', sub: 'discoverScoringTaste' },
-    { key: 'discoverCompletionWeight', label: 'Poids de la complétion dans le profil', type: 'float', min: 0, max: 1, step: 0.05,
+    { key: 'discoverCompletionWeight', tuner: true, label: 'Poids de la complétion dans le profil', type: 'float', min: 0, max: 1, step: 0.05,
       help: 'Dans le calcul de ton PROFIL de goût (pas dans le score d’une série directement) : 0 = seul le nombre d’épisodes vus compte (comme avant), 1 = seul le taux de complétion compte (finir une série pèse plus que la survoler). Une série de 100 épisodes vue à 20 % vs une série de 12 épisodes terminée — ce curseur arbitre entre les deux. Il ne s’ajoute jamais au score : il change seulement à QUOI chaque candidate est comparée (le goût net = similarité avec ce profil).',
       impact: 'discover', sub: 'discoverScoringTaste' },
-    { key: 'discoverWellRatedThresholdCr', label: 'Note requise 🏆 — Crunchyroll', type: 'float', min: 3, max: 5, step: 0.1,
+    { key: 'discoverWellRatedThresholdCr', tuner: true, label: 'Note requise 🏆 — Crunchyroll', type: 'float', min: 3, max: 5, step: 0.1,
       help: 'Note Crunchyroll (quand elle est connue) à partir de laquelle le badge 🏆 s’affiche et le bonus ci-dessous s’applique. Si la note AniList est aussi connue, elle doit ELLE AUSSI dépasser son propre seuil (ci-dessous) — les deux sont exigées.',
       impact: 'discover', sub: 'discoverScoringRating' },
-    { key: 'discoverWellRatedThresholdAni', label: 'Note requise 🏆 — AniList', type: 'float', min: 3, max: 5, step: 0.1,
+    { key: 'discoverWellRatedThresholdAni', tuner: true, label: 'Note requise 🏆 — AniList', type: 'float', min: 2, max: 5, step: 0.1,
       help: 'Note AniList (quand elle est connue) à partir de laquelle le badge 🏆 s’affiche et le bonus ci-dessous s’applique. Si la note Crunchyroll est aussi connue, elle doit ELLE AUSSI dépasser son propre seuil (ci-dessus) — les deux sont exigées.',
       impact: 'discover', sub: 'discoverScoringRating' },
-    { key: 'discoverWellRatedBonus', label: 'Bonus « très bien notée » 🏆', type: 'float', min: 0, max: 2, step: 0.1,
+    { key: 'discoverWellRatedBonus', tuner: true, label: 'Bonus « très bien notée » 🏆', type: 'float', min: 0, max: 2, step: 0.1,
       help: 'Points ajoutés au score quand la ou les notes connues dépassent leurs seuils ci-dessus.',
       impact: 'discover', sub: 'discoverScoringRating' },
-    { key: 'discoverSuperRatedThresholdCr', label: 'Note requise ✨ — Crunchyroll (palier supplémentaire)', type: 'float', min: 3, max: 5, step: 0.1,
+    { key: 'discoverSuperRatedThresholdCr', tuner: true, label: 'Note requise ✨ — Crunchyroll (palier supplémentaire)', type: 'float', min: 3, max: 5, step: 0.1,
       help: 'Note Crunchyroll à partir de laquelle un second bonus s’ajoute (cumulable avec le bonus 🏆). Même logique que ci-dessus : si l’autre note est connue, elle doit aussi dépasser son propre seuil ✨.',
       impact: 'discover', sub: 'discoverScoringRating' },
-    { key: 'discoverSuperRatedThresholdAni', label: 'Note requise ✨ — AniList (palier supplémentaire)', type: 'float', min: 3, max: 5, step: 0.1,
+    { key: 'discoverSuperRatedThresholdAni', tuner: true, label: 'Note requise ✨ — AniList (palier supplémentaire)', type: 'float', min: 2, max: 5, step: 0.1,
       help: 'Note AniList à partir de laquelle un second bonus s’ajoute (cumulable avec le bonus 🏆). Même logique que ci-dessus : si l’autre note est connue, elle doit aussi dépasser son propre seuil ✨.',
       impact: 'discover', sub: 'discoverScoringRating' },
-    { key: 'discoverSuperRatedBonus', label: 'Bonus « note exceptionnelle » ✨', type: 'float', min: 0, max: 2, step: 0.1,
+    { key: 'discoverSuperRatedBonus', tuner: true, label: 'Bonus « note exceptionnelle » ✨', type: 'float', min: 0, max: 2, step: 0.1,
       help: 'Points ajoutés au score quand la note dépasse le seuil ✨ ci-dessus, en plus du bonus 🏆.',
       impact: 'discover', sub: 'discoverScoringRating' },
-    { key: 'discoverLegendaryScore', label: 'Score minimum — légendaire', type: 'float', min: 0.5, max: 5, step: 0.1,
+    { key: 'discoverLegendaryScore', tuner: true, label: 'Score minimum — légendaire', type: 'float', min: 0.5, max: 5, step: 0.1,
       help: 'Score « pépite » à atteindre pour décrocher le ruban ✨ Légendaire. Voir le schéma ci-dessus pour situer ce seuil dans l’intervalle possible. Baisse-le pour en trouver plus souvent.',
       impact: 'discover', sub: 'discoverScoringSeuils' },
-    { key: 'discoverNotableScore', label: 'Score minimum — notable', type: 'float', min: 0.5, max: 5, step: 0.1,
+    { key: 'discoverNotableScore', tuner: true, label: 'Score minimum — notable', type: 'float', min: 0.5, max: 5, step: 0.1,
       help: 'Score « pépite » à partir duquel une série est marquée « notable » (un cran sous légendaire). Doit rester inférieur au score légendaire ci-dessus.',
       impact: 'discover', sub: 'discoverScoringSeuils' },
     { key: 'defaultListId', label: 'Liste de destination par défaut (bouton + dans Découverte)',
@@ -8577,6 +8577,167 @@
      (voir scoreFormulaSchema) : formule en chips, échelle à zones colorées avec repères
      Notable/Légendaire réels, détail terme par terme avec mini-barres de levier, et trois
      exemples chiffrés. Entièrement dynamique ET en direct (voir wireScoreSchemaLive). */
+  /* (34) Réglage du score « pépite » — panneau interactif complet (presets + jauge de
+     difficulté + schéma glissable + détail par curseur). Repris à l'identique du prototype
+     scoring-final.html, intégralement SCOPÉ sous .crrav-scoretuner pour ne pas entrer en
+     collision avec les styles de la page Crunchyroll ni ceux de l'overlay (classes génériques
+     .card/.field/.group/.handle/.seg…). Les <input data-set> des curseurs de détail sont la
+     source de vérité lue par collectSettings — le schéma et la matrice ne font que piloter
+     leur valeur (voir initScoreTuner). */
+  .crrav-scoretuner{
+    --taste:74,222,128; --pref:159,214,255; --well:255,209,102; --super:255,159,67;
+    --seuiln:159,214,255; --seuill:255,179,71;
+    --st-text:#f2f2f4; --st-sub:#9a9aa4; --st-faint:#6f6f7a;
+    --st-panel:rgba(255,255,255,.03); --st-panel2:rgba(255,255,255,.05); --st-border:rgba(255,255,255,.09);
+    color:var(--st-text);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+  .crrav-scoretuner *{box-sizing:border-box}
+  .crrav-scoretuner .card{background:var(--st-panel);border:1px solid var(--st-border);border-radius:16px;padding:16px;margin:0 0 16px}
+  .crrav-scoretuner .card h2{margin:0 0 4px;font:800 15px/1.3 system-ui;display:flex;align-items:center;gap:8px}
+  .crrav-scoretuner .card .desc{margin:0 0 14px;color:var(--st-sub);font:500 12px/1.5 system-ui}
+
+  /* ---------- jauge de difficulté ---------- */
+  .crrav-scoretuner .diffgauge{display:flex;align-items:center;gap:10px;background:var(--st-panel2);border:1px solid var(--st-border);
+    border-radius:12px;padding:10px 14px;margin-bottom:16px}
+  .crrav-scoretuner .diffgauge .track{flex:1;height:8px;border-radius:5px;background:rgba(255,255,255,.08);position:relative;overflow:hidden}
+  .crrav-scoretuner .diffgauge .fill{position:absolute;inset:0 auto 0 0;border-radius:5px;
+    background:linear-gradient(90deg,#4ade80,#ffd166 55%,#ff6b6b);transition:width .4s cubic-bezier(.4,0,.2,1)}
+  .crrav-scoretuner .diffgauge b{font:800 13px/1 system-ui;white-space:nowrap}
+  .crrav-scoretuner .diffgauge .lab{font:600 11px/1 system-ui;color:var(--st-sub);white-space:nowrap}
+
+  /* ---------- matrice de presets ---------- */
+  .crrav-scoretuner .matrix-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 -4px}
+  .crrav-scoretuner .matrix{display:grid;grid-template-columns:64px repeat(3,minmax(118px,1fr));gap:6px;padding:0 4px;min-width:560px}
+  .crrav-scoretuner .mx-colhead{font:800 11px/1.2 system-ui;color:var(--st-sub);text-align:center;padding:4px 2px 8px;
+    text-transform:uppercase;letter-spacing:.03em}
+  .crrav-scoretuner .mx-rowhead{display:flex;align-items:center;justify-content:flex-end;font:800 10.5px/1.15 system-ui;color:var(--st-sub);
+    text-align:right;padding-right:6px;text-transform:uppercase;letter-spacing:.03em}
+  .crrav-scoretuner .preset-cell{border:1.5px solid var(--st-border);border-radius:12px;padding:10px 9px;cursor:pointer;
+    background:rgba(255,255,255,.02);transition:border-color .15s,background .15s,transform .1s}
+  .crrav-scoretuner .preset-cell:active{transform:scale(.97)}
+  .crrav-scoretuner .preset-cell b{display:block;font:800 12px/1.25 system-ui;margin-bottom:3px}
+  .crrav-scoretuner .preset-cell span{display:block;color:var(--st-sub);font:500 10px/1.35 system-ui}
+  .crrav-scoretuner .preset-cell .diffchip{display:inline-block;margin-top:6px;font:800 9.5px/1 system-ui;padding:3px 6px;border-radius:5px}
+  .crrav-scoretuner .diffchip.d-low{background:rgba(74,222,128,.18);color:#4ade80}
+  .crrav-scoretuner .diffchip.d-mid{background:rgba(255,209,102,.18);color:#ffd166}
+  .crrav-scoretuner .diffchip.d-high{background:rgba(255,107,107,.18);color:#ff8a8a}
+  .crrav-scoretuner .preset-cell.active{border-color:#fff;background:rgba(255,255,255,.09)}
+  .crrav-scoretuner .preset-cell.active b{color:#fff}
+  .crrav-scoretuner .preset-cell.custom-near{border-style:dashed;border-color:rgb(var(--seuill))}
+  .crrav-scoretuner .preset-cell.custom-near::after{content:'✏️ proche';display:block;margin-top:6px;font:800 9.5px/1 system-ui;color:rgb(var(--seuill))}
+  .crrav-scoretuner .preset-cell .mobile-tag{display:none}
+  .crrav-scoretuner .custom-card{display:none;margin-top:10px;border:1.5px solid rgb(var(--pref));border-radius:12px;
+    padding:11px 13px;gap:5px;color:#fff;background:rgba(var(--pref),.08);cursor:default;
+    height:84px;overflow:hidden}
+  .crrav-scoretuner .custom-card.active{display:flex;flex-direction:column}
+  .crrav-scoretuner .cc-row{display:flex;align-items:center;gap:6px;font:800 12.5px/1.2 system-ui;flex:0 0 auto}
+  .crrav-scoretuner .cc-row .cc-icon{font-size:14px;line-height:1}
+  .crrav-scoretuner .cc-desc{margin:0;font:600 11px/1.45 system-ui;color:#d7d9e0;
+    display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+  .crrav-scoretuner .cc-desc b{color:rgb(var(--pref))}
+
+  /* En dessous de 560px, la grille 4 colonnes ne tient plus : liste empilée d'une colonne. */
+  @media (max-width:559px){
+    .crrav-scoretuner .matrix-wrap{overflow-x:visible;margin:0}
+    .crrav-scoretuner .matrix{display:flex;flex-direction:column;gap:8px;min-width:0;padding:0}
+    .crrav-scoretuner .mx-corner,.crrav-scoretuner .mx-colhead,.crrav-scoretuner .mx-rowhead{display:none}
+    .crrav-scoretuner .preset-cell{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 13px}
+    .crrav-scoretuner .preset-cell b{margin-bottom:2px}
+    .crrav-scoretuner .preset-cell .mobile-tag{display:inline-block;color:var(--st-faint);font:600 10.5px/1 system-ui}
+    .crrav-scoretuner .preset-cell .diffchip{margin-top:0;flex:0 0 auto}
+  }
+
+  /* ---------- schéma interactif ---------- */
+  .crrav-scoretuner details.det{border-top:1px solid var(--st-border);margin-top:4px;padding-top:2px}
+  .crrav-scoretuner details.det>summary{cursor:pointer;font:800 13px/1.3 system-ui;color:#e8e8ec;padding:12px 2px;list-style:none;
+    display:flex;align-items:center;gap:7px}
+  .crrav-scoretuner details.det>summary::-webkit-details-marker{display:none}
+  .crrav-scoretuner details.det>summary::before{content:'▸';font-size:11px;color:var(--st-sub);transition:transform .2s}
+  .crrav-scoretuner details.det[open]>summary::before{transform:rotate(90deg)}
+  .crrav-scoretuner .schema-card{background:var(--st-panel2);border:1px solid var(--st-border);border-radius:14px;padding:16px 12px 20px;margin:4px 0 18px;
+    user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
+  .crrav-scoretuner .schema-legend{display:flex;flex-wrap:wrap;gap:10px;margin:0 0 18px;font:700 10.5px/1 system-ui;color:var(--st-sub)}
+  .crrav-scoretuner .schema-legend span{display:flex;align-items:center;gap:5px}
+  .crrav-scoretuner .schema-legend i{width:9px;height:9px;border-radius:3px;display:inline-block}
+  .crrav-scoretuner .schema-axis{position:relative;height:52px;background:rgba(255,255,255,.03);border-radius:10px;
+    border:1px solid var(--st-border);margin:100px 0 26px;touch-action:none;transition:border-color .2s,box-shadow .2s}
+  .crrav-scoretuner .schema-axis.zoomed{border-color:rgba(255,255,255,.4);box-shadow:0 0 0 3px rgba(255,255,255,.07)}
+  .crrav-scoretuner .axis-ticks{position:relative;height:14px;margin-top:4px}
+  .crrav-scoretuner .axis-ticks .tick{position:absolute;top:0;transform:translateX(-50%);font:700 9.5px/1 system-ui;
+    color:var(--st-faint);font-variant-numeric:tabular-nums;white-space:nowrap}
+  .crrav-scoretuner .seg{position:absolute;top:0;bottom:0;transition:left .35s cubic-bezier(.4,0,.2,1),width .35s cubic-bezier(.4,0,.2,1)}
+  .crrav-scoretuner .seg.dragging{transition:none}
+  .crrav-scoretuner .seg.taste{background:linear-gradient(90deg,rgba(var(--taste),.1),rgba(var(--taste),.32));border-radius:10px 0 0 10px}
+  .crrav-scoretuner .seg.pref{background:rgba(var(--pref),.32)}
+  .crrav-scoretuner .seg.well{background:rgba(var(--well),.32)}
+  .crrav-scoretuner .seg.super{background:rgba(var(--super),.4);border-radius:0 10px 10px 0}
+  .crrav-scoretuner .zero-line{position:absolute;top:-5px;bottom:-5px;width:2px;background:rgba(255,255,255,.35)}
+  .crrav-scoretuner .zero-line::after{content:'0';position:absolute;top:-17px;left:50%;transform:translateX(-50%);
+    font:700 9.5px/1 system-ui;color:var(--st-faint)}
+  .crrav-scoretuner .handle{position:absolute;top:-9px;width:34px;height:70px;margin-left:-17px;cursor:ew-resize;z-index:3;
+    display:flex;justify-content:center;transition:left .35s cubic-bezier(.4,0,.2,1);
+    --tagTop:-25px;--lvl:0}
+  .crrav-scoretuner .handle.dragging{transition:none;z-index:5}
+  .crrav-scoretuner .handle .grip{width:3px;height:100%;border-radius:3px;transition:width .15s,box-shadow .15s}
+  .crrav-scoretuner .handle.active-drag .grip{width:4px;box-shadow:0 0 0 5px rgba(255,255,255,.08)}
+  .crrav-scoretuner .handle .tag{position:absolute;top:calc(var(--tagTop) - (var(--lvl)*18px));left:50%;transform:translateX(-50%);
+    font:800 10px/1 system-ui;white-space:nowrap;padding:3px 7px;border-radius:6px;
+    transition:top .2s;z-index:4}
+  .crrav-scoretuner .handle .tag .tval{font-weight:800;font-variant-numeric:tabular-nums;margin-left:3px;opacity:.85}
+  .crrav-scoretuner .handle.taste .grip{background:rgb(var(--taste))} .crrav-scoretuner .handle.taste .tag{background:rgb(var(--taste));color:#062b12}
+  .crrav-scoretuner .handle.pref .grip{background:rgb(var(--pref))} .crrav-scoretuner .handle.pref .tag{background:rgb(var(--pref));color:#08131c}
+  .crrav-scoretuner .handle.well .grip{background:rgb(var(--well))} .crrav-scoretuner .handle.well .tag{background:rgb(var(--well));color:#2b1a00}
+  .crrav-scoretuner .handle.super .grip{background:rgb(var(--super))} .crrav-scoretuner .handle.super .tag{background:rgb(var(--super));color:#2b1200}
+  .crrav-scoretuner .handle.notable .grip{background:rgb(var(--seuiln));width:3px}
+  .crrav-scoretuner .handle.notable .tag{background:rgb(var(--seuiln));color:#08131c;--tagTop:-42px}
+  .crrav-scoretuner .handle.legend .grip{background:rgb(var(--seuill));width:3px}
+  .crrav-scoretuner .handle.legend .tag{background:rgb(var(--seuill));color:#2b1a00;--tagTop:-42px}
+  @media (max-width:420px){
+    .crrav-scoretuner .handle .tag{font-size:9px;padding:2px 5px}
+  }
+  .crrav-scoretuner .schema-note{margin:0;color:var(--st-faint);font:500 10.5px/1.5 system-ui}
+  .crrav-scoretuner .range-stats{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;
+    margin:0 0 8px;font:700 11px/1.3 system-ui;color:var(--st-sub)}
+  .crrav-scoretuner .range-stats b{color:#e8e8ec;font-variant-numeric:tabular-nums}
+  .crrav-scoretuner .pepite-stats{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:12px 0 0;padding:9px 11px;
+    background:rgba(255,255,255,.03);border:1px solid var(--st-border);border-radius:10px}
+  .crrav-scoretuner .pepite-stats .pill{display:flex;align-items:baseline;gap:5px;font:800 12.5px/1 system-ui}
+  .crrav-scoretuner .pepite-stats .pill .n{font-variant-numeric:tabular-nums}
+  .crrav-scoretuner .pepite-stats .pill.legend .n{color:rgb(var(--seuill))}
+  .crrav-scoretuner .pepite-stats .pill.notable .n{color:rgb(var(--seuiln))}
+  .crrav-scoretuner .pepite-stats .note{margin:0;color:var(--st-faint);font:500 10px/1.4 system-ui;flex:1 1 180px}
+  .crrav-scoretuner .correction-toast{margin:10px 0 0;font:700 11px/1.4 system-ui;color:#ffd166;background:rgba(255,209,102,.1);
+    border:1px solid rgba(255,209,102,.3);border-radius:8px;padding:7px 10px;opacity:0;transition:opacity .25s}
+  .crrav-scoretuner .correction-toast.show{opacity:1}
+
+  /* ---------- groupes de détail ---------- */
+  .crrav-scoretuner .group{margin:0 0 18px}
+  .crrav-scoretuner .group:last-child{margin-bottom:4px}
+  .crrav-scoretuner .group-h{display:flex;align-items:center;gap:7px;font:800 11px/1.2 system-ui;letter-spacing:.04em;
+    text-transform:uppercase;color:#c9c9d2;margin:0 0 10px;padding-bottom:7px;border-bottom:1px solid var(--st-border)}
+  .crrav-scoretuner .field{margin:0 0 16px}
+  .crrav-scoretuner .field:last-child{margin-bottom:0}
+  .crrav-scoretuner .field .row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 2px}
+  .crrav-scoretuner .field label{font:700 12.5px/1.3 system-ui;color:#e6e7ea}
+  .crrav-scoretuner .field .valwrap{display:flex;align-items:center;gap:6px;flex:0 0 auto}
+  .crrav-scoretuner .field .presetref{font:700 10px/1 system-ui;color:rgb(var(--seuill));white-space:nowrap}
+  .crrav-scoretuner .field .val{font:800 12px/1 system-ui;font-variant-numeric:tabular-nums;padding:3px 8px;border-radius:6px;
+    background:rgba(255,255,255,.07);flex:0 0 auto}
+  .crrav-scoretuner .field.modified .val{background:rgba(var(--seuill),.22);color:#ffd166}
+  .crrav-scoretuner .field.modified label{color:#ffd166}
+  .crrav-scoretuner .field .fdesc{margin:0 0 6px;color:var(--st-faint);font:500 11px/1.45 system-ui}
+  /* touch-action:pan-y : le scroll vertical du doigt continue de défiler même si le geste
+     commence sur un curseur ; seul un geste franchement horizontal règle le curseur. */
+  .crrav-scoretuner input[type=range]{width:100%;height:30px;-webkit-appearance:none;background:transparent;touch-action:pan-y;margin:0}
+  .crrav-scoretuner input[type=range]::-webkit-slider-runnable-track{height:5px;border-radius:3px;background:rgba(255,255,255,.12)}
+  .crrav-scoretuner input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;height:18px;border-radius:50%;
+    background:#fff;margin-top:-6.5px;cursor:pointer;box-shadow:0 1px 4px rgba(0,0,0,.4)}
+  .crrav-scoretuner input[type=range]::-moz-range-track{height:5px;border-radius:3px;background:rgba(255,255,255,.12)}
+  .crrav-scoretuner input[type=range]::-moz-range-thumb{width:18px;height:18px;border:0;border-radius:50%;background:#fff;cursor:pointer}
+
+  /* Champ « passager » (Afficher le détail du score) rendu par settingsFieldHtml au bas du
+     tuner : il garde son style .crrav-field d'origine, on l'espace juste du bloc détail. */
+  .crrav-scoretuner .crrav-scoretuner-extra{margin-top:6px}
+
   .crrav-scoreschema{margin:0 0 18px;padding:16px 14px 14px;background:rgba(255,255,255,.03);
     border:1px solid rgba(255,255,255,.07);border-radius:12px}
   .crrav-scoreschema-head{display:flex;flex-direction:column;gap:6px;margin:0 0 18px}
@@ -9524,10 +9685,20 @@
   `;
 
   let root = null, fab = null, progressMsg = '';
+  // (fix) 4 opérations de fond indépendantes (sync principale, Découverte, Orphelines,
+  // Nouveautés) peuvent tourner EN MÊME TEMPS (rien n'empêche de lancer Découverte pendant
+  // que la sync principale tourne encore, par ex.). Elles partageaient auparavant la MÊME
+  // variable `progressMsg` : la barre d'activité n'affichait qu'UNE ligne, dont le texte et
+  // le compteur « N/total » étaient écrasés au fil de l'eau par CELLE QUI ÉCRIVAIT EN
+  // DERNIER — d'où des sauts du type « 2/3 » puis « 4/4 » puis retour à « 2/3 », deux
+  // progressions sans rapport qui se remplaçaient l'une l'autre dans la même barre. Chaque
+  // opération a maintenant sa propre variable ; renderActivityBar affiche une ligne PAR
+  // opération réellement en cours (voir plus bas), jamais mélangées.
+  let progressMsgDiscover = '', progressMsgOrphan = '', progressMsgPremieres = '';
   // Horodatage de départ de l'activité générique en cours (chargement watchlist/listes/
-  // épisodes, découverte, orphelines, nouveautés — elles partagent toutes `progressMsg`
-  // ci-dessus). Posé/retiré par renderActivityBar() selon `anyBusy`, sert uniquement à
-  // estimer un temps restant quand le message contient un compte « i/total ».
+  // épisodes, découverte, orphelines, nouveautés). Posé/retiré par renderActivityBar() selon
+  // `anyBusy`, sert uniquement à estimer un temps restant quand un message contient un
+  // compte « i/total » (chaque opération a sa propre clé d'ETA, voir renderActivityBar).
   let activityStartedAt = null;
   // Affichage ponctuel (session, non persisté) de la barre de recherche globale quand le
   // réglage CFG.showSearchBar est désactivé (par défaut) — voir renderNow() / togglesearch.
@@ -10730,7 +10901,7 @@
     if (O.loading) {
       body = `<div class="crrav-grid">${Array.from({ length: 12 },
         () => '<div class="crrav-skel"><div></div></div>').join('')}</div>
-        <div class="crrav-foot">${escapeHtml(progressMsg)}</div>`;
+        <div class="crrav-foot">${escapeHtml(progressMsgOrphan)}</div>`;
     } else if (O.error) {
       body = `<div class="crrav-msg"><h3>Ça n'a pas marché</h3><p>${escapeHtml(O.error)}</p>
         <button data-act="retry">Réessayer</button></div>`;
@@ -10836,6 +11007,684 @@
     </div>`;
   }
 
+/* ============================================================================
+   (34) Réglage du score « pépite » — moteur du panneau interactif.
+   Repris À L'IDENTIQUE du prototype scoring-final.html (validé côté Geoffrey), mais :
+    - encapsulé dans initScoreTuner(container) : plus aucune fonction/variable globale ;
+    - toutes les recherches DOM sont scopées au conteneur (q / qa) ;
+    - les identifiants du balisage sont préfixés « crst- » pour ne pas heurter la page ;
+    - chaque curseur de détail porte data-set="clé" : c'est LUI que collectSettings lit à
+      l'enregistrement. La matrice et le schéma ne font que piloter state → curseurs, ils
+      n'écrivent jamais dans CFG (aperçu pur, comme l'ancien schéma live) ;
+    - au lieu de démarrer sur un preset, on charge les valeurs CFG réelles puis on détecte
+      le preset correspondant (ou « personnalisé »).
+   ========================================================================== */
+  // Balisage du panneau (repris À L'IDENTIQUE des 2 cartes du prototype scoring-final.html,
+  // IDs préfixés « crst- »). `cfg` : objet des 15 clés CFG de scoring → sérialisé en data-cfg,
+  // lu par initScoreTuner pour initialiser l'état. `extraHtml` : champ discoverShowScoreDetail
+  // rendu via settingsFieldHtml (garde son propre data-set, source unique pour cette clé).
+  function scoreTunerHtml(cfg, extraHtml) {
+    const TUNER_KEYS = [
+      'discoverTasteWeight', 'discoverTasteNeutralCos', 'discoverGoodTasteThreshold', 'discoverCompletionWeight',
+      'discoverPrefGenreBonus', 'discoverMinRatingCr', 'discoverMinRatingAni',
+      'discoverWellRatedThresholdCr', 'discoverWellRatedThresholdAni', 'discoverWellRatedBonus',
+      'discoverSuperRatedThresholdCr', 'discoverSuperRatedThresholdAni', 'discoverSuperRatedBonus',
+      'discoverNotableScore', 'discoverLegendaryScore',
+    ];
+    const slim = {};
+    TUNER_KEYS.forEach((k) => { const v = +(cfg || {})[k]; if (Number.isFinite(v)) slim[k] = v; });
+    const dataCfg = JSON.stringify(slim).replace(/'/g, '&#39;');
+    return `<div class="crrav-scoretuner" data-cfg='${dataCfg}'>
+  <div class="card">
+    <h2>🎚️ Réglage rapide</h2>
+    <p class="desc">Axe horizontal : ce qui compte dans le score. Axe vertical : à quel point c'est exigeant.</p>
+    <div class="diffgauge">
+      <span class="lab">Difficulté</span>
+      <div class="track"><div class="fill" id="crst-diffFill"></div></div>
+      <b id="crst-diffLabel">6/10</b>
+    </div>
+    <div class="matrix-wrap">
+      <div class="matrix" id="crst-matrix"></div>
+    </div>
+    <div class="custom-card" id="crst-customCard">
+      <div class="cc-row"><span class="cc-icon">✏️</span><span>Personnalisé</span></div>
+      <p class="cc-desc" id="crst-ccDesc"></p>
+    </div>
+  </div>
+  <div class="card">
+    <details class="det" open>
+      <summary>🔍 Détail complet — schéma interactif + tous les réglages</summary>
+      <div class="schema-card">
+        <div class="schema-legend">
+          <span><i style="background:rgb(var(--taste))"></i>Goût (± selon ressemblance)</span>
+          <span><i style="background:rgb(var(--pref))"></i>Bonus 🎯 genre préféré</span>
+          <span><i style="background:rgb(var(--well))"></i>Bonus 🏆 bien notée</span>
+          <span><i style="background:rgb(var(--super))"></i>Bonus ✨ note exceptionnelle</span>
+        </div>
+        <div class="range-stats" id="crst-rangeStats"></div>
+        <div class="schema-axis" id="crst-axis"></div>
+        <div class="axis-ticks" id="crst-axisTicks"></div>
+        <p class="schema-note">Glisse les repères directement sur la barre. Pendant le glissement, la zone se
+          zoome automatiquement pour un réglage plus précis. Les notes requises (🏆/✨) et les autres
+          réglages fins se règlent juste en dessous — le schéma montre leur impact sur le score final.</p>
+        <div class="pepite-stats" id="crst-pepiteStats"></div>
+        <div class="correction-toast" id="crst-toast"></div>
+      </div>
+      <div class="group">
+        <div class="group-h">🎨 Goût</div>
+        <div id="crst-grpTaste"></div>
+      </div>
+      <div class="group">
+        <div class="group-h">🎯 Genre préféré</div>
+        <div id="crst-grpPref"></div>
+      </div>
+      <div class="group">
+        <div class="group-h">🏆 Notes</div>
+        <div id="crst-grpNotes"></div>
+      </div>
+      <div class="group">
+        <div class="group-h">📊 Seuils finaux</div>
+        <div id="crst-grpSeuils"></div>
+      </div>
+      ${extraHtml ? `<div class="crrav-scoretuner-extra">${extraHtml}</div>` : ''}
+    </details>
+  </div>
+</div>`;
+  }
+
+  function initScoreTuner(container) {
+    if (!container || container.dataset.stReady === '1') return;
+    container.dataset.stReady = '1';
+    const q = (s) => container.querySelector(s);
+    const qa = (s) => container.querySelectorAll(s);
+
+    /* ===================== état & modèle ===================== */
+    // D : valeurs de référence pour les 3 clés que buildPreset NE fait pas varier
+    // (point neutre, seuil badge, poids complétion). Alignées sur les défauts CFG du script.
+    const D = {
+      discoverTasteWeight: 3, discoverTasteNeutralCos: 0.3, discoverGoodTasteThreshold: 0.15, discoverCompletionWeight: 0.6,
+      discoverPrefGenreBonus: 0.8,
+      discoverMinRatingCr: 3.1, discoverMinRatingAni: 2.3,
+      discoverWellRatedThresholdCr: 4.1, discoverWellRatedThresholdAni: 3.3, discoverWellRatedBonus: 0.3,
+      discoverSuperRatedThresholdCr: 4.6, discoverSuperRatedThresholdAni: 3.8, discoverSuperRatedBonus: 0.5,
+      discoverNotableScore: 1.35, discoverLegendaryScore: 1.9,
+    };
+    const RANGE = {
+      discoverTasteWeight: [0.5, 5], discoverTasteNeutralCos: [0.05, 0.95], discoverGoodTasteThreshold: [-1, 1], discoverCompletionWeight: [0, 1],
+      discoverPrefGenreBonus: [0, 2],
+      discoverMinRatingCr: [0, 5], discoverMinRatingAni: [0, 5],
+      discoverWellRatedThresholdCr: [3, 5], discoverWellRatedThresholdAni: [2, 5], discoverWellRatedBonus: [0, 2],
+      discoverSuperRatedThresholdCr: [3, 5], discoverSuperRatedThresholdAni: [2, 5], discoverSuperRatedBonus: [0, 2],
+      discoverNotableScore: [0.5, 4], discoverLegendaryScore: [0.5, 5],
+    };
+    let cfgInit = {};
+    try { cfgInit = JSON.parse(container.dataset.cfg || '{}'); } catch (e) { cfgInit = {}; }
+    let state = { ...D };
+    Object.keys(RANGE).forEach((k) => { if (Number.isFinite(cfgInit[k])) state[k] = cfgInit[k]; });
+    let customActive = false;
+    let toastT = null;
+    const fmt = (v) => (+v).toFixed(2).replace(/\.?0+$/, '') || '0';
+
+    // Seuils calés sur la distribution RÉELLE observée (voir discoverLegendaryScore) : sur
+    // un scan de 280 candidats notés, max 2.20, médiane 0.12, top 10% 1.47. « Modéré » = tes
+    // vrais défauts (1.7 / 1.2). « Strict » reste sous ce max observé ; « Extrême » vise
+    // au-delà, pour rester quasi jamais décroché.
+    const EXIGENCE = [
+      { name: 'Souple', diff: 3, legendary: 1.1, notable: 0.7, wellCr: 3.9, superCr: 4.3 },
+      { name: 'Modéré', diff: 6, legendary: 1.7, notable: 1.2, wellCr: 4.1, superCr: 4.5 },
+      { name: 'Strict', diff: 8, legendary: 2.0, notable: 1.5, wellCr: 4.3, superCr: 4.7 },
+      { name: 'Extrême', diff: 10, legendary: 2.3, notable: 1.8, wellCr: 4.5, superCr: 4.85 },
+    ];
+    const CRITERE = [
+      { name: 'Goût pur', tasteWeight: 4.5, ratingTotal: 0.2, prefBonus: 1.0, blurb: 'le goût (tags/genres) domine presque tout' },
+      { name: 'Équilibré', tasteWeight: 3.0, ratingTotal: 0.8, prefBonus: 0.8, blurb: 'goût et note comptent à parts égales' },
+      { name: 'Note pure', tasteWeight: 1.5, ratingTotal: 1.8, prefBonus: 0.5, blurb: 'la note moyenne domine presque tout' },
+    ];
+    const EXIGENCE_BLURB = { Souple: 'beaucoup de résultats', Modéré: 'réglage par défaut', Strict: 'peu de résultats, exigeant', 'Extrême': 'quasi parfait, très rare' };
+
+    function buildPreset(ci, ei) {
+      const c = CRITERE[ci], e = EXIGENCE[ei];
+      return {
+        discoverTasteWeight: c.tasteWeight,
+        discoverPrefGenreBonus: c.prefBonus,
+        discoverWellRatedBonus: +(c.ratingTotal * 0.375).toFixed(2),
+        discoverSuperRatedBonus: +(c.ratingTotal * 0.625).toFixed(2),
+        discoverWellRatedThresholdCr: e.wellCr,
+        discoverWellRatedThresholdAni: +(e.wellCr - 0.8).toFixed(2),
+        discoverSuperRatedThresholdCr: e.superCr,
+        discoverSuperRatedThresholdAni: +(e.superCr - 0.8).toFixed(2),
+        discoverLegendaryScore: e.legendary,
+        discoverNotableScore: e.notable,
+        discoverMinRatingCr: +Math.max(0, e.wellCr - 1.0).toFixed(2),
+        discoverMinRatingAni: +Math.max(0, e.wellCr - 0.8 - 1.0).toFixed(2),
+        discoverTasteNeutralCos: D.discoverTasteNeutralCos,
+        discoverGoodTasteThreshold: D.discoverGoodTasteThreshold,
+        discoverCompletionWeight: D.discoverCompletionWeight,
+      };
+    }
+
+    /* ===================== validation intelligente ===================== */
+    function clampField(key) {
+      const [mn, mx] = RANGE[key];
+      state[key] = Math.max(mn, Math.min(mx, state[key]));
+    }
+    function validate(changedKey) {
+      const fixed = [];
+      const GAP = 0.3;
+      Object.keys(RANGE).forEach(clampField);
+
+      if (changedKey === 'discoverNotableScore' && state.discoverLegendaryScore - state.discoverNotableScore < GAP) {
+        state.discoverLegendaryScore = +(state.discoverNotableScore + GAP).toFixed(2); fixed.push('Légendaire relevé pour rester au-dessus de Notable');
+      }
+      if (changedKey === 'discoverLegendaryScore' && state.discoverLegendaryScore - state.discoverNotableScore < GAP) {
+        state.discoverNotableScore = +(state.discoverLegendaryScore - GAP).toFixed(2); fixed.push('Notable abaissé pour rester sous Légendaire');
+      }
+      if (!changedKey && state.discoverLegendaryScore - state.discoverNotableScore < GAP) {
+        state.discoverLegendaryScore = +(state.discoverNotableScore + GAP).toFixed(2);
+      }
+
+      if (changedKey === 'discoverWellRatedThresholdCr' && state.discoverSuperRatedThresholdCr < state.discoverWellRatedThresholdCr) {
+        state.discoverSuperRatedThresholdCr = state.discoverWellRatedThresholdCr; fixed.push('Note ✨ (CR) relevée au niveau de 🏆');
+      }
+      if (changedKey === 'discoverSuperRatedThresholdCr' && state.discoverSuperRatedThresholdCr < state.discoverWellRatedThresholdCr) {
+        state.discoverWellRatedThresholdCr = state.discoverSuperRatedThresholdCr; fixed.push('Note 🏆 (CR) abaissée au niveau de ✨');
+      }
+      if (changedKey === 'discoverWellRatedThresholdAni' && state.discoverSuperRatedThresholdAni < state.discoverWellRatedThresholdAni) {
+        state.discoverSuperRatedThresholdAni = state.discoverWellRatedThresholdAni; fixed.push('Note ✨ (AniList) relevée au niveau de 🏆');
+      }
+      if (changedKey === 'discoverSuperRatedThresholdAni' && state.discoverSuperRatedThresholdAni < state.discoverWellRatedThresholdAni) {
+        state.discoverWellRatedThresholdAni = state.discoverSuperRatedThresholdAni; fixed.push('Note 🏆 (AniList) abaissée au niveau de ✨');
+      }
+
+      if (changedKey === 'discoverWellRatedBonus' && state.discoverSuperRatedBonus < state.discoverWellRatedBonus) {
+        state.discoverSuperRatedBonus = state.discoverWellRatedBonus; fixed.push('Bonus ✨ relevé au niveau de 🏆');
+      }
+      if (changedKey === 'discoverSuperRatedBonus' && state.discoverSuperRatedBonus < state.discoverWellRatedBonus) {
+        state.discoverWellRatedBonus = state.discoverSuperRatedBonus; fixed.push('Bonus 🏆 abaissé au niveau de ✨');
+      }
+
+      if (changedKey === 'discoverMinRatingCr' && state.discoverMinRatingCr > state.discoverWellRatedThresholdCr) {
+        state.discoverWellRatedThresholdCr = state.discoverMinRatingCr; fixed.push('Note requise 🏆 (CR) relevée au-dessus du plancher');
+      }
+      if (changedKey === 'discoverWellRatedThresholdCr' && state.discoverMinRatingCr > state.discoverWellRatedThresholdCr) {
+        state.discoverMinRatingCr = state.discoverWellRatedThresholdCr; fixed.push('Note minimale (CR) abaissée sous 🏆');
+      }
+      if (changedKey === 'discoverMinRatingAni' && state.discoverMinRatingAni > state.discoverWellRatedThresholdAni) {
+        state.discoverWellRatedThresholdAni = state.discoverMinRatingAni; fixed.push('Note requise 🏆 (AniList) relevée au-dessus du plancher');
+      }
+      if (changedKey === 'discoverWellRatedThresholdAni' && state.discoverMinRatingAni > state.discoverWellRatedThresholdAni) {
+        state.discoverMinRatingAni = state.discoverWellRatedThresholdAni; fixed.push('Note minimale (AniList) abaissée sous 🏆');
+      }
+
+      // Le score final ne peut jamais dépasser discoverTasteWeight (goût max = 1) + tous les
+      // bonus à fond. Un seuil Notable/Légendaire au-dessus est un piège : inatteignable.
+      const theoreticalMax = +(state.discoverTasteWeight + state.discoverPrefGenreBonus
+        + state.discoverWellRatedBonus + state.discoverSuperRatedBonus).toFixed(2);
+      if (state.discoverLegendaryScore > theoreticalMax) {
+        state.discoverLegendaryScore = theoreticalMax; fixed.push(`Légendaire plafonné au score max théoriquement atteignable (${theoreticalMax})`);
+      }
+      if (state.discoverNotableScore > state.discoverLegendaryScore) {
+        state.discoverNotableScore = Math.max(RANGE.discoverNotableScore[0], +(state.discoverLegendaryScore - GAP).toFixed(2));
+        fixed.push(`Notable plafonné sous Légendaire (max théorique ${theoreticalMax})`);
+      }
+      if (state.discoverLegendaryScore - state.discoverNotableScore < GAP) {
+        const wanted = +(state.discoverNotableScore + GAP).toFixed(2);
+        if (wanted <= theoreticalMax) { state.discoverLegendaryScore = wanted; }
+        else { state.discoverNotableScore = Math.max(RANGE.discoverNotableScore[0], +(theoreticalMax - GAP).toFixed(2)); state.discoverLegendaryScore = theoreticalMax; }
+      }
+
+      Object.keys(RANGE).forEach(clampField);
+      if (fixed.length) {
+        const t = q('#crst-toast'); if (!t) return;
+        t.textContent = '⚙️ ' + fixed[0] + (fixed.length > 1 ? ` (+${fixed.length - 1} autre ajustement)` : '');
+        t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), 2600);
+      }
+    }
+
+    function estimateDifficulty() {
+      const pts = EXIGENCE.map((e) => ({ d: e.diff, v: e.legendary }));
+      const v = state.discoverLegendaryScore;
+      if (v <= pts[0].v) return pts[0].d;
+      if (v >= pts[pts.length - 1].v) return pts[pts.length - 1].d;
+      for (let i = 0; i < pts.length - 1; i++) {
+        if (v >= pts[i].v && v <= pts[i + 1].v) {
+          const t = (v - pts[i].v) / (pts[i + 1].v - pts[i].v);
+          return pts[i].d + t * (pts[i + 1].d - pts[i].d);
+        }
+      }
+      return 6;
+    }
+    function refreshDiff() {
+      const d = estimateDifficulty();
+      const lab = q('#crst-diffLabel'); if (lab) lab.textContent = d.toFixed(1).replace(/\.0$/, '') + '/10';
+      const fill = q('#crst-diffFill'); if (fill) fill.style.width = (d / 10 * 100) + '%';
+    }
+
+    /* ===================== matrice de presets ===================== */
+    let activePreset = null; // {ci,ei}
+    function renderMatrix() {
+      const m = q('#crst-matrix'); if (!m) return;
+      m.innerHTML = '<div class="mx-corner"></div>' + CRITERE.map((c) => `<div class="mx-colhead">${c.name}</div>`).join('');
+      EXIGENCE.forEach((e, ei) => {
+        m.innerHTML += `<div class="mx-rowhead">${e.name}<br><span style="font-weight:600;color:var(--st-faint)">${e.diff}/10</span></div>`;
+        CRITERE.forEach((c, ci) => {
+          const chipClass = e.diff >= 8 ? 'd-high' : (e.diff >= 6 ? 'd-mid' : 'd-low');
+          m.innerHTML += `<div class="preset-cell" data-ci="${ci}" data-ei="${ei}">
+            <div>
+              <span class="mobile-tag">${e.name} · ${e.diff}/10</span>
+              <b>${c.name}</b><span>${EXIGENCE_BLURB[e.name]}</span>
+            </div>
+            <span class="diffchip ${chipClass}">${e.diff}/10</span>
+          </div>`;
+        });
+      });
+      qa('.preset-cell').forEach((cell) => {
+        cell.addEventListener('click', () => applyPreset(+cell.dataset.ci, +cell.dataset.ei));
+      });
+    }
+    function applyPreset(ci, ei) {
+      activePreset = { ci, ei }; customActive = false;
+      Object.assign(state, buildPreset(ci, ei));
+      validate();
+      qa('.preset-cell').forEach((c) => {
+        c.classList.toggle('active', +c.dataset.ci === ci && +c.dataset.ei === ei);
+        c.classList.remove('custom-near');
+      });
+      const card = q('#crst-customCard'); if (card) card.classList.remove('active');
+      const desc = q('#crst-ccDesc'); if (desc) desc.textContent = '';
+      renderFieldDiffHighlights(null);
+      renderAll(true);
+    }
+    function markCustom() {
+      customActive = true; activePreset = null;
+      const card = q('#crst-customCard'); if (card) card.classList.add('active');
+      refreshCustomIndicator();
+    }
+
+    const PRESET_KEYS = Object.keys(RANGE);
+    function nearestPreset() {
+      let best = null;
+      CRITERE.forEach((c, ci) => {
+        EXIGENCE.forEach((e, ei) => {
+          const p = buildPreset(ci, ei);
+          let dist = 0;
+          PRESET_KEYS.forEach((k) => {
+            const [mn, mx] = RANGE[k];
+            dist += Math.abs((state[k] - p[k]) / ((mx - mn) || 1));
+          });
+          if (!best || dist < best.dist) best = { ci, ei, dist, preset: p };
+        });
+      });
+      return best;
+    }
+    function refreshCustomIndicator() {
+      if (!customActive) return;
+      const best = nearestPreset();
+      qa('.preset-cell').forEach((c) => {
+        const isNear = +c.dataset.ci === best.ci && +c.dataset.ei === best.ei;
+        c.classList.toggle('active', isNear);
+        c.classList.toggle('custom-near', isNear);
+      });
+      const diffs = PRESET_KEYS.filter((k) => Math.abs(state[k] - best.preset[k]) > 1e-9);
+      const presetLabel = `${CRITERE[best.ci].name} / ${EXIGENCE[best.ei].name}`;
+      const desc = q('#crst-ccDesc'); if (!desc) return;
+      if (diffs.length) {
+        const k0 = diffs[0];
+        const lbl = KEY_LABELS[k0] || k0;
+        desc.innerHTML = `Proche de <b>${presetLabel}</b> — ${diffs.length} réglage${diffs.length > 1 ? 's' : ''} modifié${diffs.length > 1 ? 's' : ''} à la main (ex. ${lbl} : ${fmt(state[k0])} au lieu de ${fmt(best.preset[k0])})`;
+      } else {
+        desc.innerHTML = `Identique au preset <b>${presetLabel}</b> pour l'instant`;
+      }
+      renderFieldDiffHighlights(best.preset);
+    }
+    function renderFieldDiffHighlights(presetObj) {
+      Object.keys(sliderEls).forEach((key) => {
+        const { field, pr } = sliderEls[key];
+        if (!presetObj) { field.classList.remove('modified'); pr.textContent = ''; return; }
+        const diff = Math.abs(state[key] - presetObj[key]) > 1e-9;
+        field.classList.toggle('modified', diff);
+        pr.textContent = diff ? `preset ${fmt(presetObj[key])}` : '';
+      });
+    }
+
+    /* ===================== schéma interactif ===================== */
+    const ZOOM_FRACTION = 0.3;
+    let zoomWindow = null;
+
+    function fullAxisRange() {
+      const min = -state.discoverTasteWeight - 0.3;
+      const max = Math.max(
+        state.discoverTasteWeight + state.discoverPrefGenreBonus + state.discoverWellRatedBonus + state.discoverSuperRatedBonus + 0.3,
+        state.discoverLegendaryScore + 0.3
+      );
+      return { min, max };
+    }
+    function axisRange() { return zoomWindow || fullAxisRange(); }
+    function pct(v, r) { return Math.max(0, Math.min(100, (v - r.min) / (r.max - r.min) * 100)); }
+    function segEndsLive() {
+      const tasteEnd = state.discoverTasteWeight;
+      const prefEnd = tasteEnd + state.discoverPrefGenreBonus;
+      const wellEnd = prefEnd + state.discoverWellRatedBonus;
+      return { tasteEnd, prefEnd, wellEnd };
+    }
+
+    function theoreticalMin() { return +(-state.discoverTasteWeight).toFixed(2); }
+    function theoreticalMaxScore() {
+      return +(state.discoverTasteWeight + state.discoverPrefGenreBonus
+        + state.discoverWellRatedBonus + state.discoverSuperRatedBonus).toFixed(2);
+    }
+
+    const REF_THEORETICAL_MAX = 4.6;
+    const REF_POINTS = [{ s: 0.12, p: 0.50 }, { s: 1.47, p: 0.10 }, { s: 2.20, p: 0.0036 }];
+    function estimatePercentAbove(rawThreshold) {
+      const max = theoreticalMaxScore();
+      if (max <= 0) return 0;
+      const ratio = max / REF_THEORETICAL_MAX;
+      const s = rawThreshold / ratio;
+      const pts = REF_POINTS;
+      let p;
+      if (s <= pts[0].s) {
+        const slope = (Math.log(pts[1].p) - Math.log(pts[0].p)) / (pts[1].s - pts[0].s);
+        p = Math.exp(Math.log(pts[0].p) + slope * (s - pts[0].s));
+      } else if (s >= pts[pts.length - 1].s) {
+        const a = pts[pts.length - 2], b = pts[pts.length - 1];
+        const slope = (Math.log(b.p) - Math.log(a.p)) / (b.s - a.s);
+        p = Math.exp(Math.log(b.p) + slope * (s - b.s));
+      } else {
+        for (let i = 0; i < pts.length - 1; i++) {
+          if (s >= pts[i].s && s <= pts[i + 1].s) {
+            const slope = (Math.log(pts[i + 1].p) - Math.log(pts[i].p)) / (pts[i + 1].s - pts[i].s);
+            p = Math.exp(Math.log(pts[i].p) + slope * (s - pts[i].s));
+            break;
+          }
+        }
+      }
+      return Math.max(0.1, Math.min(99, p * 100));
+    }
+    function refreshRangeStats() {
+      const rs = q('#crst-rangeStats');
+      if (rs) rs.innerHTML = `<span>Plage théorique du score</span><b>${fmt(theoreticalMin())} → ${fmt(theoreticalMaxScore())}</b>`;
+      const ps = q('#crst-pepiteStats');
+      if (ps) {
+        const legendPct = estimatePercentAbove(state.discoverLegendaryScore);
+        const notablePct = Math.max(legendPct, estimatePercentAbove(state.discoverNotableScore));
+        ps.innerHTML = `
+          <span class="pill legend">✨ <span class="n">≈${legendPct < 1 ? legendPct.toFixed(1) : Math.round(legendPct)}%</span> légendaire</span>
+          <span class="pill notable">🔵 <span class="n">≈${notablePct < 1 ? notablePct.toFixed(1) : Math.round(notablePct)}%</span> notable+</span>
+          <p class="note">Estimation approximative (basée sur un scan réel de 280 candidats, mise à l'échelle de tes réglages) — pas un calcul en direct sur tes séries.</p>`;
+      }
+    }
+
+    function renderSchema() {
+      const axis = q('#crst-axis'); if (!axis) return;
+      axis.innerHTML = `
+        <div class="seg taste" data-seg="taste"></div>
+        <div class="seg pref" data-seg="pref"></div>
+        <div class="seg well" data-seg="well"></div>
+        <div class="seg super" data-seg="super"></div>
+        <div class="zero-line"></div>
+        <div class="handle taste" data-h="discoverTasteWeight"><div class="grip"></div><span class="tag">Poids goût <b class="tval"></b></span></div>
+        <div class="handle pref" data-h="discoverPrefGenreBonus"><div class="grip"></div><span class="tag">🎯 <b class="tval"></b></span></div>
+        <div class="handle well" data-h="discoverWellRatedBonus"><div class="grip"></div><span class="tag">🏆 <b class="tval"></b></span></div>
+        <div class="handle super" data-h="discoverSuperRatedBonus"><div class="grip"></div><span class="tag">✨ <b class="tval"></b></span></div>
+        <div class="handle notable" data-h="discoverNotableScore"><div class="grip"></div><span class="tag">Notable <b class="tval"></b></span></div>
+        <div class="handle legend" data-h="discoverLegendaryScore"><div class="grip"></div><span class="tag">Légendaire <b class="tval"></b></span></div>
+      `;
+      layoutSchema();
+
+      axis.addEventListener('pointerdown', (e) => {
+        const rect = axis.getBoundingClientRect();
+        const touchPx = e.clientX - rect.left;
+        const handles = Array.from(axis.querySelectorAll('.handle'));
+        let nearest = null, bestDist = Infinity;
+        handles.forEach((h) => {
+          const px = (parseFloat(h.style.left) || 0) / 100 * rect.width;
+          const d = Math.abs(px - touchPx);
+          if (d < bestDist) { bestDist = d; nearest = h; }
+        });
+        const captureRadius = Math.max(34, rect.width * 0.11);
+        if (!nearest || bestDist > captureRadius) return;
+        e.preventDefault();
+        startDrag(nearest, e);
+      });
+    }
+
+    function startDrag(h, e) {
+      const axis = q('#crst-axis');
+      const key = h.dataset.h;
+      axis.setPointerCapture(e.pointerId);
+      axis.classList.add('zoomed');
+      axis.querySelectorAll('.handle,.seg').forEach((x) => x.classList.add('dragging'));
+      h.classList.add('active-drag');
+
+      const fr = fullAxisRange();
+      const startLeftPct = parseFloat(h.style.left) || 0;
+      let curVal = fr.min + (startLeftPct / 100) * (fr.max - fr.min);
+      const span = Math.min(fr.max - fr.min, (fr.max - fr.min) * ZOOM_FRACTION);
+
+      const centerWindow = (v) => {
+        const wMin = Math.max(fr.min, Math.min(v - span / 2, fr.max - span));
+        zoomWindow = { min: wMin, max: wMin + span };
+      };
+      centerWindow(curVal);
+      layoutSchema();
+
+      let lastClientX = e.clientX;
+
+      const move = (ev) => {
+        ev.preventDefault();
+        const rect = axis.getBoundingClientRect();
+        const deltaPx = ev.clientX - lastClientX;
+        lastClientX = ev.clientX;
+
+        const valuePerPx = span / rect.width;
+        curVal = Math.max(fr.min, Math.min(fr.max, curVal + deltaPx * valuePerPx));
+        let val = Math.round(curVal * 20) / 20;
+
+        const { tasteEnd, prefEnd, wellEnd } = segEndsLive();
+        if (key === 'discoverTasteWeight') state[key] = Math.max(0.5, +val.toFixed(2));
+        else if (key === 'discoverPrefGenreBonus') state[key] = Math.max(0, +(val - tasteEnd).toFixed(2));
+        else if (key === 'discoverWellRatedBonus') state[key] = Math.max(0, +(val - prefEnd).toFixed(2));
+        else if (key === 'discoverSuperRatedBonus') state[key] = Math.max(0, +(val - wellEnd).toFixed(2));
+        else state[key] = +val.toFixed(2);
+        validate(key);
+        markCustom();
+        centerWindow(curVal);
+        layoutSchema();
+        syncDetailField(key);
+        refreshDiff();
+        refreshRangeStats();
+      };
+      const up = () => {
+        axis.removeEventListener('pointermove', move);
+        axis.removeEventListener('pointerup', up);
+        axis.querySelectorAll('.handle,.seg').forEach((x) => x.classList.remove('dragging'));
+        h.classList.remove('active-drag');
+        axis.classList.remove('zoomed');
+        zoomWindow = null;
+        layoutSchema();
+        refreshRangeStats();
+      };
+      axis.addEventListener('pointermove', move);
+      axis.addEventListener('pointerup', up);
+    }
+
+    function layoutSchema() {
+      const axis = q('#crst-axis'); if (!axis || !axis.firstChild) return;
+      const r = axisRange();
+      const tasteStart = -state.discoverTasteWeight, tasteEnd = state.discoverTasteWeight;
+      const prefEnd = tasteEnd + state.discoverPrefGenreBonus;
+      const wellEnd = prefEnd + state.discoverWellRatedBonus;
+      const superEnd = wellEnd + state.discoverSuperRatedBonus;
+
+      const set = (sel, left, width) => { const el = axis.querySelector(sel); el.style.left = pct(left, r) + '%'; el.style.width = Math.max(0, pct(left + width, r) - pct(left, r)) + '%'; };
+      set('[data-seg="taste"]', tasteStart, tasteEnd - tasteStart);
+      set('[data-seg="pref"]', tasteEnd, prefEnd - tasteEnd);
+      set('[data-seg="well"]', prefEnd, wellEnd - prefEnd);
+      set('[data-seg="super"]', wellEnd, superEnd - wellEnd);
+      axis.querySelector('.zero-line').style.left = pct(0, r) + '%';
+
+      const placeHandle = (key, val, atPos) => {
+        const el = axis.querySelector(`.handle[data-h="${key}"]`);
+        el.style.left = pct(atPos !== undefined ? atPos : val, r) + '%';
+        const tval = el.querySelector('.tval');
+        if (tval) tval.textContent = fmt(val);
+      };
+      placeHandle('discoverTasteWeight', state.discoverTasteWeight, tasteEnd);
+      placeHandle('discoverPrefGenreBonus', state.discoverPrefGenreBonus, prefEnd);
+      placeHandle('discoverWellRatedBonus', state.discoverWellRatedBonus, wellEnd);
+      placeHandle('discoverSuperRatedBonus', state.discoverSuperRatedBonus, superEnd);
+      placeHandle('discoverNotableScore', state.discoverNotableScore);
+      placeHandle('discoverLegendaryScore', state.discoverLegendaryScore);
+
+      resolveTagCollisions(axis);
+      renderTicks(r);
+    }
+
+    function niceTickStep(span) {
+      const target = span / 5;
+      const steps = [0.05, 0.1, 0.2, 0.25, 0.5, 1, 2, 5];
+      return steps.reduce((best, s) => Math.abs(s - target) < Math.abs(best - target) ? s : best, steps[0]);
+    }
+    function renderTicks(r) {
+      const ticks = q('#crst-axisTicks'); if (!ticks) return;
+      const step = niceTickStep(r.max - r.min);
+      const start = Math.ceil(r.min / step) * step;
+      let html = '';
+      for (let v = start; v <= r.max + 1e-9; v += step) {
+        const vv = Math.round(v / step) * step;
+        html += `<span class="tick" style="left:${pct(vv, r)}%">${fmt(vv)}</span>`;
+      }
+      ticks.innerHTML = html;
+    }
+
+    function resolveTagCollisions(axis) {
+      const w = axis.getBoundingClientRect().width || axis.offsetWidth || 300;
+      const handles = Array.from(axis.querySelectorAll('.handle'));
+      const items = handles.map((h) => {
+        const tag = h.querySelector('.tag');
+        const tagW = tag ? tag.getBoundingClientRect().width : 40;
+        return { el: h, px: (parseFloat(h.style.left) || 0) / 100 * w, half: tagW / 2 + 5 };
+      });
+      items.sort((a, b) => a.px - b.px);
+      const rightEdgeAtLevel = [];
+      const MAX_LVL = 6;
+      items.forEach((it) => {
+        let lvl = 0;
+        while (lvl < MAX_LVL && rightEdgeAtLevel[lvl] !== undefined && (it.px - it.half) < rightEdgeAtLevel[lvl]) lvl++;
+        rightEdgeAtLevel[lvl] = it.px + it.half;
+        it.el.style.setProperty('--lvl', lvl);
+      });
+    }
+
+    /* ===================== champs détaillés ===================== */
+    const FIELDS = {
+      'crst-grpTaste': [
+        ['discoverTasteWeight', 'Poids du goût dans le score final', 0.5, 5, 0.1, 'Multiplie le goût net (cosinus) avant de l’ajouter au score. Plus haut = le goût pèse plus lourd face aux bonus de note.'],
+        ['discoverTasteNeutralCos', 'Point neutre du cosinus', 0.05, 0.95, 0.05, 'Ressemblance à partir de laquelle une série est considérée « ni pour ni contre tes goûts ». Sert de référence zéro pour le calcul.'],
+        ['discoverGoodTasteThreshold', 'Seuil du badge 💚 « dans tes goûts »', -1, 1, 0.05, 'Purement visuel : à partir de quel goût net le badge 💚 s’affiche sur une carte. N’influence pas le score.'],
+        ['discoverCompletionWeight', 'Poids de la complétion dans le profil', 0, 1, 0.05, 'Ton profil de goût mélange volume regardé et taux de complétion de chaque série. Plus haut = les séries terminées comptent plus que celles juste commencées.'],
+      ],
+      'crst-grpPref': [
+        ['discoverPrefGenreBonus', 'Bonus « genre préféré » 🎯', 0, 2, 0.1, 'Ajouté quand la série touche un genre que ton profil identifie comme favori.'],
+      ],
+      'crst-grpNotes': [
+        ['discoverMinRatingCr', 'Note minimale — Crunchyroll', 0, 5, 0.1, 'En dessous de cette note, la série est écartée d’office, quel que soit le goût.'],
+        ['discoverMinRatingAni', 'Note minimale — AniList', 0, 5, 0.1, 'Équivalent pour le bassin AniList (échelle légèrement différente de Crunchyroll).'],
+        ['discoverWellRatedThresholdCr', 'Note requise 🏆 — Crunchyroll', 3, 5, 0.1, 'Note à partir de laquelle le bonus « très bien notée » se déclenche.'],
+        ['discoverWellRatedThresholdAni', 'Note requise 🏆 — AniList', 2, 5, 0.1, 'Équivalent AniList du seuil 🏆.'],
+        ['discoverWellRatedBonus', 'Bonus « très bien notée » 🏆', 0, 2, 0.1, 'Ajouté au score si la note dépasse le seuil 🏆 ci-dessus.'],
+        ['discoverSuperRatedThresholdCr', 'Note requise ✨ — Crunchyroll (palier supplémentaire)', 3, 5, 0.1, 'Palier au-dessus de 🏆, pour les notes vraiment exceptionnelles.'],
+        ['discoverSuperRatedThresholdAni', 'Note requise ✨ — AniList (palier supplémentaire)', 2, 5, 0.1, 'Équivalent AniList du seuil ✨.'],
+        ['discoverSuperRatedBonus', 'Bonus « note exceptionnelle » ✨', 0, 2, 0.1, 'Bonus additionnel (cumulé avec 🏆) si la note dépasse le seuil ✨.'],
+      ],
+      'crst-grpSeuils': [
+        ['discoverNotableScore', 'Score minimum — notable', 0.5, 4, 0.1, 'Score total à partir duquel une série est classée « Notable ».'],
+        ['discoverLegendaryScore', 'Score minimum — légendaire', 0.5, 5, 0.1, 'Score total à partir duquel une série est classée « Légendaire ». Toujours au moins 0.3 au-dessus du seuil Notable.'],
+      ],
+    };
+    const KEY_LABELS = {};
+    Object.values(FIELDS).forEach((list) => list.forEach(([key, label]) => { KEY_LABELS[key] = label; }));
+    const sliderEls = {};
+    function renderDetail() {
+      Object.entries(FIELDS).forEach(([groupId, fields]) => {
+        const c = q('#' + groupId); if (!c) return; c.innerHTML = '';
+        fields.forEach(([key, label, mn, mx, st, desc]) => {
+          const f = document.createElement('div'); f.className = 'field';
+          // data-set="clé" : c'est CET input que collectSettings lit à l'enregistrement.
+          f.innerHTML = `<div class="row"><label>${label}</label><div class="valwrap"><span class="presetref" id="crst-pr-${key}"></span><span class="val" id="crst-v-${key}"></span></div></div>
+            <p class="fdesc">${desc}</p>
+            <input type="range" id="crst-r-${key}" data-set="${key}" min="${mn}" max="${mx}" step="${st}">`;
+          c.appendChild(f);
+          const r = f.querySelector('input'), v = f.querySelector('.val'), pr = f.querySelector('.presetref');
+          r.value = state[key];
+          v.textContent = fmt(state[key]);
+          r.addEventListener('input', () => {
+            state[key] = parseFloat(r.value);
+            validate(key);
+            markCustom();
+            renderDetailValuesOnly();
+            layoutSchema();
+            refreshDiff();
+            refreshRangeStats();
+          });
+          sliderEls[key] = { r, v, field: f, pr };
+        });
+      });
+    }
+    function renderDetailValuesOnly() {
+      Object.keys(sliderEls).forEach((key) => {
+        sliderEls[key].r.value = state[key];
+        sliderEls[key].v.textContent = fmt(state[key]);
+      });
+    }
+    function syncDetailField(key) {
+      if (sliderEls[key]) { sliderEls[key].r.value = state[key]; sliderEls[key].v.textContent = fmt(state[key]); }
+      renderDetailValuesOnly();
+    }
+
+    /* ===================== render global ===================== */
+    function renderAll() {
+      layoutSchema();
+      renderDetailValuesOnly();
+      refreshDiff();
+      refreshRangeStats();
+    }
+
+    // Détecte si les valeurs CFG chargées correspondent EXACTEMENT à un preset (→ preset
+    // actif), sinon bascule en « personnalisé » avec indicateur du preset le plus proche.
+    function initFromState() {
+      validate();
+      renderMatrix();
+      renderSchema();
+      renderDetail();
+      let matched = null;
+      CRITERE.forEach((c, ci) => EXIGENCE.forEach((e, ei) => {
+        const p = buildPreset(ci, ei);
+        if (PRESET_KEYS.every((k) => Math.abs(state[k] - p[k]) < 1e-9)) matched = { ci, ei };
+      }));
+      if (matched) {
+        applyPreset(matched.ci, matched.ei);
+      } else {
+        markCustom();
+        renderAll();
+      }
+    }
+
+    // Hook de test : n'existe que sous Node (jamais dans Violentmonkey). Expose le closure
+    // réel pour que les tests exercent le VRAI code, pas une copie.
+    if (typeof module !== 'undefined' && module.exports && container.dataset.stTest === '1') {
+      container.__test = {
+        get state() { return state; }, set state(v) { state = v; },
+        D, RANGE, CRITERE, EXIGENCE, PRESET_KEYS,
+        buildPreset, validate, estimateDifficulty, estimatePercentAbove,
+        nearestPreset, theoreticalMaxScore, theoreticalMin,
+      };
+    }
+
+    initFromState();
+  }
+
   function settingsFieldHtml(f) {
     const val = CFG[f.key];
     const id = `crrav-set-${f.key}`;
@@ -10916,10 +11765,16 @@
       sgroups.querySelectorAll(':scope > .crrav-setgroup').forEach((g) => {
         let vis = 0;
         g.querySelectorAll('.crrav-field').forEach((fld) => {
+          // (34) Le champ interne au tuner (« afficher le détail ») n'est pas searchable :
+          // pendant une recherche on masque tout le panneau, ce champ compris.
+          if (active && fld.closest('.crrav-scoretuner')) { fld.style.display = 'none'; return; }
           const show = !q || aniNorm(fld.textContent).includes(q);
           fld.style.display = show ? '' : 'none';
           if (show) vis++;
         });
+        // (34) Le panneau de réglage du score (matrice + schéma) se masque en bloc dès qu'une
+        // recherche est active : il ne contient aucun .crrav-field filtrable en propre.
+        g.querySelectorAll(':scope .crrav-scoretuner').forEach((st) => { st.style.display = active ? 'none' : ''; });
         // (31) Un sous-groupe (bloc thématique) se masque dès qu'aucun de ses champs n'est
         // visible — sinon son en-tête restait affiché seul, orphelin, pendant une recherche.
         g.querySelectorAll(':scope .crrav-subgroup').forEach((sub) => {
@@ -10967,26 +11822,36 @@
       // plate en petits blocs thématiques (en-tête icône + libellé, liseré de couleur assorti
       // au thème). Les champs sans `sub` (aucun ici pour Découverte, mais on reste générique
       // pour les autres groupes) restent tout en haut, hors bloc.
+      // (34) Les 16 champs de scoring (marqués `tuner`) ne sont plus rendus comme une grille
+      // de curseurs plate : ils sont pilotés par le panneau interactif scoreTunerHtml (matrice
+      // de presets + jauge de difficulté + schéma glissable + détail). On les exclut donc du
+      // rendu des sous-groupes ; leurs sous-groupes de scoring (Goût/Note/Seuils), désormais
+      // vides, disparaissent d'eux-mêmes. Le tuner prend leur place, entre le Dé et les Listes.
       const subIds = [];
-      fs.forEach((f) => { if (f.sub && !subIds.includes(f.sub)) subIds.push(f.sub); });
+      fs.forEach((f) => { if (f.sub && !f.tuner && !subIds.includes(f.sub)) subIds.push(f.sub); });
+      // Le champ « afficher le détail du score » (bool) est rendu DANS le tuner (sous les
+      // curseurs) ; il garde son data-set — c'est la source unique lue par collectSettings.
+      const tunerHtml = g.key === 'discover'
+        ? scoreTunerHtml(CFG, settingsFieldHtml(SETTINGS_SCHEMA.find((f) => f.key === 'discoverShowScoreDetail')))
+        : '';
       let body;
       if (subIds.length) {
-        const noSub = fs.filter((f) => !f.sub);
-        body = (noSub.length ? `<div class="crrav-sgrid">${noSub.map(settingsFieldHtml).join('')}</div>` : '')
-          + subIds.map((subId) => {
-            const meta = SETTINGS_SUBGROUPS[subId] || { icon: '', label: subId, hue: '244,117,33' };
-            const subFs = fs.filter((f) => f.sub === subId);
-            // (32) Le schéma récapitulatif (scoreFormulaSchema) est un bandeau UNIQUE, posé
-            // juste au-dessus du premier des 3 blocs du calcul de score (Goût/Note/Seuils) —
-            // il en montre la synthèse globale, pas le contenu d'un seul bloc.
-            const schemaBanner = subId === 'discoverScoringTaste' ? scoreFormulaSchema(undefined, { live: true }) : '';
-            return `${schemaBanner}<div class="crrav-subgroup" data-sub="${subId}" style="--subhue:${meta.hue}">
+        const noSub = fs.filter((f) => !f.sub && !f.tuner);
+        const blocks = subIds.map((subId) => {
+          const meta = SETTINGS_SUBGROUPS[subId] || { icon: '', label: subId, hue: '244,117,33' };
+          const subFs = fs.filter((f) => f.sub === subId && !f.tuner);
+          return `<div class="crrav-subgroup" data-sub="${subId}" style="--subhue:${meta.hue}">
               <div class="crrav-subhead"><span class="crrav-subhead-ico">${meta.icon}</span><span class="crrav-subhead-lab">${meta.label}</span></div>
               <div class="crrav-sgrid">${subFs.map(settingsFieldHtml).join('')}</div>
             </div>`;
-          }).join('');
+        });
+        if (tunerHtml) {
+          const li = subIds.indexOf('discoverLists');
+          if (li >= 0) blocks.splice(li, 0, tunerHtml); else blocks.push(tunerHtml);
+        }
+        body = (noSub.length ? `<div class="crrav-sgrid">${noSub.map(settingsFieldHtml).join('')}</div>` : '') + blocks.join('');
       } else {
-        body = `<div class="crrav-sgrid">${fs.map(settingsFieldHtml).join('')}</div>`;
+        body = `<div class="crrav-sgrid">${fs.filter((f) => !f.tuner).map(settingsFieldHtml).join('')}</div>` + tunerHtml;
       }
       return `<details class="crrav-accordion crrav-setgroup" data-acc="${id}" ${open ? 'open' : ''}>
         <summary>
@@ -12128,25 +12993,71 @@
   }
 
   // (31) Bandeau d'activité — TOUJOURS dans .crrav-top (sticky), donc visible quel que
-  // soit l'onglet actif et la position de défilement. Regroupe les 4 sources de tâches
-  // de fond possibles : chargement générique (watchlist/listes/épisodes/découverte/
-  // orphelines/nouveautés — elles partagent `progressMsg`, préfixé « Étape n/total »
-  // quand la fonction appelante a plusieurs phases, voir stepLabel), scan de
-  // l'historique, enrichissement AniList planning+genres (séries suivies) et
-  // enrichissement genres « hors listes » (AniList + repli Crunchyroll). Avant, chacune
-  // n'était visible que noyée dans sa propre section, en bas de page — le reproche exact
-  // qui a motivé cette fonction.
+  // soit l'onglet actif et la position de défilement. Regroupe les tâches de fond
+  // possibles : chargement principal (watchlist/listes/épisodes), scan Découverte,
+  // Orphelines, Nouveautés — 4 opérations INDÉPENDANTES, chacune avec sa propre variable
+  // de message (progressMsg / progressMsgDiscover / progressMsgOrphan / progressMsgPremieres,
+  // préfixée « Étape n/total » quand la fonction appelante a plusieurs phases, voir
+  // stepLabel), plus le scan de l'historique, l'enrichissement AniList planning+genres
+  // (séries suivies) et l'enrichissement genres « hors listes » (AniList + repli
+  // Crunchyroll). Avant, chacune n'était visible que noyée dans sa propre section, en bas
+  // de page — le reproche exact qui a motivé cette fonction.
   function renderActivityBar() {
     const anyBusy = STATE.loading || STATE.discover.loading || STATE.orphan.loading || STATE.newPremieres.loading;
     if (anyBusy) { if (!activityStartedAt) activityStartedAt = Date.now(); }
-    else { activityStartedAt = null; etaSmoothing.delete('main'); }
+    else { activityStartedAt = null; }
+    // (fix) Clés d'ETA dédiées par opération (voir déclaration de progressMsgDiscover/Orphan/
+    // Premieres plus haut) : chacune purgée dès que SA propre opération s'arrête, pas quand
+    // n'importe laquelle des 4 s'arrête — sinon l'ETA d'une opération encore en cours pouvait
+    // se faire repurger par la fin d'une autre.
+    if (!STATE.loading) etaSmoothing.delete('genMain');
+    if (!STATE.discover.loading) { etaSmoothing.delete('genDiscover'); etaSmoothing.delete('discoverScan'); }
+    if (!STATE.orphan.loading) etaSmoothing.delete('genOrphan');
+    if (!STATE.newPremieres.loading) etaSmoothing.delete('genPremieres');
 
     const items = [];
+
+    // (fix) Compteur « i/total » générique reconstruit à partir d'un message texte —
+    // factorisé ici car RÉUTILISÉ pour 3 opérations indépendantes (sync principale,
+    // Orphelines, Nouveautés) qui ont chacune leur propre variable de message (voir plus
+    // haut) : avant, elles partageaient TOUTES la même variable `progressMsg`, et une seule
+    // ligne de barre — la dernière à écrire « gagnait », donnant l'impression que deux
+    // progressions sans rapport (ex. « 2/3 » d'une opération, « 4/4 » d'une autre) se
+    // remplaçaient sans arrêt à l'écran. Chaque opération produit maintenant sa PROPRE ligne
+    // (voir plus bas), avec sa propre clé d'ETA (`etaKey`) pour ne pas fausser les autres.
+    function genericProgressItem(msg, etaKey, cancellable, cancelling) {
+      if (!msg) return null;
+      // Certains messages embarquent un ou plusieurs comptes « i/total » — le préfixe
+      // « Étape n/total » qu'ajoute stepLabel EN est un lui-même, potentiellement suivi
+      // d'un compteur plus précis (ex. « Étape 4/4 · Analyse des épisodes… 8/29 »). On
+      // préfère explicitement un compteur de PAGE quand il est présent (avancement
+      // linéaire fiable) et on ne retombe sur le dernier couple générique que sinon.
+      const pageMatches = [...msg.matchAll(/page\s+(\d+)\s*\/\s*(\d+)/gi)];
+      const all = pageMatches.length ? pageMatches : [...msg.matchAll(/(\d+)\s*\/\s*(\d+)/g)];
+      const last = all[all.length - 1];
+      const done = last ? +last[1] : null, total = last ? +last[2] : null;
+      return {
+        label: '🔄 ' + msg,
+        count: total ? `${done}/${total}` : null,
+        pct: total ? Math.round((done / total) * 100) : null,
+        eta: total ? estimateEta(etaKey, done, total, activityStartedAt) : null,
+        done: false,
+        cancellable, cancelling,
+      };
+    }
+
+    // Sync principale (listes suivies).
+    if (STATE.loading) {
+      const it = genericProgressItem(progressMsg, 'genMain', false, false);
+      if (it) items.push(it);
+    }
 
     // (fix) Scan Découverte : progression STRUCTURÉE (voir loadDiscover → D.scan) plutôt que
     // re-parsée d'une longue chaîne. Le TITRE porte l'info utile — combien de pépites déjà
     // trouvées — et la sous-ligne garde l'avancement par page (barre + % + ETA). Fini le
     // « page N/M » redondant en haut ET en bas, et le compte de légendaires n'est plus rogné.
+    // Avant que le scan par page démarre (lecture du profil, de l'historique), D.scan n'existe
+    // pas encore : on retombe alors sur le message texte générique (progressMsgDiscover).
     const dscan = STATE.discover.loading ? STATE.discover.scan : null;
     if (dscan) {
       const { page, maxPages, found, target, legendary } = dscan;
@@ -12164,42 +13075,30 @@
         label: title,
         count: `page ${page}`,
         pct: target ? Math.round((nf / target) * 100) : null,
-        eta: target ? estimateEta('main', nf, target, activityStartedAt) : null,
+        eta: target ? estimateEta('discoverScan', nf, target, activityStartedAt) : null,
         done: false,
         cancellable: STATE.discover.loading,
         cancelling: STATE.discover.cancelRequested,
       });
-    } else if (anyBusy && progressMsg) {
-      // Certains messages embarquent un ou plusieurs comptes « i/total » — le préfixe
-      // « Étape n/total » qu'ajoute stepLabel EN est un lui-même, potentiellement suivi
-      // d'un compteur plus précis (ex. « Étape 4/4 · Analyse des épisodes… 8/29 »).
-      // (fix) En mode Découverte légendaire, le message porte AUSSI « page N/maxPages »
-      // ET « K/target légendaires » — avant, on prenait bêtement le DERNIER couple trouvé,
-      // qui tombait sur « K/target » (rythme de découverte de pépites, erratique : 2
-      // trouvées en 10 s ne veut pas dire 13 de plus en 50 s) au lieu de « page N/maxPages »
-      // (le vrai indicateur d'avancement, linéaire). D'où des ETA « quelques secondes »
-      // pendant que le scan tournait encore sur des dizaines de pages. On préfère donc
-      // explicitement le compteur de PAGE quand il est présent — c'est toujours lui le
-      // reflet fidèle du travail restant — et on ne retombe sur le dernier couple générique
-      // que si aucune page n'est mentionnée (cas des étapes sans scan par page, ex. « Analyse
-      // des épisodes… 8/29 »).
-      const pageMatches = [...progressMsg.matchAll(/page\s+(\d+)\s*\/\s*(\d+)/gi)];
-      const all = pageMatches.length ? pageMatches : [...progressMsg.matchAll(/(\d+)\s*\/\s*(\d+)/g)];
-      const last = all[all.length - 1];
-      const done = last ? +last[1] : null, total = last ? +last[2] : null;
-      items.push({
-        label: '🔄 ' + progressMsg,
-        count: total ? `${done}/${total}` : null,
-        pct: total ? Math.round((done / total) * 100) : null,
-        eta: total ? estimateEta('main', done, total, activityStartedAt) : null,
-        done: false,
-        // Interrompre : uniquement pour un scan Découverte (seule opération qui sait
-        // s'arrêter proprement, voir loadDiscover/D.cancelRequested). Placé ici plutôt
-        // qu'en pied de grille : ce bandeau est dans .crrav-top (sticky), donc visible
-        // sans avoir à défiler passé les squelettes de cartes pour l'atteindre.
-        cancellable: STATE.discover.loading,
-        cancelling: STATE.discover.cancelRequested,
-      });
+    } else if (STATE.discover.loading) {
+      // Interrompre : uniquement pour un scan Découverte (seule opération qui sait s'arrêter
+      // proprement, voir loadDiscover/D.cancelRequested). Placé ici plutôt qu'en pied de
+      // grille : ce bandeau est dans .crrav-top (sticky), donc visible sans avoir à défiler
+      // passé les squelettes de cartes pour l'atteindre.
+      const it = genericProgressItem(progressMsgDiscover, 'genDiscover', true, STATE.discover.cancelRequested);
+      if (it) items.push(it);
+    }
+
+    // Orphelines (Hors listes).
+    if (STATE.orphan.loading) {
+      const it = genericProgressItem(progressMsgOrphan, 'genOrphan', false, false);
+      if (it) items.push(it);
+    }
+
+    // Nouveautés (Calendrier).
+    if (STATE.newPremieres.loading) {
+      const it = genericProgressItem(progressMsgPremieres, 'genPremieres', false, false);
+      if (it) items.push(it);
     }
 
     const hp = STATE.historyProgress;
@@ -12505,42 +13404,12 @@
     // actualiser » — avant, il fallait sauvegarder pour voir l'effet d'un réglage, ce qui
     // rendait le réglage fin (« est-ce que ce seuil est trop haut ? ») laborieux. On ne
     // touche jamais CFG ici : uniquement un aperçu (voir l'override de scoreFormulaSchema).
-    const SCORE_LIVE_KEYS = ['discoverTasteWeight', 'discoverPrefGenreBonus', 'discoverWellRatedBonus',
-      'discoverSuperRatedBonus', 'discoverLegendaryScore', 'discoverNotableScore',
-      'discoverWellRatedThresholdCr', 'discoverWellRatedThresholdAni',
-      'discoverSuperRatedThresholdCr', 'discoverSuperRatedThresholdAni', 'discoverCompletionWeight'];
-    if (content.querySelector('#crrav-scoreschema-live')) {
-      const updateScoreSchemaLive = () => {
-        const override = {};
-        for (const k of SCORE_LIVE_KEYS) {
-          const el = content.querySelector(`[data-set="${k}"]`);
-          if (!el) continue;
-          let v = parseFloat(String(el.value).replace(',', '.'));
-          if (!Number.isFinite(v)) continue;   // champ vidé pendant la frappe : ignore, garde l'ancien aperçu
-          // Garde-fou : si un jour une clé live est de type « percent » (stockée en 0..1 mais
-          // saisie en %), on divise comme le fait collectSettings — sans quoi l'aperçu la lirait
-          // à ×100. Aucune clé live n'est en % aujourd'hui, mais la protection est gratuite.
-          const f = SETTINGS_SCHEMA.find((x) => x.key === k);
-          if (f && f.type === 'percent') v /= 100;
-          override[k] = v;
-        }
-        const host = content.querySelector('#crrav-scoreschema-live');
-        if (!host) return;
-        // Le détail « mon profil de goût » (tasteProfileDetailHtml) est un <details> replié
-        // par défaut à l'intérieur du schéma qu'on regénère à chaque frappe : sans ceci,
-        // ouvrir ce détail puis toucher un curseur le refermerait aussitôt.
-        const wasOpen = !!host.querySelector('.crrav-tasteprofile[open]');
-        host.outerHTML = scoreFormulaSchema(override, { live: true });
-        if (wasOpen) {
-          const det = content.querySelector('#crrav-scoreschema-live .crrav-tasteprofile');
-          if (det) det.open = true;
-        }
-      };
-      SCORE_LIVE_KEYS.forEach((k) => {
-        const el = content.querySelector(`[data-set="${k}"]`);
-        if (el) el.addEventListener('input', updateScoreSchemaLive);
-      });
-    }
+    // (34) Réglage du score : le panneau interactif s'auto-câble ici. initScoreTuner est
+    // idempotent (garde interne data-stReady) et n'écrit QUE dans les <input data-set> des
+    // curseurs de détail — jamais dans CFG — donc aucune interaction ne déclenche de re-render
+    // (le drag du schéma n'est jamais interrompu). collectSettings lit ces curseurs à l'enregistrement.
+    const scoreTunerEl = content.querySelector('.crrav-scoretuner');
+    if (scoreTunerEl) initScoreTuner(scoreTunerEl);
 
     // (31) Genres exclus : cases à cocher → met à jour l'<input caché> lu par collectSettings.
     content.querySelectorAll('.crrav-genrefield').forEach((field) => {
@@ -12623,22 +13492,22 @@
   }
 
   const refresh = () => loadAll((m) => { progressMsg = m; render(); });
-  const refreshDiscover = (opts) => loadDiscover((m) => { progressMsg = m; render(); }, opts);
+  const refreshDiscover = (opts) => loadDiscover((m) => { progressMsgDiscover = m; render(); }, opts);
   // Relance explicite : on force la fraîcheur (historique + ajouts récents en liste).
-  const relaunchDiscover = () => loadDiscover((m) => { progressMsg = m; render(); }, { force: true });
+  const relaunchDiscover = () => loadDiscover((m) => { progressMsgDiscover = m; render(); }, { force: true });
   // (fix) « 30 autres pépites » cherchait d'AUTRES séries (jamais montrées, via l'historique
   // d'exclusion) mais les ADDITIONNAIT à l'affichage précédent — au bout de deux-trois clics,
   // impossible de distinguer ce qui vient d'être trouvé de ce qui était déjà là. `more: true`
   // reste nécessaire pour piloter l'exclusion (ne jamais reproposer une pépite déjà montrée) ;
   // `freshDisplay: true` force en plus le remplacement de l'affichage, comme le 🎲 légendaire.
-  const refreshMoreDiscover = () => loadDiscover((m) => { progressMsg = m; render(); }, { more: true, force: true, freshDisplay: true });
+  const refreshMoreDiscover = () => loadDiscover((m) => { progressMsgDiscover = m; render(); }, { more: true, force: true, freshDisplay: true });
   // 🎲 Dé légendaire : premier clic = recherche fraîche de pépites légendaires uniquement,
   // scan bien plus profond. Un second clic, tant que le tirage précédent était déjà un dé
   // légendaire, en cherche d'AUTRES (même logique que « 30 autres pépites », via `more`).
-  const legendaryHuntDiscover = () => loadDiscover((m) => { progressMsg = m; render(); },
+  const legendaryHuntDiscover = () => loadDiscover((m) => { progressMsgDiscover = m; render(); },
     { legendary: true, force: true, more: STATE.discover.legendaryHunt === true });
-  const refreshOrphelines = () => loadOrphelines((m) => { progressMsg = m; render(); });
-  const refreshNewPremieres = () => loadNewPremieres((m) => { progressMsg = m; render(); });
+  const refreshOrphelines = () => loadOrphelines((m) => { progressMsgOrphan = m; render(); });
+  const refreshNewPremieres = () => loadNewPremieres((m) => { progressMsgPremieres = m; render(); });
   // Préchargement à l'INACTIVITÉ : prépare « Hors listes » pendant que tu lis, pour que
   // l'onglet s'ouvre instantanément. Volontairement limité à cet onglet : Découverte
   // lance une recherche coûteuse (des dizaines de requêtes) qu'il serait absurde de
@@ -13079,7 +13948,7 @@
           } else if (impact === 'discover') {
             STATE.discover.series = [];
             showToast('✓ Réglage enregistré — nouvelle recherche de pépites…');
-            progressMsg = 'Nouvelle recherche de pépites…';
+            progressMsgDiscover = 'Nouvelle recherche de pépites…';
             forceRender();
             if (STATE.tab === 'decouverte') refreshDiscover();
           } else if (impact === 'newpremieres') {
