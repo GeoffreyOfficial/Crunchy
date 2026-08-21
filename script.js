@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.12.0';
+  const SCRIPT_VERSION = '3.13.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -2718,7 +2718,6 @@
     STATE.tab = 'decouverte';
     STATE.filters.globalQ = '';
     STATE.filters.discoverQ = '';
-    STATE.filters.showIgnoredDiscover = false;
     STATE.filters.discoverCatsEx = [];
     // (fix) Genres de la série source comme pré-filtre SOUPLE (OU : au moins un genre en
     // commun) — le mode 'all' (ET strict) exigeait que TOUS les genres de la source se
@@ -4133,10 +4132,14 @@
   const DEFAULT_FILTERS = {
     q: '', status: 'all', sort: 'remaining', hideAiringSeason: false,
     // Regroupement de « Reste à voir » par progression (sections En cours / Pas commencé /
-    // Terminé). suiviGroupOrder = groupes AFFICHÉS, dans l'ordre (retirer une clé masque la
-    // section). suiviGroupBy = interrupteur global du regroupement.
+    // Terminé). suiviGroupOrder = ordre COMPLET des 3 sections (toujours les 3 clés).
+    // suiviGroupHidden = sections actuellement masquées, sans influence sur l'ordre : les
+    // décocher/recocher ne change pas leur place. suiviGroupCollapsed = sections visibles
+    // mais repliées (grille de cartes cachée). suiviGroupBy = interrupteur global.
     suiviGroupBy: true,
     suiviGroupOrder: ['started', 'notstarted', 'done'],
+    suiviGroupHidden: [],
+    suiviGroupCollapsed: [],
     // Scopes dont la liste de genres (puces garder/exclure) est DÉPLIÉE. Vide = tout replié
     // par défaut (la liste peut être longue).
     genresOpen: [],
@@ -4146,7 +4149,6 @@
     view: 'grid',              // 'grid' | 'list'
     headerCollapsed: false,    // replie manuellement bannière + stats + contrôles, sur les 3 onglets
     showIgnored: false,        // affiche UNIQUEMENT les séries ignorées (watchlist), pour les restaurer
-    showIgnoredDiscover: false, // idem, mais pour les pépites ignorées depuis Découverte
     discoverCatsIn: [],        // genres à garder exclusivement (vide = tous)
     discoverCatsInMode: 'any', // 'any' (filtre manuel, OR) ou 'all' (baguette magique, AND strict)
     discoverCatsEx: [],        // genres à exclure, en plus de CFG.discoverExcludeCategories
@@ -4175,18 +4177,34 @@
     // Les statuts « À finir » et « À jour » ont été retirés du filtre (remplacés par le
     // regroupement par progression) : on rebascule une préférence mémorisée sur « Tout ».
     if (saved.status === 'todo' || saved.status === 'uptodate') saved.status = 'all';
-    // Ordre des sections : on ne garde que des clés valides ; vide/absent → défaut.
+    // Ordre des sections : avant cette version, suiviGroupOrder représentait à la fois
+    // l'ordre ET la visibilité (une clé absente = section masquée). Depuis, l'ordre est
+    // toujours complet (3 clés) et la visibilité vit séparément dans suiviGroupHidden —
+    // pour qu'un décochage ne déplace plus rien. Migration : les clés manquantes de
+    // l'ancien tableau deviennent les sections masquées, et l'ordre est complété avec
+    // elles à la fin (ordre par défaut) pour ne perdre aucune section.
     if ('suiviGroupOrder' in saved) {
       const ok = ['started', 'notstarted', 'done'];
-      saved.suiviGroupOrder = Array.isArray(saved.suiviGroupOrder)
-        ? saved.suiviGroupOrder.filter((k) => ok.includes(k)) : null;
-      if (!saved.suiviGroupOrder || !saved.suiviGroupOrder.length) delete saved.suiviGroupOrder;
+      const kept = Array.isArray(saved.suiviGroupOrder)
+        ? saved.suiviGroupOrder.filter((k) => ok.includes(k)) : [];
+      const missing = ok.filter((k) => !kept.includes(k));
+      saved.suiviGroupOrder = [...kept, ...missing];
+      if (missing.length && !Array.isArray(saved.suiviGroupHidden)) {
+        saved.suiviGroupHidden = missing;
+      }
+    }
+    if (Array.isArray(saved.suiviGroupHidden)) {
+      const ok = ['started', 'notstarted', 'done'];
+      saved.suiviGroupHidden = saved.suiviGroupHidden.filter((k) => ok.includes(k));
     }
     // Migration : avant la 2.8.1, les puces n'excluaient que.
     if (Array.isArray(saved.discoverCats) && !saved.discoverCatsEx) {
       saved.discoverCatsEx = saved.discoverCats;
     }
     delete saved.discoverCats;
+    // Filtre « Ignorées » de Découverte retiré (la restauration se fait désormais
+    // uniquement depuis le sous-onglet Réglages › Ignorées) : purger un éventuel reliquat.
+    delete saved.showIgnoredDiscover;
     // la recherche ne se mémorise pour aucun des onglets
     return { ...DEFAULT_FILTERS, ...saved, q: '', discoverQ: '', orphanQ: '', globalQ: '' };
   }
@@ -6558,7 +6576,7 @@
   }
 
   function visibleSeries() {
-    const { q, status, sort, hideAiringSeason, showIgnored } = STATE.filters;
+    const { q, status, sort, hideAiringSeason, showIgnored, suiviGroupBy } = STATE.filters;
     let list = STATE.series.filter((s) => s.total > 0);
 
     // Vue « Ignorées » : uniquement celles-là, pour pouvoir les restaurer.
@@ -6569,11 +6587,15 @@
     // Masque les séries dont TA saison sort encore chaque semaine.
     if (hideAiringSeason) list = list.filter((s) => !s.nextSeasonAiring);
 
-    if (status === 'todo') list = list.filter((s) => s.remaining > 0);
-    else if (status === 'started') list = list.filter((s) => s.seen > 0 && s.remaining > 0);
-    else if (status === 'notstarted') list = list.filter((s) => s.seen === 0);
-    else if (status === 'uptodate') list = list.filter((s) => s.remaining === 0 && s.airing);   // (10)
-    else if (status === 'done') list = list.filter((s) => s.remaining === 0 && !s.airing);
+    // Le regroupement par progression fait déjà cette partition en sections (voir
+    // groupingControls) : le filtre de statut, masqué dans ce mode (voir statusChips),
+    // ne doit pas non plus continuer à agir en sourdine sur la liste sous-jacente.
+    const effectiveStatus = suiviGroupBy ? 'all' : status;
+    if (effectiveStatus === 'todo') list = list.filter((s) => s.remaining > 0);
+    else if (effectiveStatus === 'started') list = list.filter((s) => s.seen > 0 && s.remaining > 0);
+    else if (effectiveStatus === 'notstarted') list = list.filter((s) => s.seen === 0);
+    else if (effectiveStatus === 'uptodate') list = list.filter((s) => s.remaining === 0 && s.airing);   // (10)
+    else if (effectiveStatus === 'done') list = list.filter((s) => s.remaining === 0 && !s.airing);
 
     list = applyCommonFilters(list, STATE.filters, STATE.filters.catsIn, STATE.filters.catsEx);
 
@@ -6690,18 +6712,7 @@
   }
 
   function visibleDiscover() {
-    const { discoverQ, discoverSort, discoverCatsIn, discoverCatsInMode, discoverCatsEx, showIgnoredDiscover } = STATE.filters;
-
-    // Vue « Ignorées » de Découverte : ces séries sont exclues des résultats de
-    // recherche eux-mêmes (l'API ne les renvoie plus), donc impossible de les
-    // retrouver dans STATE.discover.series. On reconstruit la liste depuis ce
-    // qui a été mémorisé au moment de l'ignore (id + titre).
-    if (showIgnoredDiscover) {
-      return [...IGNORED.entries()]
-        .filter(([, v]) => v.source === 'discover')
-        .map(([id, v]) => ({ id, title: v.title || id, poster: v.poster || '', synopsis: v.synopsis || '' }))
-        .sort((a, b) => a.title.localeCompare(b.title, 'fr'));
-    }
+    const { discoverQ, discoverSort, discoverCatsIn, discoverCatsInMode, discoverCatsEx } = STATE.filters;
 
     let list = STATE.discover.series;
 
@@ -7290,25 +7301,6 @@
         ${resumeLink(s, 'crrav-lresume')}
         ${similarBtn(s)}
         ${ignoreBtn(s, source)}
-      </div>
-    </article>`;
-  }
-
-  function discoverIgnoredCard(s) {
-    const seriesUrl = crSeriesUrl(s.id);
-    // Jaquette + résumé mémorisés au moment de l'ignore (voir ignoreBtn) : la série est
-    // exclue des résultats de l'API, impossible de les redemander pour cette vue.
-    return `<article class="crrav-card crrav-card-ignored">
-      <div class="crrav-thumb">
-        <a class="crrav-cover" href="${seriesUrl}">
-          ${s.poster ? `<img loading="lazy" crossorigin="anonymous" src="${s.poster}" alt="" onerror="this.removeAttribute(&quot;crossorigin&quot;);this.src=this.src">` : ''}
-        </a>
-        ${ignoreBtn(s, 'discover')}
-        ${synopsisBlock(s)}
-      </div>
-      <div class="crrav-body">
-        <a class="crrav-title" href="${seriesUrl}">${escapeHtml(s.title)}</a>
-        <div class="crrav-meta"><span>Ignorée depuis Découverte</span></div>
       </div>
     </article>`;
   }
@@ -7970,25 +7962,6 @@
     </article>`;
   }
 
-  function discoverIgnoredListRow(s) {
-    const seriesUrl = crSeriesUrl(s.id);
-    return `<article class="crrav-lrow crrav-lrow-discover crrav-lrow-ignored">
-      <a class="crrav-lthumb" href="${seriesUrl}">
-        ${s.poster ? `<img loading="lazy" crossorigin="anonymous" src="${s.poster}" alt="" onerror="this.removeAttribute(&quot;crossorigin&quot;);this.src=this.src">` : ''}
-      </a>
-      <div class="crrav-lmain">
-        <div class="crrav-lhead">
-          <a class="crrav-ltitle" href="${seriesUrl}">${escapeHtml(s.title)}</a>
-          ${s.synopsis ? `<button class="crrav-info" aria-expanded="false" aria-label="Lire le synopsis en entier">i</button>
-             <div class="crrav-syn"><p>${escapeHtml(s.synopsis)}</p></div>` : ''}
-        </div>
-        <div class="crrav-meta"><span>Ignorée depuis Découverte</span></div>
-        ${s.synopsis ? `<p class="crrav-lsyn-preview">${escapeHtml(s.synopsis)}</p>` : ''}
-      </div>
-      <div class="crrav-lactions">${ignoreBtn(s, 'discover')}</div>
-    </article>`;
-  }
-
   function newPremiereCard(s) {
     // Fiche CR trouvée automatiquement (voir resolveCrunchyrollForPremiere), à deux niveaux
     // de confiance : « confirmed » (lien fiable, pas de réserve) ou « probable » (titre
@@ -8307,9 +8280,13 @@
     text-transform:uppercase;letter-spacing:.06em}
   /* Sections « Reste à voir » regroupées par progression. */
   .crrav-group{margin:0 0 20px}
-  .crrav-group-h{display:flex;align-items:center;gap:9px;margin:0 0 11px;padding:0 2px;
-    font:800 15px/1.2 system-ui;color:#e8e8ee}
-  .crrav-group-h::before{content:"";width:4px;height:16px;border-radius:2px;background:#f47521}
+  .crrav-group-h{display:flex;align-items:center;gap:9px;margin:0 0 11px;padding:6px 2px;
+    font:800 15px/1.2 system-ui;color:#e8e8ee;background:none;border:0;width:100%;
+    text-align:left;cursor:pointer;border-radius:8px}
+  .crrav-group-h:hover{background:rgba(255,255,255,.05)}
+  .crrav-group-h:focus-visible{outline:2px solid #fff;outline-offset:2px}
+  .crrav-group-h::before{content:"";width:4px;height:16px;border-radius:2px;background:#f47521;flex:0 0 auto}
+  .crrav-group-collapsed .crrav-group-h{margin-bottom:0}
   .crrav-group-n{font:700 11px/1 system-ui;color:#b9b9c2;background:rgba(255,255,255,.07);
     border:1px solid rgba(255,255,255,.09);border-radius:999px;padding:3px 8px}
   /* Config des sections (choix + ordre). */
@@ -11230,25 +11207,42 @@
     done:       { label: 'Terminé',      test: (s) => s.remaining === 0 },
   };
   const SUIVI_GROUPS_ALL = ['started', 'notstarted', 'done'];
-  // Ordre effectif des sections affichées (clés valides only). Tableau vide = pas de section
-  // (repli sur la liste à plat). Champ absent = ordre par défaut.
+  // Ordre COMPLET des sections (toujours les 3 clés, quelle que soit leur visibilité).
+  // Masquer une section (voir suiviGroupHidden) ne retire RIEN de cet ordre : sa place est
+  // préservée pour qu'elle réapparaisse au même endroit une fois réaffichée, plutôt que
+  // d'être renvoyée en bout de liste. Seul le bouton « ↑ » (monter) modifie cet ordre.
   function suiviGroupOrder(f) {
-    return Array.isArray(f.suiviGroupOrder)
-      ? f.suiviGroupOrder.filter((k) => SUIVI_GROUPS[k])
-      : SUIVI_GROUPS_ALL.slice();
+    const saved = Array.isArray(f.suiviGroupOrder) ? f.suiviGroupOrder.filter((k) => SUIVI_GROUPS[k]) : [];
+    const missing = SUIVI_GROUPS_ALL.filter((k) => !saved.includes(k));
+    return [...saved, ...missing];
+  }
+  // Sections actuellement masquées (cochées « off » dans les contrôles) — indépendant de
+  // l'ordre : décocher une section ne fait que l'ajouter ici, sans toucher suiviGroupOrder.
+  function suiviGroupHidden(f) {
+    return Array.isArray(f.suiviGroupHidden) ? f.suiviGroupHidden.filter((k) => SUIVI_GROUPS[k]) : [];
+  }
+  // Sections à afficher, dans l'ordre — ce que renderSuivi utilise réellement pour générer
+  // les <section>.
+  function suiviVisibleGroupOrder(f) {
+    const hidden = suiviGroupHidden(f);
+    return suiviGroupOrder(f).filter((k) => !hidden.includes(k));
+  }
+  // Sections actuellement repliées (visibles mais dont la grille de cartes est cachée).
+  function suiviGroupCollapsed(f) {
+    return Array.isArray(f.suiviGroupCollapsed) ? f.suiviGroupCollapsed.filter((k) => SUIVI_GROUPS[k]) : [];
   }
   // Contrôles : interrupteur du regroupement + choix des sections affichées et de leur ordre.
   function groupingControls(f) {
     const order = suiviGroupOrder(f);
-    const ordered = [...order, ...SUIVI_GROUPS_ALL.filter((k) => !order.includes(k))];
+    const hidden = suiviGroupHidden(f);
     const cfg = f.suiviGroupBy ? `<div class="crrav-chips crrav-groupcfg">
         <span class="crrav-catlegend">Sections — clic&nbsp;: afficher/masquer · ↑&nbsp;: monter</span>
-        ${ordered.map((k) => {
-          const pos = order.indexOf(k), on = pos >= 0;
+        ${order.map((k, pos) => {
+          const on = !hidden.includes(k);
           return `<span class="crrav-groupchip${on ? ' on' : ''}">${
-            on && pos > 0 ? `<button class="crrav-groupup" data-act="group-up" data-g="${k}" title="Monter cette section">↑</button>` : ''
+            pos > 0 ? `<button class="crrav-groupup" data-act="group-up" data-g="${k}" title="Monter cette section">↑</button>` : ''
           }<button class="crrav-chip crrav-chip-toggle" data-act="group-toggle" data-g="${k}" aria-pressed="${on}"
-            >${on ? `${pos + 1}. ` : ''}${SUIVI_GROUPS[k].label}</button></span>`;
+            >${pos + 1}. ${SUIVI_GROUPS[k].label}</button></span>`;
         }).join('')}
       </div>` : '';
     return `<div class="crrav-chipgroup crrav-chipgroup-toggle">
@@ -11272,7 +11266,11 @@
     // deux groupes visuellement distincts (voir .crrav-chips-status / .crrav-chips-toggle
     // et leur classe commune .crrav-chipgroup) ; data-status / data-toggle et la logique
     // de filtrage existante ne changent pas.
-    const statusChips = [
+    // Quand le regroupement par progression est actif, ces mêmes 3 statuts sont déjà
+    // matérialisés par les sections (En cours / Pas commencé / Terminé) juste en dessous :
+    // le filtre exclusif ferait doublon (et masquerait carrément une section si on
+    // cliquait dessus par réflexe). On ne le montre que hors regroupement.
+    const statusChips = f.suiviGroupBy ? '' : [
       ['started', 'En cours'],
       ['notstarted', 'Pas commencées'],
       ['done', 'Terminées'],
@@ -11303,16 +11301,21 @@
     } else if (!list.length) {
       body = `<div class="crrav-msg"><h3>Rien à afficher</h3>
         <p>Aucune série ne correspond à ce filtre.</p></div>`;
-    } else if (f.suiviGroupBy && suiviGroupOrder(f).length) {
+    } else if (f.suiviGroupBy && suiviVisibleGroupOrder(f).length) {
       // Sections par progression, dans l'ordre choisi ; une section vide est masquée.
+      // Chaque section peut être repliée indépendamment (clic sur son en-tête) — son
+      // compteur reste visible replié, seule la grille de cartes est cachée.
       const gridCls = STATE.filters.view === 'list' ? ' crrav-list' : '';
-      const secs = suiviGroupOrder(f).map((k) => {
+      const collapsed = suiviGroupCollapsed(f);
+      const secs = suiviVisibleGroupOrder(f).map((k) => {
         const g = SUIVI_GROUPS[k];
         const items = list.filter(g.test);
         if (!items.length) return '';
-        return `<section class="crrav-group">
-          <h3 class="crrav-group-h">${g.label}<span class="crrav-group-n">${items.length}</span></h3>
-          <div class="crrav-grid${gridCls}">${items.map((s, i) => card(s, i, 'watchlist')).join('')}</div>
+        const isCollapsed = collapsed.includes(k);
+        return `<section class="crrav-group${isCollapsed ? ' crrav-group-collapsed' : ''}">
+          <button type="button" class="crrav-group-h" data-act="group-collapse" data-g="${k}"
+            aria-expanded="${!isCollapsed}">${isCollapsed ? '▸' : '▾'} ${g.label}<span class="crrav-group-n">${items.length}</span></button>
+          ${isCollapsed ? '' : `<div class="crrav-grid${gridCls}">${items.map((s, i) => card(s, i, 'watchlist')).join('')}</div>`}
         </section>`;
       }).join('');
       body = secs || `<div class="crrav-msg"><h3>Rien à afficher</h3>
@@ -11358,9 +11361,9 @@
               <option value="titleDesc"${f.sort === 'titleDesc' ? ' selected' : ''}>Titre Z→A</option>
             </optgroup>
           </select>
-          <div class="crrav-chipgroup crrav-chipgroup-status">
+          ${statusChips ? `<div class="crrav-chipgroup crrav-chipgroup-status">
             <div class="crrav-chips crrav-chips-status">${statusChips}</div>
-          </div>
+          </div>` : ''}
           ${groupingControls(f)}
           <div class="crrav-chipgroup crrav-chipgroup-toggle">
             <div class="crrav-chips crrav-chips-toggle">${toggleChips}</div>
@@ -11401,21 +11404,17 @@
         <button data-act="retry">Réessayer</button></div>`;
     } else if (!list.length) {
       body = `<div class="crrav-msg"><h3>Rien à afficher</h3>
-        <p>${f.showIgnoredDiscover
-          ? 'Aucune pépite ignorée ici pour le moment.'
-          : D.series.length
+        <p>${D.series.length
           ? 'Aucune pépite ne correspond à cette recherche.'
           : "Aucune pépite trouvée pour l'instant. Réessaie plus tard, le classement popularité bouge."}</p></div>`;
     } else {
       const useList = f.view === 'list';
-      const cardFn = useList
-        ? (f.showIgnoredDiscover ? discoverIgnoredListRow : (x) => discoverListRow(x, profile))
-        : (f.showIgnoredDiscover ? discoverIgnoredCard : (x) => discoverCard(x, profile));
+      const cardFn = useList ? (x) => discoverListRow(x, profile) : (x) => discoverCard(x, profile);
       // (streaming) Pendant que le scan continue, on montre déjà les pépites trouvées et on
       // ajoute quelques squelettes en fin de grille pour signaler que d'autres arrivent —
       // surtout utile en 🎲 légendaire, où elles tombent au compte-gouttes. La barre
       // d'activité (en haut) porte la progression détaillée et le bouton Interrompre.
-      const tail = D.loading && !f.showIgnoredDiscover && !useList
+      const tail = D.loading && !useList
         ? Array.from({ length: 4 }, () => '<div class="crrav-skel"><div></div></div>').join('')
         : '';
       body = `<div class="crrav-grid${useList ? ' crrav-list' : ''}">${list.map(cardFn).join('')}${tail}</div>`;
@@ -11438,7 +11437,7 @@
             : `🪄 Genres de « <b>${escapeHtml(sim.title)}</b> » introuvables — séries populaires que tu n'as pas vues`}</span>
           <button class="crrav-simbar-x" data-act="clear-similar" title="Réinitialiser la découverte" aria-label="Réinitialiser">✕</button>
         </div>` : ''}
-        ${list.length && !f.showIgnoredDiscover ? `
+        ${list.length ? `
         <div class="crrav-siglegend-wrap">
           <button type="button" class="crrav-siglegend-toggle" data-act="toggle-siglegend" aria-expanded="${siglegendExpanded}">
             <span>Repères des cartes</span><span class="crrav-siglegend-chev">▾</span>
@@ -11470,12 +11469,7 @@
             <option value="title"${f.discoverSort === 'title' ? ' selected' : ''}>Titre A→Z</option>
             <option value="titleDesc"${f.discoverSort === 'titleDesc' ? ' selected' : ''}>Titre Z→A</option>
           </select>
-          <div class="crrav-chips">
-            <button class="crrav-chip" data-toggle="showIgnoredDiscover" aria-pressed="${f.showIgnoredDiscover}"
-              title="Affiche uniquement les pépites que tu as ignorées ici, pour les restaurer"
-              >Ignorées${ignoredCount('discover') ? ` (${ignoredCount('discover')})` : ''}</button>
-          </div>
-          ${cats.length && !f.showIgnoredDiscover ? (() => {
+          ${cats.length ? (() => {
             const dOpen = (f.genresOpen || []).includes('discover');
             const dN = f.discoverCatsIn.length + f.discoverCatsEx.length;
             const dHead = `<button type="button" class="crrav-chip crrav-genretoggle" data-act="toggle-genres" data-gscope="discover" aria-expanded="${dOpen}"
@@ -11503,13 +11497,13 @@
         </div>
       </div>
       ${body}
-      ${!D.loading && list.length && !f.showIgnoredDiscover
+      ${!D.loading && list.length
         ? `<div class="crrav-ignoreall-bottom">
              <button class="crrav-sync crrav-ignoreall" data-act="ignore-all-discover"
                title="Ignorer toutes les pépites actuellement affichées — elles ne seront plus jamais proposées">🙈 Tout ignorer (${list.length})</button>
            </div>`
         : ''}
-      ${!D.loading && D.shortfallDetail && !f.showIgnoredDiscover ? D.shortfallDetail : ''}
+      ${!D.loading && D.shortfallDetail ? D.shortfallDetail : ''}
       <div class="crrav-foot">${D.lastSync
         ? `Synchronisé à ${D.lastSync.toLocaleTimeString('fr-FR')}`
         : ''}</div>`;
@@ -13414,9 +13408,9 @@
       <div class="crrav-ignlist">${rowsHtml}</div>
       <p style="color:#8a8a94;font:400 10.5px/1.4 system-ui;margin:10px 0 0">
         Une fois ignorée, une série est masquée partout (Reste à voir, Hors listes et
-        Découverte). Chaque onglet a son propre chip « Ignorées » pour restaurer ;
-        cette liste rassemble tout, y compris pour un reset global. Le bouton pour
-        réafficher est en bas de l'écran.
+        Découverte). Cette liste rassemble toutes les séries ignorées, quel que soit
+        l'onglet d'origine, pour les restaurer d'ici. Le bouton pour réafficher est en
+        bas de l'écran.
       </p>
     </div>`;
   }
@@ -14029,7 +14023,7 @@
     // (repliables), mais toujours visible en haut sur Découverte — sans avoir à déplier
     // les filtres pour la trouver. Mêmes conditions que ce bouton-là (voir renderDecouverte).
     const moreDiscoverBtn = STATE.tab === 'decouverte' && !STATE.discover.loading
-      && STATE.discover.series.length && !STATE.filters.showIgnoredDiscover
+      && STATE.discover.series.length
       ? `<button class="crrav-sync crrav-icobtn" data-act="more-discover"
           title="Charger 30 autres pépites">🎲<span class="crrav-btn-label">Autres pépites</span></button>`
       : '';
@@ -14038,7 +14032,6 @@
     // légendaires uniquement) — ne pas réutiliser cette icône ailleurs, elle porte un sens
     // précis pour l'utilisateur une fois qu'il l'a repérée dans le bouton complet de l'onglet.
     const legendaryDiscoverBtn = STATE.tab === 'decouverte' && !STATE.discover.loading
-      && !STATE.filters.showIgnoredDiscover
       ? `<button class="crrav-sync crrav-icobtn crrav-legendary-btn" data-act="legendary-discover"
           title="Dé légendaire : scan profond pour dénicher des pépites légendaires"><span class="crrav-dice-gold">🎲</span><span class="crrav-btn-label">${
           STATE.discover.legendaryHunt ? 'Encore des légendaires' : 'Dé légendaire'}</span></button>`
@@ -14582,7 +14575,7 @@
           STATE.settingsOpen ? forceRender() : render();
           // (30) même logique qu'à l'ouverture de Réglages : la vue « Ignorées » de
           // Découverte est le seul endroit où le poster ne peut PAS venir de STATE.
-          if ((k === 'showIgnored' || k === 'showIgnoredDiscover') && STATE.filters[k]) backfillIgnoredMeta();
+          if (k === 'showIgnored' && STATE.filters[k]) backfillIgnoredMeta();
           return;
         }
         const chip = e.target.closest('.crrav-chip');
@@ -14647,10 +14640,13 @@
           saveFilters(); render(); return;
         }
         if (act.dataset.act === 'group-toggle') {
-          const o = suiviGroupOrder(STATE.filters).slice();
-          const gi = o.indexOf(act.dataset.g);
-          if (gi >= 0) o.splice(gi, 1); else o.push(act.dataset.g);
-          STATE.filters.suiviGroupOrder = o;
+          // (masquer/réafficher SANS toucher à l'ordre — voir suiviGroupOrder/suiviGroupHidden :
+          // décocher une section ne fait que l'ajouter ici, elle retrouve sa place au reclic).
+          const hidden = suiviGroupHidden(STATE.filters).slice();
+          const gi = hidden.indexOf(act.dataset.g);
+          if (gi >= 0) hidden.splice(gi, 1); else hidden.push(act.dataset.g);
+          STATE.filters.suiviGroupOrder = suiviGroupOrder(STATE.filters);   // fige l'ordre complet
+          STATE.filters.suiviGroupHidden = hidden;
           saveFilters(); render(); return;
         }
         if (act.dataset.act === 'group-up') {
@@ -14658,6 +14654,13 @@
           const gi = o.indexOf(act.dataset.g);
           if (gi > 0) { [o[gi - 1], o[gi]] = [o[gi], o[gi - 1]]; STATE.filters.suiviGroupOrder = o; saveFilters(); render(); }
           return;
+        }
+        if (act.dataset.act === 'group-collapse') {
+          const collapsed = suiviGroupCollapsed(STATE.filters).slice();
+          const gi = collapsed.indexOf(act.dataset.g);
+          if (gi >= 0) collapsed.splice(gi, 1); else collapsed.push(act.dataset.g);
+          STATE.filters.suiviGroupCollapsed = collapsed;
+          saveFilters(); render(); return;
         }
         if (act.dataset.act === 'ignore-all-discover') {
           const toIgnore = visibleDiscover();   // exactement la « page actuelle » affichée
