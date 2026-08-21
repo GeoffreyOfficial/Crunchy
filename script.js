@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.15.0';
+  const SCRIPT_VERSION = '3.17.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -4157,7 +4157,6 @@
     orphanCatsIn: [], orphanCatsEx: [],
     // Filtres par genre sur le bloc Nouveautés du Calendrier (mêmes puces à 3 états).
     newPremCatsIn: [], newPremCatsEx: [],
-    onlyAiring: false,         // uniquement les séries encore en diffusion
     onlyRated: false,          // uniquement celles que tu as notées 4★ ou plus
     onlyFavorite: false,       // uniquement tes favoris (notées 5★ par TOI)
     onlyShort: false,          // séries courtes : 12 épisodes ou moins au total
@@ -4204,6 +4203,18 @@
     if ('dismissedHints' in saved && !Array.isArray(saved.dismissedHints)) {
       delete saved.dismissedHints;
     }
+    // (fix) « Masquer saison en cours » était resté coché chez certains alors que la
+    // puce pour le décocher avait disparu de l'interface entre-temps (régression) : des
+    // séries commencées disparaissaient de Reste à voir sans aucun moyen de les
+    // rafficher. La puce est de retour (voir quickChips) — on force le déverrouillage
+    // une seule fois pour réafficher tout de suite ce qui était resté coincé masqué ;
+    // libre à qui le souhaite vraiment de recocher.
+    if (saved.hideAiringSeason === true) saved.hideAiringSeason = false;
+    // Filtre « En diffusion » retiré (redondant avec « Masquer saison en cours » et
+    // les badges déjà affichés sur les cartes) : purge un éventuel reliquat pour ne pas
+    // laisser une valeur morte trainer dans les réglages sauvegardés. Ne touche à aucune
+    // série ni à aucune donnée regardée/notée — seul le filtre d'affichage disparaît.
+    delete saved.onlyAiring;
     // Migration : avant la 2.8.1, les puces n'excluaient que.
     if (Array.isArray(saved.discoverCats) && !saved.discoverCatsEx) {
       saved.discoverCatsEx = saved.discoverCats;
@@ -6640,7 +6651,6 @@
 
   // Filtres rapides communs à Reste à voir et Hors listes (données déjà en mémoire).
   function applyCommonFilters(list, f, catsIn, catsEx) {
-    if (f.onlyAiring) list = list.filter((s) => s.airing);
     if (f.onlyRated) list = list.filter((s) => (s.rating ?? 0) >= 4);
     if (f.onlyFavorite) list = list.filter((s) => s.favorite);
     if (f.onlyShort) list = list.filter((s) => s.total > 0 && s.total <= 12);
@@ -6700,9 +6710,9 @@
 
   function quickChips(f) {
     return [
-      ['onlyAiring', 'En diffusion', 'Uniquement les séries dont un épisode sort encore'],
       ['onlyFavorite', '★ Favoris', 'Uniquement tes favoris — celles que TU as notées 5 étoiles'],
       ['quickFinish', 'Finissable (≤3 ép.)', 'Il te reste 3 épisodes ou moins'],
+      ['hideAiringSeason', 'Masquer saison en cours', "Cache les séries dont TA saison (celle où tu en es) sort encore chaque semaine"],
     ].map(([k, label, title]) =>
       // (37) crrav-chip-toggle : voir renderSuivi, distingue visuellement les toggles
       // indépendants des chips de statut (filtre exclusif).
