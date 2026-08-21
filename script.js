@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.36.0
+// @version      3.38.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.36.0';
+  const SCRIPT_VERSION = '3.38.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -5604,12 +5604,16 @@
       if (knownPool.length && !D.similarTo) {
         for (const c of knownPool) {
           if (!c || !c.id || excluded.has(c.id) || seenCandidate.has(c.id)) continue;
-          const cTitleNorm = aniNorm(c.title);
-          if (cTitleNorm && seenTitlesNorm.has(cTitleNorm)) { REJ.duplicate++; continue; }
           seenCandidate.add(c.id);
-          if (cTitleNorm) seenTitlesNorm.add(cTitleNorm);
           if (c.seasons != null && c.seasons > CFG.discoverMaxSeasons) continue;
           if (categoriesRejectedByGenre(c.categories, null, null, STATE.filters.discoverCatsInMode === 'all')) continue;
+          // (fix doublon titre) Vérifié seulement ICI, juste avant l'entrée réelle dans
+          // matches — jamais plus tôt : marquer un titre « vu » pour une candidate qui va
+          // de toute façon être rejetée par saisons/genre bloquerait à tort une AUTRE
+          // candidate légitime partageant un titre proche plus tard dans le scan.
+          const cTitleNorm = aniNorm(c.title);
+          if (cTitleNorm && seenTitlesNorm.has(cTitleNorm)) { REJ.duplicate++; continue; }
+          if (cTitleNorm) seenTitlesNorm.add(cTitleNorm);
           matches.push(c);
         }
         // Affichage immédiat de ce premier lot gratuit, avant même la première page CR/AniList
@@ -5743,10 +5747,6 @@
               if (p && p.id && excluded.has(p.id)) REJ[classifyKnownReason(p.id)]++;
               return false;
             }
-            // (fix doublon titre) Même contenu, fiche CR différente déjà retenue plus tôt
-            // dans CE scan (voir seenTitlesNorm ci-dessus) : id neuf, mais titre déjà affiché.
-            const pTitleNorm = aniNorm(p.title);
-            if (pTitleNorm && seenTitlesNorm.has(pTitleNorm)) { REJ.duplicate++; return false; }
             candidatesSeenTotal++;
             // Pré-filtre de genre AVANT toute requête, MAIS seulement si le panel browse
             // porte les genres (souvent non). Le vrai filtre se fait plus bas, une fois le
@@ -5775,11 +5775,7 @@
             }
             return true;
           });
-        candidates.forEach((p) => {
-          seenCandidate.add(p.id);
-          const pTitleNorm = aniNorm(p.title);
-          if (pTitleNorm) seenTitlesNorm.add(pTitleNorm);
-        });
+        candidates.forEach((p) => seenCandidate.add(p.id));
         if (!candidates.length) continue;
 
         // Par petits paquets, pour s'arrêter dès que le quota est atteint au lieu
@@ -5935,7 +5931,19 @@
             // quota — l'affichage, lui, recalcule son propre badge légendaire/notable à partir
             // du score (voir discoverCard/discoverListRow), donc rien à changer côté rendu.
             legendary: legendary ? !!x.__legendary : undefined,
-          }));
+          })).filter((r) => {
+            // (fix doublon titre) Vérifié seulement ICI, sur les candidates VRAIMENT
+            // retenues (toutes les autres étapes — note, saisons, genre, score légendaire —
+            // ont déjà tranché) : même contenu, fiche CR différente déjà affichée plus tôt
+            // dans ce scan (ex. spécial catalogué deux fois côté Crunchyroll). Vérifier plus
+            // tôt (avant de savoir si la candidate allait seulement être ACCEPTÉE) bloquait à
+            // tort une candidate totalement différente partageant un titre proche, plus tard
+            // dans le scan — la cause du « Découverte ne montre plus rien ».
+            const t = aniNorm(r.title);
+            if (t && seenTitlesNorm.has(t)) { REJ.duplicate++; return false; }
+            if (t) seenTitlesNorm.add(t);
+            return true;
+          });
           results.push(...finalResults);
           D.scan = { page: page + 1, maxPages, found: legendary ? (legTotal(matches) + legTotal(results)) : (matches.length + results.length), target, legendary };
           onProgress(stepLabel(3, 3, `page ${page + 1}`));
@@ -6629,14 +6637,7 @@
       // maintenant la raison PRÉCISE plutôt qu'un seul compteur « known » fourre-tout.
       if (exclude.has(cr.id)) { REJ[classifyKnownReason(cr.id)]++; return; }
       if (seenCandidate.has(cr.id)) { REJ.duplicate++; return; }
-      // (fix doublon titre) Résolution AniList → CR pouvant retomber sur une fiche CR
-      // DIFFÉRENTE (id neuf) du même contenu déjà retenu via le classement popularité ou
-      // le pool connu (ex. spécial catalogué deux fois côté Crunchyroll) : on compare aussi
-      // par titre normalisé, pas seulement par id CR.
-      const crTitleNorm = aniNorm(title);
-      if (crTitleNorm && seenTitlesNorm.has(crTitleNorm)) { REJ.duplicate++; return; }
       seenCandidate.add(cr.id);
-      if (crTitleNorm) seenTitlesNorm.add(crTitleNorm);
       // Genres/tags AniList déjà en main (zéro requête de plus) : mis en cache tout de suite,
       // pour que evaluateDiscoverCandidate (qui relit ce cache) les récupère automatiquement.
       const aniResult = { matched: false, ...EMPTY_ANI, aniId: null, aniTitle: '', av: ANILIST_CACHE_VER };
@@ -6646,7 +6647,17 @@
       try { panel = await getSeriesPanel(cr.id); } catch (e) { safeCall.log(e, 'scanAnilistPopularity:panel'); REJ.noCrMatch++; return; }
       if (!panel) { REJ.noCrMatch++; return; }
       const evald = await evaluateDiscoverCandidate(panel, { accountId, REJ, D });
-      if (evald) found.push(evald);
+      if (!evald) return;
+      // (fix doublon titre) Vérifié seulement ICI, sur la candidate VRAIMENT retenue (après
+      // note/saisons/genre déjà tranchés par evaluateDiscoverCandidate ci-dessus) — jamais
+      // plus tôt, sous peine de bloquer à tort une autre candidate au titre proche pour une
+      // qui n'allait de toute façon jamais être affichée. Même contenu, fiche CR différente
+      // déjà retenue via le classement popularité ou le pool connu : comparaison par titre
+      // normalisé, pas seulement par id CR.
+      const crTitleNorm = aniNorm(evald.p.title);
+      if (crTitleNorm && seenTitlesNorm.has(crTitleNorm)) { REJ.duplicate++; return; }
+      if (crTitleNorm) seenTitlesNorm.add(crTitleNorm);
+      found.push(evald);
     };
 
     // ── Mode SIMILAIRE 🪄 : pool = recommandations AniList curées de la série source ──
@@ -9108,7 +9119,14 @@
   .crrav-resume:hover{opacity:1}
   .crrav-card a:focus-visible{outline:2px solid #fff;outline-offset:2px}
 
-  .crrav-actrow{display:flex;gap:6px;align-items:stretch}
+  .crrav-actrow{display:flex;gap:6px;align-items:stretch;
+    /* (fix cohérence) Quand la série est terminée, resumeLink() ne rend rien (pas
+       d'épisode suivant) : sans point d'ancrage à gauche, la baguette — seule
+       survivante, largeur fixe — retombait au début de la ligne (flex-start par
+       défaut) au lieu de garder SA position habituelle à droite (où la pousse
+       normalement le bouton reprendre en flex:1). flex-end fige cette position
+       quel que soit le nombre d'éléments présents : repère visuel toujours identique. */
+    justify-content:flex-end}
   .crrav-actrow .crrav-resume{flex:1;min-width:0}
 
   .crrav-ticks{display:flex;gap:var(--sg,6px);height:6px;overflow:hidden}
