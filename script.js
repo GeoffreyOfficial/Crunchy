@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.32.1';
+  const SCRIPT_VERSION = '3.35.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -7686,6 +7686,7 @@
         ${state}
         ${s.isNew ? '<span class="crrav-newdot">Nouvel épisode</span>' : ''}
         ${ignoreBtn(s, source)}
+        ${source === 'watchlist' ? removeListBtn(s) : ''}
         ${synopsisBlock(s)}
       </div>
       <div class="crrav-body">
@@ -7698,7 +7699,6 @@
         <div class="crrav-actrow">
           ${resumeLink(s, 'crrav-resume')}
           ${similarBtn(s)}
-          ${source === 'watchlist' ? removeListBtn(s) : ''}
         </div>
         ${pinfo}
       </div>
@@ -7711,14 +7711,17 @@
     const seriesUrl = crSeriesUrl(s.id, s.slug);
     const done = s.remaining === 0;
     const pinfo = plannedInfo(s, true);
-    // (fix UI) 2 changements demandés : (1) le bouton reprendre passe à GAUCHE de la
-    // jaquette (seul, isolé des 2 autres actions → moins de risque de le toucher par
-    // erreur en visant baguette/ignorer, et inversement) ; (2) baguette + ignorer
-    // repassent en icônes superposées façon pile (comme avant la 1ère refonte de cette
-    // session), mais nettement agrandies — le chevauchement réduit un peu la largeur
-    // totale du bloc, mais chaque icône garde une zone propre bien plus grande qu'avant.
+    // (fix UI) Bouton reprendre toujours seul à GAUCHE de la jaquette (isolé — pas de
+    // risque de le toucher en visant une autre action). La baguette 🪄 rejoint désormais
+    // cette même colonne, empilée AU-DESSUS du bouton reprendre (au lieu d'être avec
+    // ignorer/retirer à droite) : c'est l'action la plus utilisée après reprendre, elle
+    // mérite la même proximité immédiate avec la jaquette plutôt que d'être noyée avec
+    // les actions plus rares (ignorer, retirer) de l'autre côté de la ligne.
     return `<article class="crrav-lrow${s.isNew ? ' isnew' : ''}" style="--prog:${progColor(s)}">
-      ${resumeLink(s, 'crrav-lresume')}
+      <div class="crrav-lleftcol">
+        ${similarBtn(s)}
+        ${resumeLink(s, 'crrav-lresume')}
+      </div>
       <div class="crrav-lthumbwrap">
         <a class="crrav-lthumb" href="${seriesUrl}">
           ${s.poster ? `<img loading="lazy" crossorigin="anonymous" src="${s.poster}" alt="" onerror="this.removeAttribute(&quot;crossorigin&quot;);this.src=this.src">` : ''}
@@ -7740,7 +7743,6 @@
         <div class="crrav-lplanned">${pinfo}</div>
       </div>
       <div class="crrav-lactions-more">
-        ${similarBtn(s)}
         ${ignoreBtn(s, source)}
         ${source === 'watchlist' ? removeListBtn(s) : ''}
       </div>
@@ -8873,6 +8875,18 @@
   .crrav-removelist:active{transform:translateY(0) scale(.94)}
   .crrav-removelist.busy,.crrav-removelist[disabled]{opacity:.5;pointer-events:none}
   .crrav-lactions-more .crrav-removelist{width:40px;height:40px}
+  /* En vue carte (grille) : bouton retrait posé sur la jaquette, en bas AU CENTRE — même
+     gabarit rond et sombre que .crrav-ignore/.crrav-addlist (cohérent avec les autres
+     actions posées sur l'affiche), mais sa propre colonne (bas-centre) pour ne chevaucher
+     ni ignorer (bas-gauche) ni le bouton d'ajout (haut-droite, Découverte uniquement —
+     jamais coprésent ici puisque retirer n'existe que sur Reste à voir). */
+  .crrav-thumb .crrav-removelist{position:absolute;left:50%;bottom:8px;z-index:2;
+    width:32px;height:32px;border-radius:50%;transform:translateX(-50%);
+    background:rgba(10,10,12,.92);border:1px solid rgba(224,87,74,.45);
+    color:#e5aca6;font-size:14px}
+  .crrav-thumb .crrav-removelist:hover{background:#e0574a;color:#fff;border-color:#e0574a;
+    transform:translateX(-50%) translateY(-1px)}
+  .crrav-thumb .crrav-removelist:active{transform:translateX(-50%) scale(.94)}
   /* Coloration Découverte : pastilles de signaux + liseré coloré (couleur = signal dominant) */
   .crrav-sigs{display:flex;gap:5px;margin:3px 0 2px;font-size:13px;line-height:1;min-height:15px}
   /* (39) Badge devenu <button> (voir sigMarkup/discoverCard) : cercle tappable discret,
@@ -9309,13 +9323,17 @@
     color:#12120f;background:var(--prog);font-size:0;transition:transform .15s ease}
   .crrav-lresume::after{content:'▸';font-size:16px;line-height:1}
   .crrav-lresume:active{transform:scale(.92)}
+  /* Colonne de gauche : baguette 🪄 empilée AU-DESSUS du bouton reprendre — l'action la
+     plus utilisée juste après reprendre, assez importante pour rester collée à la
+     jaquette plutôt que reléguée avec ignorer/retirer à droite. */
+  .crrav-lleftcol{display:flex;flex-direction:column;align-items:center;gap:6px;flex:0 0 auto}
+  .crrav-lleftcol .crrav-similar{width:38px;height:34px}
   /* Baguette + ignorer : empilés l'un AU-DESSUS de l'autre (plutôt que côte à côte /
      superposés en diagonale comme avant) — chacun a sa propre ligne, zéro ambiguïté de
      ciblage. Toujours agrandis (40px). Bonus : cette colonne à hauteur fixe (40+gap+40)
      devient l'élément le plus haut de la ligne, ce qui aide à ce que toutes les lignes
      de la liste aient la même hauteur, quel que soit le texte à côté. */
   .crrav-lactions-more{display:flex;flex-direction:column;align-items:center;gap:6px;flex:0 0 auto}
-  .crrav-lactions-more .crrav-similar{width:40px;height:40px}
   .crrav-lactions-more .crrav-ignore{width:40px;height:40px;position:static;opacity:1}
   /* La ligne « X/Y vus · Z restants » + durée restante ne doit jamais passer à la
      ligne (ça décale visuellement chaque .crrav-lrow d'une hauteur différente) : même
@@ -9343,15 +9361,17 @@
     .crrav-lrow:not(.crrav-lrow-discover) .crrav-lthumbwrap .crrav-ring-t.done{font-size:9.5px}
     .crrav-lrow:not(.crrav-lrow-discover) .crrav-lresume{width:36px;height:36px}
     .crrav-lrow:not(.crrav-lrow-discover) .crrav-lresume::after{font-size:14px}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lleftcol{gap:4px}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lleftcol .crrav-similar{width:32px;height:29px}
     .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions-more{gap:4px}
-    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions-more .crrav-similar,
-    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions-more .crrav-ignore{width:34px;height:34px}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions-more .crrav-ignore,
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions-more .crrav-removelist{width:34px;height:34px}
   }
   /* Très petit téléphone : la baguette « séries similaires » est la moins essentielle
-     des 3 actions (anneau = progression, resume = action principale, ignore = tri) —
-     on la retire pour laisser le titre respirer plutôt que tout comprimer davantage. */
+     des actions de la colonne de gauche (resume = action principale) — on la retire
+     pour laisser le titre respirer plutôt que tout comprimer davantage. */
   @media(max-width:380px){
-    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions-more .crrav-similar{display:none}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lleftcol .crrav-similar{display:none}
   }
 
   /* (5bis) vue liste compacte de Découverte : même carcasse .crrav-lrow, avec note,
@@ -10171,14 +10191,62 @@
      depuis la sheet Réglages (undo/redo réglage par réglage, enregistrement…), qui
      doit rester visible quel que soit l'onglet actif ou l'état d'ouverture de la
      sheet (contrairement à .crrav-toast ci-dessus, posé dans le flux de l'onglet
-     Reste à voir et donc invisible tant que la sheet la recouvre). Voir renderToastOverlay. */
+     Reste à voir et donc invisible tant que la sheet la recouvre). Voir renderToastOverlay.
+     Refonte « wahou » : verre dépoli + halo teinté par tonalité (succès/avertissement/
+     erreur, déduite du glyphe en tête de message par TOAST_TONE), badge d'icône rond
+     détaché du texte, entrée avec un léger rebond (cubic-bezier "back out"), sortie
+     fondue/glissée pilotée par la classe .leaving (voir renderToastOverlay), et un petit
+     « bump » quand le contenu change sans que le toast ait eu le temps de disparaître
+     (deux actions rapprochées). Marges latérales prennent en compte l'encoche (env()) —
+     utile en usage plié/déplié sur un écran type Z Fold. */
   .crrav-toast-fixed{position:fixed;left:50%;bottom:max(18px,env(safe-area-inset-bottom));
-    transform:translateX(-50%);z-index:80;max-width:min(420px,calc(100vw - 32px));
-    padding:11px 16px;border-radius:10px;text-align:center;
-    background:linear-gradient(135deg,rgba(92,230,160,.92),rgba(20,20,25,.92));
-    border:1px solid rgba(92,230,160,.5);color:#0a0a0c;font:700 13px/1.4 system-ui;
-    box-shadow:0 6px 24px rgba(0,0,0,.35);animation:crrav-in .2s ease}
-  @media(prefers-reduced-motion:reduce){.crrav-toast-fixed{animation:none}}
+    transform:translateX(-50%);z-index:80;max-width:min(440px,calc(100vw - 28px));
+    display:flex;align-items:center;gap:11px;
+    padding:10px 18px 10px 10px;border-radius:16px;text-align:left;
+    background:
+      linear-gradient(135deg,rgba(28,28,34,.82),rgba(14,14,18,.88));
+    backdrop-filter:blur(16px) saturate(160%);-webkit-backdrop-filter:blur(16px) saturate(160%);
+    border:1px solid var(--toast-edge,rgba(92,230,160,.45));
+    color:#f2f2f6;font:600 13px/1.4 system-ui;
+    box-shadow:0 10px 32px -8px rgba(0,0,0,.55),0 0 0 1px rgba(255,255,255,.03) inset,
+      0 0 26px -6px var(--toast-glow,rgba(92,230,160,.5));
+    animation:crrav-toast-in .38s cubic-bezier(.34,1.56,.64,1) both}
+  .crrav-toast-fixed.leaving{animation:crrav-toast-out .22s ease both}
+  .crrav-toast-fixed.bump{animation:crrav-toast-bump .32s ease}
+  .crrav-toast-icon{flex:0 0 auto;width:28px;height:28px;border-radius:50%;
+    display:grid;place-items:center;font-size:15px;line-height:1;
+    background:var(--toast-iconbg,rgba(92,230,160,.22));
+    box-shadow:0 0 0 1px var(--toast-edge,rgba(92,230,160,.45)) inset}
+  .crrav-toast-text{flex:1 1 auto;min-width:0;overflow-wrap:break-word}
+  #crrav-toast-fixed[data-tone="ok"]{
+    --toast-edge:rgba(92,230,160,.45);--toast-glow:rgba(92,230,160,.45);--toast-iconbg:rgba(92,230,160,.22)}
+  #crrav-toast-fixed[data-tone="warn"]{
+    --toast-edge:rgba(255,193,90,.5);--toast-glow:rgba(255,193,90,.4);--toast-iconbg:rgba(255,193,90,.22)}
+  #crrav-toast-fixed[data-tone="err"]{
+    --toast-edge:rgba(224,87,74,.55);--toast-glow:rgba(224,87,74,.45);--toast-iconbg:rgba(224,87,74,.24)}
+  @keyframes crrav-toast-in{
+    from{opacity:0;transform:translateX(-50%) translateY(14px) scale(.92)}
+    to{opacity:1;transform:translateX(-50%) translateY(0) scale(1)}}
+  @keyframes crrav-toast-out{
+    from{opacity:1;transform:translateX(-50%) translateY(0) scale(1)}
+    to{opacity:0;transform:translateX(-50%) translateY(10px) scale(.95)}}
+  @keyframes crrav-toast-bump{
+    0%,100%{transform:translateX(-50%) scale(1)}
+    35%{transform:translateX(-50%) scale(1.035)}}
+  @media(max-width:480px){
+    .crrav-toast-fixed{max-width:calc(100vw - 20px);
+      left:max(10px,env(safe-area-inset-left));right:max(10px,env(safe-area-inset-right));
+      transform:none;width:auto;font-size:12.5px;padding:9px 14px 9px 9px;border-radius:14px}
+    .crrav-toast-fixed.leaving,.crrav-toast-fixed.bump{transform:none}
+    @keyframes crrav-toast-in-narrow{from{opacity:0;transform:translateY(14px) scale(.94)}to{opacity:1;transform:none}}
+    @keyframes crrav-toast-out-narrow{from{opacity:1;transform:none}to{opacity:0;transform:translateY(10px) scale(.96)}}
+    .crrav-toast-fixed{animation:crrav-toast-in-narrow .34s cubic-bezier(.34,1.56,.64,1) both}
+    .crrav-toast-fixed.leaving{animation:crrav-toast-out-narrow .2s ease both}
+    .crrav-toast-icon{width:25px;height:25px;font-size:13.5px}
+  }
+  @media(prefers-reduced-motion:reduce){
+    .crrav-toast-fixed,.crrav-toast-fixed.leaving,.crrav-toast-fixed.bump{animation:none}
+  }
 
   /* Bouton « relancer avec ces genres » : apparaît quand les filtres live diffèrent
      de la dernière recherche. Coloré pour signaler qu'une action est disponible. */
@@ -10818,6 +10886,16 @@
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => { toastMsg = ''; render(); }, 4000);
   }
+
+  // Tonalité déduite du glyphe en tête de message (voir showToast ci-dessus — tous les
+  // appels commencent par un symbole) : pilote la couleur d'accent du toast (voir CSS
+  // #crrav-toast-fixed[data-tone]). Retombe sur 'ok' pour tout symbole non répertorié
+  // plutôt que de laisser le toast sans couleur.
+  const TOAST_TONE = {
+    '✓': 'ok', '✅': 'ok', '↺': 'ok', '↩': 'ok', '↪': 'ok', '📺': 'ok', '🖥': 'ok', '🙈': 'ok',
+    '⚠': 'warn',
+    '✗': 'err', '❌': 'err',
+  };
 
   function mountStyles() {
     // (fix) Ne JAMAIS se contenter de vérifier l'existence du noeud : sur un SPA comme
@@ -14804,17 +14882,55 @@
   // que depuis un rebuild complet) : contrairement à l'ancien rendu inline (encore présent
   // dans renderSuivi(), gardé pour compat visuelle sur cet onglet précis), celui-ci reste
   // visible quel que soit l'onglet actif ou l'état d'ouverture de la sheet.
+  // (fix « wahou ») Icône et texte désormais posés dans deux nœuds séparés (au lieu d'un
+  // textContent unique) pour permettre un badge d'icône rond distinct + une couleur
+  // d'accent par tonalité (voir TOAST_TONE) ; le nœud n'est plus retiré instantanément à
+  // la disparition mais amorce une sortie animée (.leaving) avant d'être retiré du DOM ;
+  // un changement de contenu pendant que le toast est déjà affiché (deux actions
+  // rapprochées) déclenche un petit « bump » plutôt que de sauter silencieusement au
+  // nouveau texte.
   function renderToastOverlay() {
     if (!root) return;
     let el = root.querySelector('#crrav-toast-fixed');
-    if (!toastMsg) { if (el) el.remove(); return; }
+    if (!toastMsg) {
+      if (el && !el.classList.contains('leaving')) {
+        el.classList.add('leaving');
+        const dying = el;
+        setTimeout(() => { if (dying && dying.parentNode) dying.remove(); }, 260);
+      }
+      return;
+    }
+    const m = /^(\S+)\s+([\s\S]*)$/.exec(toastMsg);
+    const icon = m ? m[1] : '';
+    const text = m ? m[2] : toastMsg;
+    const tone = TOAST_TONE[icon] || 'ok';
+    let justCreated = false;
     if (!el) {
       el = document.createElement('div');
       el.id = 'crrav-toast-fixed';
       el.className = 'crrav-toast-fixed';
+      el.innerHTML = '<span class="crrav-toast-icon"></span><span class="crrav-toast-text"></span>';
       root.appendChild(el);
+      justCreated = true;
     }
-    el.textContent = toastMsg;   // textContent : jamais besoin d'escapeHtml ici
+    el.classList.remove('leaving');
+    el.dataset.tone = tone;
+    const iconEl = el.querySelector('.crrav-toast-icon');
+    const textEl = el.querySelector('.crrav-toast-text');
+    const changed = iconEl.textContent !== icon || textEl.textContent !== text;
+    if (changed) {
+      iconEl.textContent = icon;
+      textEl.textContent = text;
+      // Rejoue le petit « bump » seulement si le toast était déjà affiché (pas au tout
+      // premier affichage, qui a déjà sa propre animation d'entrée) — reflow forcé
+      // (offsetWidth) pour pouvoir retirer puis rajouter la classe si un bump était déjà
+      // en cours (deux changements très rapprochés).
+      if (!justCreated) {
+        el.classList.remove('bump');
+        void el.offsetWidth;
+        el.classList.add('bump');
+      }
+    }
   }
 
   function renderNow() {
@@ -15386,8 +15502,11 @@
         const ign = e.target.closest('[data-ignore]');
         if (ign) {
           e.preventDefault();
+          const wasIgnored = IGNORED.has(ign.dataset.ignore);
+          const t = ign.dataset.title || 'Série';
           toggleIgnored(ign.dataset.ignore, ign.dataset.title, ign.dataset.source,
             ign.dataset.poster, ign.dataset.synopsis);
+          showToast(wasIgnored ? `↺ « ${t} » réaffichée` : `🙈 « ${t} » ignorée — plus jamais proposée`);
           forceRender(); return;
         }
         // (43) Puce de filtre par source dans le panneau « Séries ignorées » (voir
@@ -15692,6 +15811,7 @@
               // le bouton « 30 autres pépites » (conditionné à D.series.length) reste offert
               // — sinon « Tout ignorer » laissait un cul-de-sac sans moyen de recharger.
               LOG(`Découverte : ${added} série(s) ignorée(s) en bloc`);
+              showToast(`🙈 ${added} série${added > 1 ? 's' : ''} ignorée${added > 1 ? 's' : ''}`);
               forceRender();
             },
           };
@@ -15806,8 +15926,11 @@
             // Recherche/tri/sélection actifs : on ne réaffiche QUE les entrées listées
             // ou cochées, pas la totalité des séries ignorées (qui peut être bien plus
             // large). Action ciblée et délibérée : pas de confirmation nécessaire.
-            for (const id of scopeIds.split(',')) { IGNORED.delete(id); ignoredSelected.delete(id); }
-            saveIgnored(); pushHistory(); forceRender();
+            const ids = scopeIds.split(',');
+            for (const id of ids) { IGNORED.delete(id); ignoredSelected.delete(id); }
+            saveIgnored(); pushHistory();
+            showToast(`↺ ${ids.length} série${ids.length > 1 ? 's' : ''} réaffichée${ids.length > 1 ? 's' : ''}`);
+            forceRender();
           } else {
             // (2) Pas de portée = restauration de TOUTES les séries ignorées (potentiellement
             // des centaines, sans lien entre elles) : irréversible en un clic, donc
@@ -15820,7 +15943,11 @@
                 + `(Reste à voir, Hors listes, Découverte, Nouveautés).</p>`,
               confirmLabel: '↺ Tout réafficher',
               danger: true,
-              onConfirm: () => { IGNORED.clear(); ignoredSelected.clear(); saveIgnored(); pushHistory(); forceRender(); },
+              onConfirm: () => {
+                IGNORED.clear(); ignoredSelected.clear(); saveIgnored(); pushHistory();
+                showToast(`↺ ${n} série${n > 1 ? 's' : ''} réaffichée${n > 1 ? 's' : ''}`);
+                forceRender();
+              },
             };
             forceRender();
           }
@@ -15986,7 +16113,9 @@
           }
         }
         if (act.dataset.act === 'settings-reset') {
-          resetSettings(); scheduleAutoRefresh(); forceRender();
+          resetSettings(); scheduleAutoRefresh();
+          showToast('✓ Réglages réinitialisés par défaut');
+          forceRender();
         }
         if (act.dataset.act === 'hist-undo' || act.dataset.act === 'hist-redo') {
           // (46)(47) Annuler/Rétablir unifié (ignorées + brouillon de Réglages), réglage par
