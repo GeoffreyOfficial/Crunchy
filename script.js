@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.20.0
+// @version      3.20.1
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.20.0';
+  const SCRIPT_VERSION = '3.20.1';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -9136,6 +9136,13 @@
   .crrav-scoretuner .seg.well{background:rgba(var(--well),.32)}
   .crrav-scoretuner .seg.super{background:rgba(var(--super),.4)}
   .crrav-scoretuner .seg.favrec{background:rgba(var(--favrec),.4);border-radius:0 10px 10px 0}
+  /* Voile de rareté : assombrit progressivement la barre vers la droite pour signaler que
+     cette zone (plafond théorique cumulé) est de moins en moins atteignable en pratique,
+     sans dépendre d'un calcul précis — un simple repère visuel superposé aux segments
+     colorés (peint après eux dans le DOM, donc au-dessus, mais sous les handles/tags qui
+     restent lisibles grâce à leur z-index:3). Statique : ne bouge pas avec les curseurs. */
+  .crrav-scoretuner .rarity-fade{position:absolute;inset:0;pointer-events:none;border-radius:10px;
+    background:linear-gradient(90deg,rgba(0,0,0,0) 0%,rgba(0,0,0,0) 32%,rgba(0,0,0,.55) 100%)}
   .crrav-scoretuner .zero-line{position:absolute;top:-5px;bottom:-5px;width:2px;background:rgba(255,255,255,.35)}
   .crrav-scoretuner .zero-line::after{content:'0';position:absolute;top:-17px;left:50%;transform:translateX(-50%);
     font:700 9.5px/1 system-ui;color:var(--st-faint)}
@@ -11796,9 +11803,11 @@
         <div class="range-stats" id="crst-rangeStats"></div>
         <div class="schema-axis" id="crst-axis"></div>
         <div class="axis-ticks" id="crst-axisTicks"></div>
-        <p class="schema-note">Glisse les repères directement sur la barre. Pendant le glissement, la zone se
-          zoome automatiquement pour un réglage plus précis. Les notes requises (🏆/✨) et les autres
-          réglages fins se règlent juste en dessous — le schéma montre leur impact sur le score final.</p>
+        <p class="schema-note"><b>Plafond théorique</b> : la barre montre le score max si TOUS les bonus sont
+          cumulés à fond en même temps — un plafond, pas une échelle de scores typiques. Plus la teinte s'assombrit
+          vers la droite, plus cette zone est rare en pratique. Glisse les repères directement sur la barre ; pendant
+          le glissement, la zone se zoome automatiquement pour un réglage plus précis. Les notes requises (🏆/✨) et
+          les autres réglages fins se règlent juste en dessous — le schéma montre leur impact sur le score final.</p>
         <div class="pepite-stats" id="crst-pepiteStats"></div>
         <div class="correction-toast" id="crst-toast"></div>
       </div>
@@ -12162,6 +12171,7 @@
         <div class="seg well" data-seg="well"></div>
         <div class="seg super" data-seg="super"></div>
         <div class="seg favrec" data-seg="favrec"></div>
+        <div class="rarity-fade"></div>
         <div class="zero-line"></div>
         <div class="handle taste" data-h="discoverTasteWeight"><div class="grip"></div><span class="tag">Poids goût <b class="tval"></b></span></div>
         <div class="handle pref" data-h="discoverPrefGenreBonus"><div class="grip"></div><span class="tag">🎯 <b class="tval"></b></span></div>
@@ -12305,20 +12315,34 @@
 
     function resolveTagCollisions(axis) {
       const w = axis.getBoundingClientRect().width || axis.offsetWidth || 300;
-      const handles = Array.from(axis.querySelectorAll('.handle'));
-      const items = handles.map((h) => {
-        const tag = h.querySelector('.tag');
-        const tagW = tag ? tag.getBoundingClientRect().width : 40;
-        return { el: h, px: (parseFloat(h.style.left) || 0) / 100 * w, half: tagW / 2 + 5 };
-      });
-      items.sort((a, b) => a.px - b.px);
-      const rightEdgeAtLevel = [];
-      const MAX_LVL = 6;
-      items.forEach((it) => {
-        let lvl = 0;
-        while (lvl < MAX_LVL && rightEdgeAtLevel[lvl] !== undefined && (it.px - it.half) < rightEdgeAtLevel[lvl]) lvl++;
-        rightEdgeAtLevel[lvl] = it.px + it.half;
-        it.el.style.setProperty('--lvl', lvl);
+      // Deux familles de repères utilisent des bases verticales différentes (--tagTop),
+      // exprès pour ne jamais se toucher : le groupe principal (goût/🎯/🏆/✨/💞) et le
+      // groupe seuils (Notable/Légendaire, décalé de 17px plus haut). Elles doivent donc
+      // empiler leurs niveaux --lvl indépendamment — sinon un tag du groupe principal
+      // poussé en lvl 1 (top:-25-18=-43px) vient chevaucher la base du groupe seuils
+      // (top:-42px), comme observé avec l'ajout du repère 💞 densifiant la zone.
+      const THRESHOLD_CLASSES = ['notable', 'legend'];
+      const isThreshold = (h) => THRESHOLD_CLASSES.some((c) => h.classList.contains(c));
+      const allHandles = Array.from(axis.querySelectorAll('.handle'));
+      const groups = [
+        allHandles.filter((h) => !isThreshold(h)),
+        allHandles.filter((h) => isThreshold(h)),
+      ];
+      groups.forEach((handles) => {
+        const items = handles.map((h) => {
+          const tag = h.querySelector('.tag');
+          const tagW = tag ? tag.getBoundingClientRect().width : 40;
+          return { el: h, px: (parseFloat(h.style.left) || 0) / 100 * w, half: tagW / 2 + 5 };
+        });
+        items.sort((a, b) => a.px - b.px);
+        const rightEdgeAtLevel = [];
+        const MAX_LVL = 6;
+        items.forEach((it) => {
+          let lvl = 0;
+          while (lvl < MAX_LVL && rightEdgeAtLevel[lvl] !== undefined && (it.px - it.half) < rightEdgeAtLevel[lvl]) lvl++;
+          rightEdgeAtLevel[lvl] = it.px + it.half;
+          it.el.style.setProperty('--lvl', lvl);
+        });
       });
     }
 
@@ -12513,16 +12537,42 @@
       sgroups.querySelectorAll(':scope > .crrav-setgroup').forEach((g) => {
         let vis = 0;
         g.querySelectorAll('.crrav-field').forEach((fld) => {
-          // (34) Le champ interne au tuner (« afficher le détail ») n'est pas searchable :
-          // pendant une recherche on masque tout le panneau, ce champ compris.
-          if (active && fld.closest('.crrav-scoretuner')) { fld.style.display = 'none'; return; }
           const show = !q || aniNorm(fld.textContent).includes(q);
           fld.style.display = show ? '' : 'none';
           if (show) vis++;
         });
-        // (34) Le panneau de réglage du score (matrice + schéma) se masque en bloc dès qu'une
-        // recherche est active : il ne contient aucun .crrav-field filtrable en propre.
-        g.querySelectorAll(':scope .crrav-scoretuner').forEach((st) => { st.style.display = active ? 'none' : ''; });
+        // (34) Panneau de réglage du score : la matrice + jauge de difficulté (« Réglage
+        // rapide ») et le schéma glissable ne sont pas du texte filtrable, ils se masquent
+        // en bloc pendant une recherche. Les 16 curseurs du détail complet, EUX, sont de
+        // vrais réglages nommés (ex. « Bonus reco d'un favori », « Score minimum —
+        // légendaire ») — avant, ils étaient masqués avec le reste du panneau et donc
+        // introuvables par la recherche ; on les filtre maintenant champ par champ comme
+        // n'importe quel réglage.
+        g.querySelectorAll(':scope .crrav-scoretuner').forEach((st) => {
+          const quick = st.querySelector(':scope > .card');
+          if (quick) quick.style.display = active ? 'none' : '';
+          const det = st.querySelector('details.det');
+          let stVis = 0;
+          if (det) {
+            const schemaCard = det.querySelector(':scope > .schema-card');
+            if (schemaCard) schemaCard.style.display = active ? 'none' : '';
+            det.querySelectorAll(':scope > .group').forEach((grp) => {
+              let grpVis = 0;
+              grp.querySelectorAll('.field').forEach((tf) => {
+                const show = !q || aniNorm(tf.textContent).includes(q);
+                tf.style.display = show ? '' : 'none';
+                if (show) grpVis++;
+              });
+              grp.style.display = (!active || grpVis > 0) ? '' : 'none';
+              stVis += grpVis;
+            });
+            if (active) det.open = true;
+          }
+          vis += stVis;
+          // Le panneau entier reste affiché s'il reste au moins un curseur visible (ou
+          // hors recherche) ; sinon il se masque comme un champ sans correspondance.
+          st.style.display = (!active || stVis > 0) ? '' : 'none';
+        });
         // (31) Un sous-groupe (bloc thématique) se masque dès qu'aucun de ses champs n'est
         // visible — sinon son en-tête restait affiché seul, orphelin, pendant une recherche.
         g.querySelectorAll(':scope .crrav-subgroup').forEach((sub) => {
