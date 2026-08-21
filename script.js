@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.28.5
+// @version      3.28.6
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.28.5';
+  const SCRIPT_VERSION = '3.32.1';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -521,16 +521,32 @@
   // initBigCache() via IDB_TIER_KEY, plus bas dans le fichier. Les deux vérifications
   // doivent rester alignées sur le même CACHE_TIER.
   function enforceCacheSchema() {
+    const spared = new Set([STATE_KEY, LS + 'schema', LS + 'debug', LS + 'hues']);
     const stored = safeCall(() => localStorage.getItem(LS + 'schema'), null, 'enforceCacheSchema:read');
-    if (stored === CACHE_TIER) return;                     // format compatible : on garde tout
-    const spared = new Set([STATE_KEY, LS + 'schema', LS + 'debug']);
-    const keys = Object.keys(localStorage).filter((k) => k.startsWith(LS) && !spared.has(k));
-    keys.forEach((k) => safeCall(() => localStorage.removeItem(k), undefined, 'enforceCacheSchema:evict'));
-    safeCall(() => localStorage.setItem(LS + 'schema', CACHE_TIER), undefined, 'enforceCacheSchema:write');
-    if (stored !== null || keys.length) {
-      LOG(stored === null
-        ? `cache sans palier — vidé par sécurité (${keys.length} entrées), estampillé T${CACHE_TIER}`
-        : `cache au format T${stored}, script en T${CACHE_TIER} — ${keys.length} entrées invalidées`);
+    if (stored !== CACHE_TIER) {
+      const keys = Object.keys(localStorage).filter((k) => k.startsWith(LS) && !spared.has(k));
+      keys.forEach((k) => safeCall(() => localStorage.removeItem(k), undefined, 'enforceCacheSchema:evict'));
+      safeCall(() => localStorage.setItem(LS + 'schema', CACHE_TIER), undefined, 'enforceCacheSchema:write');
+      if (stored !== null || keys.length) {
+        LOG(stored === null
+          ? `cache sans palier — vidé par sécurité (${keys.length} entrées), estampillé T${CACHE_TIER}`
+          : `cache au format T${stored}, script en T${CACHE_TIER} — ${keys.length} entrées invalidées`);
+      }
+      return;
+    }
+    // (fix) Palier déjà à jour : SANS ce balayage, ce return précoce empêchait tout nettoyage
+    // ultérieur — et migrateLocalStorageCacheToIdb() (dans initBigCache) ne se déclenche, elle,
+    // que si le palier IndexedDB CHANGE au démarrage. Deux mécanismes « coup unique » chacun :
+    // si des restes localStorage survivaient encore au moment où les DEUX estampilles étaient
+    // déjà à jour, plus rien ne les videait jamais — alors que le diagnostic (section « Cache &
+    // stockage ») promettait « se videront au prochain rechargement ». Le cache réel vit
+    // exclusivement dans IndexedDB désormais : toute clé crrav: hors de `spared` est par
+    // définition un reste, donc ce balayage est sans risque à CHAQUE démarrage, pas seulement
+    // au changement de palier.
+    const stray = Object.keys(localStorage).filter((k) => k.startsWith(LS) && !spared.has(k));
+    if (stray.length) {
+      stray.forEach((k) => safeCall(() => localStorage.removeItem(k), undefined, 'enforceCacheSchema:evict-stray'));
+      LOG(`${stray.length} reste(s) localStorage balayé(s) (hors migration de palier)`);
     }
   }
   enforceCacheSchema();
@@ -1599,11 +1615,12 @@
     return json;
   }
 
-  // Écriture (POST) authentifiée — même token/erreurs que api(), mais corps JSON et
-  // pas de paramètre de requête. Utilisée pour l'ajout d'une série à une Crunchylist
-  // (voir addToCustomList) ; 204 (pas de corps) et 200/201 (corps JSON) sont tous deux
-  // traités comme un succès.
-  async function apiWrite(path, body, attempt = 0) {
+  // Écriture (POST par défaut) authentifiée — même token/erreurs que api(), mais corps JSON
+  // et pas de paramètre de requête. `method` permet de réutiliser la même logique pour un
+  // DELETE (retrait d'une liste, voir removeFromCustomList/removeFromWatchlist) : mêmes
+  // retries/401/429, seul le verbe HTTP change. 204 (pas de corps) et 200/201 (corps JSON)
+  // sont tous deux traités comme un succès.
+  async function apiWrite(path, body, attempt = 0, method = 'POST') {
     await ensureToken();
     const url = new URL(path, 'https://www.crunchyroll.com');
     const key = endpointKey(path);
@@ -1612,21 +1629,21 @@
     const timer = ctrl ? setTimeout(() => ctrl.abort(), 20000) : null;
     try {
       res = await RAW_FETCH(url.toString(), {
-        method: 'POST',
+        method,
         credentials: 'include',
         headers: {
           Authorization: token,
           Accept: 'application/json',
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(body || {}),
+        body: method === 'DELETE' && !body ? undefined : JSON.stringify(body || {}),
         signal: ctrl ? ctrl.signal : undefined,
       });
     } catch (e) {
       if (attempt < 2) {
         LOG(`écriture ${key} échouée (${e.name === 'AbortError' ? 'timeout' : e.message}) — nouvel essai ${attempt + 1}`);
         await sleep(500 * (attempt + 1));
-        return apiWrite(path, body, attempt + 1);
+        return apiWrite(path, body, attempt + 1, method);
       }
       throw e;
     } finally {
@@ -1636,16 +1653,16 @@
       if (attempt < 2) {
         token = null; tokenExp = 0;
         const t = await refreshToken();
-        if (t) return apiWrite(path, body, attempt + 1);
+        if (t) return apiWrite(path, body, attempt + 1, method);
       }
       markSessionLost();
       // Même logique que api() : on patiente jusqu'à la reconnexion plutôt que de faire
       // échouer l'écriture (ajout à une liste, note…) en cours.
       await waitForRecovery();
-      return apiWrite(path, body, 0);
+      return apiWrite(path, body, 0, method);
     }
     if (res.status === 429) {
-      if (attempt < 3) { await sleep(800 * Math.pow(2, attempt)); return apiWrite(path, body, attempt + 1); }
+      if (attempt < 3) { await sleep(800 * Math.pow(2, attempt)); return apiWrite(path, body, attempt + 1, method); }
       throw new Error(`429 (limite atteinte) sur ${path}`);
     }
     if (!res.ok) {
@@ -1676,6 +1693,33 @@
     }
   }
 
+  // Retire une série d'UNE Crunchylist précise (DELETE /custom-lists/{listId}/{seriesId},
+  // endpoint symétrique de l'ajout ci-dessus — même origine communautaire). 404 traité
+  // comme un succès silencieux : déjà absente de cette liste, l'effet recherché est déjà là.
+  async function removeFromCustomList(listId, seriesId) {
+    const accountId = await getAccountId();
+    try {
+      await apiWrite(`/content/v2/${accountId}/custom-lists/${listId}/${seriesId}`, null, 0, 'DELETE');
+      return true;
+    } catch (e) {
+      if (e && e.status === 404) return true;
+      throw e;
+    }
+  }
+
+  // Retire une série de la watchlist (« Reste à voir » côté Crunchyroll — DISTINCTE des
+  // Crunchylists, voir getListMemberIds). DELETE /watchlist/{seriesId}, même tolérance 404.
+  async function removeFromWatchlist(seriesId) {
+    const accountId = await getAccountId();
+    try {
+      await apiWrite(`/content/v2/${accountId}/watchlist/${seriesId}`, null, 0, 'DELETE');
+      return true;
+    } catch (e) {
+      if (e && e.status === 404) return true;
+      throw e;
+    }
+  }
+
   // Orchestre un ajout depuis un bouton de Découverte : état visuel busy → done/erreur,
   // disparition de la carte (via STATE.addedToList, lu par visibleDiscover), et toast.
   async function handleAddToList(seriesId, title, listId) {
@@ -1695,6 +1739,48 @@
       showToast('✗ Ajout impossible — réessaie dans un instant');
     } finally {
       STATE.addingId = null;
+      forceRender();
+    }
+  }
+
+  // Orchestre le retrait — l'INVERSE de handleAddToList — depuis un bouton 🗑 de Reste à
+  // voir : retire la série de TOUTES les listes où elle a été vue lors du dernier chargement
+  // (watchlist ET/OU Crunchylist(s), voir s.inWatchlist/s.listIds posés dans loadAll), état
+  // visuel busy pendant l'opération, disparition immédiate de la carte en cas de succès
+  // (même logique que STATE.addedToList côté ajout), toast. Appelé UNIQUEMENT après
+  // confirmation (voir removeListBtn + STATE.confirmModal) : action destructive et
+  // irréversible côté Crunchyroll, jamais déclenchée directement au clic.
+  async function handleRemoveFromList(seriesId, title) {
+    const s = (STATE.series || []).find((x) => x.id === seriesId);
+    const listIds = (s && s.listIds) || [];
+    const inWatchlist = !!(s && s.inWatchlist);
+    if (!listIds.length && !inWatchlist) {
+      showToast('✗ Liste d\'origine introuvable — réessaie après avoir actualisé');
+      return;
+    }
+    STATE.removingId = seriesId;
+    forceRender();
+    let okCount = 0;
+    const total = listIds.length + (inWatchlist ? 1 : 0);
+    try {
+      for (const l of listIds) {
+        try { await removeFromCustomList(l.id, seriesId); okCount++; }
+        catch (e) { console.warn('[reste-à-voir] retrait Crunchylist échoué', l, e); }
+      }
+      if (inWatchlist) {
+        try { await removeFromWatchlist(seriesId); okCount++; }
+        catch (e) { console.warn('[reste-à-voir] retrait watchlist échoué', e); }
+      }
+      if (okCount === total) {
+        STATE.series = STATE.series.filter((x) => x.id !== seriesId);
+        showToast(`✓ ${title || 'Série'} retirée de tes listes`);
+      } else if (okCount > 0) {
+        showToast(`⚠ ${title || 'Série'} retirée partiellement — réessaie dans un instant`);
+      } else {
+        showToast('✗ Retrait impossible — réessaie dans un instant');
+      }
+    } finally {
+      STATE.removingId = null;
       forceRender();
     }
   }
@@ -2295,6 +2381,13 @@
           });
           const data = ir.data || [];
           if (!data.length) break;
+          // (fix retrait) Tague chaque item avec l'id/titre de SA Crunchylist d'origine —
+          // ce fusionnage (`getCustomLists` aplatit toutes les listes en un seul tableau)
+          // perdait sinon cette info, rendant impossible de savoir QUELLE liste retirer
+          // lors d'un retrait ciblé depuis Reste à voir (voir removeFromCustomList /
+          // handleRemoveFromList). Propriétés ajoutées sur l'objet API brut, jamais
+          // persistées (STATE.raw n'est pas mis en cache).
+          for (const it of data) { it._listId = id; it._listTitle = l.title || ''; }
           items.push(...data);
           if (data.length < 100) break;
           start += 100;
@@ -3068,6 +3161,43 @@
       if (changed) { LOG(`notes perso complétées en fond : ${changed}`); render(); }
     } catch (e) { safeCall.log(e, 'fillMissingMyRatings'); }
     finally { myRatingPassRunning = false; }
+  }
+
+  // Rafraîchissement FORCÉ des notes perso / favoris (bouton dédié du header « Reste à
+  // voir »). Contrairement à fillMissingMyRatings (qui ne comble QUE les entrées
+  // absentes du cache), celui-ci ignore le cache 'myrating:' existant pour TOUTE série
+  // affichée dans Reste à voir : sans ça, une note 5★ postée à l'instant sur Crunchyroll
+  // restait invisible ici jusqu'à expiration du cache (21 jours, voir MYRATING_TTL) — le
+  // seul moyen de la voir apparaître plus tôt était de vider tout le cache à la main.
+  async function refreshFavorites() {
+    if (STATE.favRefreshing) return;
+    const list = (STATE.series || []).filter((s) => s && s.id);
+    if (!list.length) return;
+    STATE.favRefreshing = true;
+    render();
+    try {
+      const accountId = await getAccountId();
+      if (!accountId) { STATE.favRefreshing = false; render(); return; }
+      let changed = 0;
+      await pool(list, async (s) => {
+        delete BIGCACHE['myrating:' + s.id];
+        markDeleted('myrating:' + s.id);
+        const val = await getMyRating(accountId, s.id);
+        const wasFav = !!s.favorite;
+        s.myRating = val;
+        s.favorite = val != null && val >= 5;
+        if (s.favorite !== wasFav) changed++;
+      }, Math.max(2, Math.min(4, CFG.concurrency)));
+      showToast(changed
+        ? `✓ Favoris à jour — ${changed} changement${changed > 1 ? 's' : ''}`
+        : '✓ Favoris à jour — aucun changement');
+    } catch (e) {
+      safeCall.log(e, 'refreshFavorites');
+      showToast('✗ Échec du rafraîchissement des favoris');
+    } finally {
+      STATE.favRefreshing = false;
+      render();
+    }
   }
 
   // Nombre de saisons distinctes, en cache 30 jours (utilisé par l'onglet Découverte).
@@ -4386,6 +4516,12 @@
     // Filtre « Ignorées » de Découverte retiré (la restauration se fait désormais
     // uniquement depuis le sous-onglet Réglages › Ignorées) : purger un éventuel reliquat.
     delete saved.showIgnoredDiscover;
+    // (fix reprise navigation) Onglet actif + scroll ont brièvement vécu ici (localStorage,
+    // permanent) avant d'être déplacés vers sessionStorage (voir loadSessionNav /
+    // saveSessionNav plus bas) — mémoire à la durée de vie de l'onglet navigateur
+    // uniquement, jamais au-delà. Purge un éventuel reliquat de cette version transitoire.
+    delete saved.lastTab;
+    delete saved.scrollPos;
     // la recherche ne se mémorise pour aucun des onglets
     return { ...DEFAULT_FILTERS, ...saved, q: '', discoverQ: '', orphanQ: '', globalQ: '' };
   }
@@ -4395,7 +4531,37 @@
     persistState(APP_STATE);
   }
 
-  const STATE = {
+  // (fix reprise navigation) Onglet actif + scroll PAR onglet, mémorisés en sessionStorage
+  // — PAS localStorage/BIGCACHE (persistState/saveFilters) : contrairement aux vrais
+  // réglages, cette navigation ne doit survivre qu'à l'onglet navigateur en cours (une
+  // visite sur une fiche série puis retour, ou un F5), jamais à une fermeture du navigateur
+  // ni au-delà. sessionStorage remplit exactement ce rôle : partagé entre navigations dans
+  // le MÊME onglet (même origine), vidé à la fermeture de l'onglet/fenêtre.
+  const SESSION_NAV_KEY = LS + 'sessionnav';
+  const KNOWN_TABS = ['suivi', 'orphelines', 'decouverte', 'stats', 'calendrier'];
+  function loadSessionNav() {
+    const fallback = { tab: 'suivi', scrollPos: {} };
+    try {
+      const raw = JSON.parse(sessionStorage.getItem(SESSION_NAV_KEY) || 'null');
+      if (!raw || typeof raw !== 'object') return fallback;
+      const tab = KNOWN_TABS.includes(raw.tab) ? raw.tab : 'suivi';
+      const scrollPos = (raw.scrollPos && typeof raw.scrollPos === 'object' && !Array.isArray(raw.scrollPos))
+        ? raw.scrollPos : {};
+      return { tab, scrollPos };
+    } catch (_) { return fallback; }   // sessionStorage indisponible (privé strict…) : tant pis, valeurs par défaut
+  }
+  function saveSessionNav(nav) {
+    try { sessionStorage.setItem(SESSION_NAV_KEY, JSON.stringify(nav)); } catch (_) { /* best-effort */ }
+  }
+
+  // Module-level (pas dans STATE) : chargé une fois au démarrage, tenu à jour au fil de la
+  // navigation (voir loadSessionNav/saveSessionNav ci-dessus). Séparé de STATE.filters
+  // précisément pour ne JAMAIS transiter par saveFilters()/persistState() (localStorage).
+  let SESSION_NAV = loadSessionNav();
+
+  const STATE = (() => {
+    const filters = loadFilters();
+    return {
     series: [], raw: [], loading: false, error: null, warning: null,
     announced: null, lastSync: null, settingsOpen: false, apiWarning: null, quotaWarning: null, anilistWarning: null,
     probeResult: null, probeRunning: false, reconnecting: false,
@@ -4406,8 +4572,11 @@
     ignoredQ: '', ignoredSort: 'title-asc', ignoredSrc: 'all',   // (27)(43) recherche/tri/filtre du panneau « Séries ignorées »
     historyProgress: null,   // { done, total, series } pendant le scan, null sinon
     fromSnapshot: false,
-    filters: loadFilters(),
-    tab: 'suivi',
+    filters,
+    // (fix reprise navigation) Reprend l'onglet quitté cette même session d'onglet
+    // navigateur (voir SESSION_NAV, sessionStorage) au lieu de toujours retomber sur
+    // Reste à voir — jamais mémorisé au-delà (fermeture de l'onglet = repart de zéro).
+    tab: SESSION_NAV.tab,
     discover: { series: [], loading: false, error: null, warning: null, shortfallDetail: null, lastSync: null, excludedIds: new Set(), searchedFilters: undefined, similarTo: null, similarProfile: null, similarFetching: false, legendaryHunt: false, cancelRequested: false, scan: null },
     orphan: { series: [], loading: false, error: null, warning: null, lastSync: null },
     newPremieres: { series: [], loading: false, error: null, lastSync: null, debug: null },
@@ -4419,9 +4588,14 @@
     // id de série en cours d'ajout (désactive son bouton le temps de la requête) et,
     // si un choix de liste est demandé (CFG.askListEachTime), la fiche en attente de choix.
     addingId: null,
+    // id de série en cours de retrait (désactive son bouton 🗑 le temps de la requête,
+    // voir handleRemoveFromList — inverse symétrique de addingId côté ajout).
+    removingId: null,
     listPicker: null,   // { seriesId, title } ou null
     confirmModal: null, // { title, message, confirmLabel, danger, onConfirm } ou null (voir confirmModalHtml)
+    favRefreshing: false,   // true pendant refreshFavorites() (bouton « Rafraîchir les favoris »)
   };
+  })();
 
   // (1) vu = flag Crunchyroll OU plus de 90 % de l'épisode écoulé
   function seenState(e, ph) {
@@ -4641,6 +4815,23 @@
       STATE.raw = wl.concat(cl);
       LOG('total à analyser :', STATE.raw.length, `(watchlist ${wl.length} + listes ${cl.length})`);
 
+      // (fix retrait) Appartenance PAR série aux différentes listes — watchlist et/ou
+      // Crunchylist(s) — pour permettre un retrait ciblé (bouton 🗑, voir
+      // handleRemoveFromList) sans devoir redemander à Crunchyroll où se trouve la série.
+      const wlMemberIds = new Set();
+      for (const it of wl) {
+        const ref = extractSeriesRef(it);
+        if (ref && ref.id) wlMemberIds.add(ref.id);
+      }
+      const customMembership = new Map();   // id série -> [{ id, title }] (Crunchylist(s))
+      for (const it of cl) {
+        const ref = extractSeriesRef(it);
+        if (!ref || !ref.id || !it._listId) continue;
+        const arr = customMembership.get(ref.id) || [];
+        if (!arr.some((l) => l.id === it._listId)) arr.push({ id: it._listId, title: it._listTitle || '' });
+        customMembership.set(ref.id, arr);
+      }
+
       const refs = new Map();
       for (const it of STATE.raw) {
         const ref = extractSeriesRef(it);
@@ -4669,7 +4860,7 @@
           const eps = await getEpisodes(ref.id);
           const rating = getRatingCached(ref.id);      // sans requête : complété plus tard
           const myRating = getMyRatingCached(ref.id);   // idem, note perso
-          return { panel, episodes: eps.episodes, maxAir: eps.maxAir, rating, myRating, order: i + k };
+          return { panel, episodes: eps.episodes, maxAir: eps.maxAir, rating, myRating, order: i + k, refId: ref.id };
         }, CFG.concurrency);
 
         const ok = results.filter(Boolean);
@@ -4679,8 +4870,15 @@
         STATS.guids += ids.length;
 
         const ph = ids.length ? await getPlayheads(accountId, ids) : new Map();
-        fresh.push(...ok.map(({ panel, episodes, maxAir, rating, myRating, order }) =>
-          buildSeriesEntry(panel, episodes, maxAir, rating, order, ph, myRating)));
+        fresh.push(...ok.map(({ panel, episodes, maxAir, rating, myRating, order, refId }) => {
+          const s = buildSeriesEntry(panel, episodes, maxAir, rating, order, ph, myRating);
+          // (fix retrait) Appartenance figée au moment du chargement — un ajout/retrait
+          // fait entre-temps ailleurs (ex. sur le site Crunchyroll) n'est vu qu'au
+          // prochain « Actualiser », comme le reste des données de cette entrée.
+          s.inWatchlist = wlMemberIds.has(refId);
+          s.listIds = customMembership.get(refId) || [];
+          return s;
+        }));
 
         // Affichage progressif : la grille se remplit sous les yeux — sauf si un
         // instantané est déjà à l'écran, auquel cas on remplace tout à la fin.
@@ -5375,6 +5573,14 @@
 
       const excluded = new Set([...watchlistIds, ...ignoredIds, ...listMemberIds, ...watchedIds, ...D.excludedIds]);
       const seenCandidate = new Set();
+      // (fix doublon titre) Un même contenu peut exister sous DEUX fiches Crunchyroll
+      // distinctes (id différents) — ex. un épisode spécial catalogué à la fois comme
+      // série autonome (0 saison) ET comme partie d'une autre série (1 saison/1 épisode).
+      // Le dédoublonnage par seul `id` (seenCandidate) ne peut alors rien y faire : les deux
+      // fiches se retrouvent dans `matches` sous des ids différents pour le MÊME titre. On
+      // ajoute donc un second garde-fou par titre normalisé (voir aniNorm), partagé entre
+      // les trois sources de candidats (pool connu, popularité CR, second bassin AniList).
+      const seenTitlesNorm = new Set();
       // (fix) 🎲 Dé légendaire — inclusion des notables (CFG.discoverLegendaryIncludeNotable,
       // désactivé par défaut) : accepte un candidat notable au même titre qu'un légendaire,
       // SANS jamais le compter dans le quota `target` (strictement légendaire, voir
@@ -5398,7 +5604,10 @@
       if (knownPool.length && !D.similarTo) {
         for (const c of knownPool) {
           if (!c || !c.id || excluded.has(c.id) || seenCandidate.has(c.id)) continue;
+          const cTitleNorm = aniNorm(c.title);
+          if (cTitleNorm && seenTitlesNorm.has(cTitleNorm)) { REJ.duplicate++; continue; }
           seenCandidate.add(c.id);
+          if (cTitleNorm) seenTitlesNorm.add(cTitleNorm);
           if (c.seasons != null && c.seasons > CFG.discoverMaxSeasons) continue;
           if (categoriesRejectedByGenre(c.categories, null, null, STATE.filters.discoverCatsInMode === 'all')) continue;
           matches.push(c);
@@ -5534,6 +5743,10 @@
               if (p && p.id && excluded.has(p.id)) REJ[classifyKnownReason(p.id)]++;
               return false;
             }
+            // (fix doublon titre) Même contenu, fiche CR différente déjà retenue plus tôt
+            // dans CE scan (voir seenTitlesNorm ci-dessus) : id neuf, mais titre déjà affiché.
+            const pTitleNorm = aniNorm(p.title);
+            if (pTitleNorm && seenTitlesNorm.has(pTitleNorm)) { REJ.duplicate++; return false; }
             candidatesSeenTotal++;
             // Pré-filtre de genre AVANT toute requête, MAIS seulement si le panel browse
             // porte les genres (souvent non). Le vrai filtre se fait plus bas, une fois le
@@ -5562,7 +5775,11 @@
             }
             return true;
           });
-        candidates.forEach((p) => seenCandidate.add(p.id));
+        candidates.forEach((p) => {
+          seenCandidate.add(p.id);
+          const pTitleNorm = aniNorm(p.title);
+          if (pTitleNorm) seenTitlesNorm.add(pTitleNorm);
+        });
         if (!candidates.length) continue;
 
         // Par petits paquets, pour s'arrêter dès que le quota est atteint au lieu
@@ -5760,7 +5977,7 @@
         // bassin CR au tri final (voir matches.slice(0, target) plus bas).
         const aniTarget = D.similarTo ? target : (target - (legendary ? legTotal(matches) : matches.length));
         const aniFound = await scanAnilistPopularity(
-          aniProfile, excluded, seenCandidate, knownTitlesNorm, aniTarget,
+          aniProfile, excluded, seenCandidate, seenTitlesNorm, knownTitlesNorm, aniTarget,
           { accountId, REJ, D, classifyKnownReason },
           (page, maxP) => onProgress(stepLabel(3, 3, `AniList ${page}/${maxP}`)),
         );
@@ -6364,7 +6581,7 @@
   // ctx : { accountId, REJ, D, classifyKnownReason } (mêmes compteurs/état que le bassin CR,
   // voir evaluateDiscoverCandidate). Retourne un tableau de candidats INTERMÉDIAIRES, au
   // même format que ceux produits par le bassin CR (voir evaluateDiscoverCandidate).
-  async function scanAnilistPopularity(profile, exclude, seenCandidate, knownTitlesNorm, target, ctx, onProgress) {
+  async function scanAnilistPopularity(profile, exclude, seenCandidate, seenTitlesNorm, knownTitlesNorm, target, ctx, onProgress) {
     const found = [];
     if (!CFG.discoverAnilistEnabled || target <= 0) return found;
     if (anilistCooldownRemainingMs() > 0) return found;   // coupe-circuit déjà en place : on n'insiste pas
@@ -6412,7 +6629,14 @@
       // maintenant la raison PRÉCISE plutôt qu'un seul compteur « known » fourre-tout.
       if (exclude.has(cr.id)) { REJ[classifyKnownReason(cr.id)]++; return; }
       if (seenCandidate.has(cr.id)) { REJ.duplicate++; return; }
+      // (fix doublon titre) Résolution AniList → CR pouvant retomber sur une fiche CR
+      // DIFFÉRENTE (id neuf) du même contenu déjà retenu via le classement popularité ou
+      // le pool connu (ex. spécial catalogué deux fois côté Crunchyroll) : on compare aussi
+      // par titre normalisé, pas seulement par id CR.
+      const crTitleNorm = aniNorm(title);
+      if (crTitleNorm && seenTitlesNorm.has(crTitleNorm)) { REJ.duplicate++; return; }
       seenCandidate.add(cr.id);
+      if (crTitleNorm) seenTitlesNorm.add(crTitleNorm);
       // Genres/tags AniList déjà en main (zéro requête de plus) : mis en cache tout de suite,
       // pour que evaluateDiscoverCandidate (qui relit ce cache) les récupère automatiquement.
       const aniResult = { matched: false, ...EMPTY_ANI, aniId: null, aniTitle: '', av: ANILIST_CACHE_VER };
@@ -7181,6 +7405,20 @@
       ${added || busy ? 'disabled' : ''}>${icon}</button>`;
   }
 
+  // Bouton « 🗑 » (Reste à voir uniquement) : l'INVERSE de addListBtn — retire la série de
+  // la/les liste(s) où elle a été vue au dernier chargement (voir s.listIds/s.inWatchlist,
+  // posés dans loadAll). N'ouvre PAS directement le retrait : le clic déclenche une
+  // confirmation (voir data-removelist, câblé sur STATE.confirmModal) puisque l'action est
+  // irréversible côté Crunchyroll — jamais de suppression au premier clic.
+  function removeListBtn(s) {
+    const busy = STATE.removingId === s.id;
+    const label = busy ? 'Retrait en cours…' : 'Retirer de tes listes';
+    return `<button class="crrav-removelist${busy ? ' busy' : ''}" data-removelist="${s.id}"
+      data-title="${escapeHtml(s.title)}"
+      title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}"
+      ${busy ? 'disabled' : ''}>${busy ? '⋯' : '🗑'}</button>`;
+  }
+
   // Feuille de choix de liste (CFG.askListEachTime uniquement) : ouverte via
   // STATE.listPicker = { seriesId, title }. null → rien à afficher.
   function listPickerHtml() {
@@ -7460,6 +7698,7 @@
         <div class="crrav-actrow">
           ${resumeLink(s, 'crrav-resume')}
           ${similarBtn(s)}
+          ${source === 'watchlist' ? removeListBtn(s) : ''}
         </div>
         ${pinfo}
       </div>
@@ -7503,6 +7742,7 @@
       <div class="crrav-lactions-more">
         ${similarBtn(s)}
         ${ignoreBtn(s, source)}
+        ${source === 'watchlist' ? removeListBtn(s) : ''}
       </div>
     </article>`;
   }
@@ -8619,6 +8859,20 @@
     border-color:rgba(185,139,255,.7);transform:translateY(-1px);
     box-shadow:0 5px 16px -5px rgba(185,139,255,.6)}
   .crrav-similar:active{transform:translateY(0) scale(.94)}
+  /* Retrait d'une liste (Reste à voir uniquement) : même gabarit que .crrav-similar,
+     teinte rouge cohérente avec .crrav-confirm (bouton danger) pour signaler une action
+     destructive dès le survol — jamais exécutée sans passer par la confirmation. */
+  .crrav-removelist{flex:0 0 auto;width:36px;border-radius:9px;
+    border:1px solid rgba(224,87,74,.35);
+    background:rgba(224,87,74,.10);
+    color:#e5aca6;font-size:15px;line-height:1;display:inline-flex;
+    align-items:center;justify-content:center;cursor:pointer;padding:0;-webkit-tap-highlight-color:transparent;
+    transition:transform .15s ease,box-shadow .15s ease,border-color .15s ease,background .15s ease}
+  .crrav-removelist:hover{background:#e0574a;color:#fff;border-color:#e0574a;transform:translateY(-1px);
+    box-shadow:0 5px 16px -5px rgba(224,87,74,.6)}
+  .crrav-removelist:active{transform:translateY(0) scale(.94)}
+  .crrav-removelist.busy,.crrav-removelist[disabled]{opacity:.5;pointer-events:none}
+  .crrav-lactions-more .crrav-removelist{width:40px;height:40px}
   /* Coloration Découverte : pastilles de signaux + liseré coloré (couleur = signal dominant) */
   .crrav-sigs{display:flex;gap:5px;margin:3px 0 2px;font-size:13px;line-height:1;min-height:15px}
   /* (39) Badge devenu <button> (voir sigMarkup/discoverCard) : cercle tappable discret,
@@ -9184,8 +9438,14 @@
     display:flex;flex-direction:column}
   .crrav-sheethead{position:sticky;top:0;display:flex;align-items:center;gap:10px;z-index:2;
     padding:14px max(16px,calc((100% - 900px)/2));border-bottom:1px solid rgba(255,255,255,.1);
-    background:linear-gradient(180deg,rgba(10,10,12,.96),rgba(10,10,12,.82))}
-  @media (pointer:fine){.crrav-sheethead{backdrop-filter:blur(18px)}}
+    background:#0a0a0c}
+  /* (fix) Fond opaque par défaut : sur tactile (pointer:coarse), le backdrop-filter ci-dessous
+     ne s'applique jamais, donc un fond rgba() seul laissait le contenu défilant transparaître
+     sans flou derrière l'en-tête (moche). Le dégradé translucide + flou ne s'active que sur
+     pointer:fine (souris), là où le flou compense vraiment la transparence. */
+  @media (pointer:fine){.crrav-sheethead{
+    background:linear-gradient(180deg,rgba(10,10,12,.96),rgba(10,10,12,.82));
+    backdrop-filter:blur(18px)}}
   .crrav-sheethead h2{margin:0;font:800 18px/1 system-ui;letter-spacing:-.02em;flex:1;
     display:flex;align-items:center;gap:10px}
   .crrav-sheethead h2::before{content:'';flex:0 0 auto;width:4px;height:20px;border-radius:3px;
@@ -9218,18 +9478,26 @@
   /* (30) Recherche collée sous l'en-tête, actions collées en bas — toujours à portée de main. */
   .crrav-sheetbody .crrav-setsearch,
   .crrav-sheetbody .crrav-setsearch:focus-within{position:sticky;top:0;z-index:6;
-    background:rgba(16,16,20,.97)}
+    background:#101014}
+  /* (fix) Même souci que .crrav-sheethead : fond opaque par défaut (tactile), translucide +
+     flou réservés à pointer:fine — sinon le contenu défilant transparaît sans flou derrière
+     la barre de recherche collante. */
   @media (pointer:fine){
     .crrav-sheetbody .crrav-setsearch,
-    .crrav-sheetbody .crrav-setsearch:focus-within{backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)}
+    .crrav-sheetbody .crrav-setsearch:focus-within{background:rgba(16,16,20,.97);
+      backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)}
   }
   /* La barre d'actions « en ligne » du panneau ferait doublon avec le pied collant : masquée. */
   .crrav-sheetbody .crrav-sactions-primary{display:none}
   .crrav-sheetfoot{display:flex;flex:0 0 auto;gap:10px;
     padding:12px max(14px,calc((100% - 900px)/2)) calc(12px + env(safe-area-inset-bottom,0px));
     border-top:1px solid rgba(255,255,255,.1);
-    background:linear-gradient(0deg,rgba(10,10,12,.98),rgba(10,10,12,.84))}
-  @media (pointer:fine){.crrav-sheetfoot{backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px)}}
+    background:#0a0a0c}
+  /* (fix) Idem sheethead/setsearch : opaque par défaut, translucide + flou seulement en
+     pointer:fine, pour éviter la même transparence non floutée sur tactile. */
+  @media (pointer:fine){.crrav-sheetfoot{
+    background:linear-gradient(0deg,rgba(10,10,12,.98),rgba(10,10,12,.84));
+    backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px)}}
   .crrav-sheetfoot>.crrav-btn{flex:1 1 0;min-width:0;padding:12px 12px;font-size:13px}
   .crrav-sheetfoot>[data-act="settings-save"]{flex:1.7 1 0}
   .crrav-settings h3{margin:0 0 16px;font:800 18px/1.1 system-ui;letter-spacing:-.02em;
@@ -14086,6 +14354,14 @@
   // jour la sheet en place SANS la recréer si elle est déjà ouverte et inchangée.
   let sheetOpenInDom = false;
   let FORCE_RENDER = false;
+  // (fix reprise navigation) Mémoire de défilement par onglet : `lastRenderedPanel` détecte
+  // un changement d'onglet (panneau affiché différent du précédent render) pour savoir
+  // QUAND retenter une restauration ; `scrollRestorePending` porte l'onglet dont le scroll
+  // reste à restaurer tant que le contenu n'est pas encore assez haut (chargement en
+  // cours, voir renderNow) — vidé dès que la restauration a pu s'appliquer ou qu'il n'y a
+  // rien à restaurer. `null` = pas de panneau à onglet (recherche globale), jamais mémorisé.
+  let lastRenderedPanel = undefined;
+  let scrollRestorePending = null;
   // Rendu forcé : à utiliser quand une interaction doit reconstruire le DOM même si la
   // sheet réglages est ouverte (changement d'onglet, saisie de réglage, fermeture).
   function forceRender() { FORCE_RENDER = true; renderNow(); }
@@ -14155,6 +14431,59 @@
   // pendant que la sheet reste ouverte — bien plus fréquent). Ce dernier chemin ne rappelait
   // jamais ce câblage : le nouveau champ n'avait alors aucun écouteur 'input', la recherche
   // semblait totalement inerte dès qu'un rendu de fond survenait pendant qu'elle était ouverte.
+  // (31)(fix) Genres exclus : cases à cocher → met à jour l'<input caché> lu par
+  // collectSettings. Factorisé (même raisonnement que wireSettingsSearch juste en dessous) :
+  // buildSettingsSheetBodyHtml() régénère un TOUT NOUVEAU .crrav-genrefield à chaque
+  // reconstruction du corps de la sheet, que ce soit via renderNow() (premier rendu) OU via
+  // patchSettingsSheetInPlace() (tout render de fond pendant que la sheet reste ouverte —
+  // bien plus fréquent, ex. pendant un scan Découverte). Avant ce fix, seul renderNow()
+  // rappelait ce câblage : un render de fond survenant pendant que l'onglet Découverte des
+  // Réglages était ouvert remplaçait silencieusement les cases par des neuves SANS écouteur —
+  // impossible de cocher un genre ou d'en ajouter un tant qu'un tel rendu se produisait.
+  function wireGenreFields(scopeEl) {
+    scopeEl.querySelectorAll('.crrav-genrefield').forEach((field) => {
+      const hidden = field.querySelector('.crrav-genre-hidden');
+      const list = field.querySelector('.crrav-genrelist');
+      if (!hidden || !list) return;
+      const recompute = () => {
+        const toks = [...list.querySelectorAll('.crrav-genre-cb:checked')]
+          .map((cb) => cb.value.trim().toLowerCase()).filter(Boolean);
+        hidden.value = [...new Set(toks)].join(', ');
+      };
+      list.addEventListener('change', (e) => {
+        const cb = e.target.closest('.crrav-genre-cb'); if (!cb) return;
+        const lab = cb.closest('.crrav-genre'); if (lab) lab.classList.toggle('on', cb.checked);
+        recompute();
+      });
+      const more = field.querySelector('.crrav-genre-more');
+      const addBtn = field.querySelector('.crrav-genre-addbtn');
+      const empty = list.querySelector('.crrav-genre-empty');
+      const add = () => {
+        const raw = (more.value || '').trim(); if (!raw) return;
+        const low = raw.toLowerCase();
+        const existing = [...list.querySelectorAll('.crrav-genre-cb')]
+          .find((cb) => cb.value.toLowerCase() === low);
+        if (existing) {
+          existing.checked = true;
+          const lab = existing.closest('.crrav-genre'); if (lab) lab.classList.add('on');
+        } else {
+          if (empty) empty.remove();
+          const lab = document.createElement('label');
+          lab.className = 'crrav-genre on';
+          const cb = document.createElement('input');
+          cb.type = 'checkbox'; cb.className = 'crrav-genre-cb'; cb.checked = true; cb.value = low;
+          const sp = document.createElement('span'); sp.textContent = raw;
+          lab.appendChild(cb); lab.appendChild(sp); list.appendChild(lab);
+        }
+        more.value = ''; recompute(); more.focus();
+      };
+      if (addBtn) addBtn.addEventListener('click', add);
+      if (more) more.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); add(); }
+      });
+    });
+  }
+
   function wireSettingsSearch(scopeEl) {
     const setSearch = scopeEl.querySelector('.crrav-setsearch-input');
     if (!setSearch) return;
@@ -14203,6 +14532,10 @@
       // (51) Même raisonnement que pour le tuner : le nouveau champ de recherche n'a
       // aucun écouteur tant qu'on ne le recâble pas explicitement ici.
       wireSettingsSearch(bodyEl);
+      // (31)(fix) Idem pour les cases « Genres exclus » : ce chemin de patch-in-place
+      // régénère aussi .crrav-genrefield mais sans ce recâblage, cocher/ajouter un genre
+      // restait sans effet dès qu'un rendu de fond survenait sheet ouverte (voir wireGenreFields).
+      wireGenreFields(bodyEl);
     }
     const footEl = sheetEl.querySelector('.crrav-sheetfoot');
     if (footEl) footEl.innerHTML = buildSettingsSheetFootHtml();
@@ -14551,6 +14884,17 @@
     // visible) pendant une recherche.
     const isSearching = !!STATE.filters.globalQ.trim();
 
+    // (fix reprise navigation) Panneau à onglet actuellement affiché — null pendant une
+    // recherche globale (pas de mémoire de scroll pour ce panneau-là, transitoire par
+    // nature). Un changement par rapport au dernier render (tab switch OU tout premier
+    // rendu après ouverture/démarrage) arme une restauration de scroll pour ce panneau
+    // (voir plus bas, juste après l'injection du HTML).
+    const panelKey = isSearching ? null : STATE.tab;
+    if (panelKey !== lastRenderedPanel) {
+      scrollRestorePending = panelKey;
+      lastRenderedPanel = panelKey;
+    }
+
     // Bouton filtres (réplie/déplie bannière + stats + contrôles, voir headerCollapsed) :
     // n'existe que sur les 3 onglets qui ont réellement ce bloc à réplier (Reste à voir /
     // Hors listes / Découverte, voir .crrav-statsrow + .crrav-controls plus bas). Sur
@@ -14599,6 +14943,17 @@
       ? `<button class="crrav-sync crrav-icobtn crrav-legendary-btn" data-act="legendary-discover"
           title="Dé légendaire : scan profond pour dénicher des pépites légendaires"><span class="crrav-dice-gold">🎲</span><span class="crrav-btn-label">${
           STATE.discover.legendaryHunt ? 'Encore des légendaires' : 'Dé légendaire'}</span></button>`
+      : '';
+
+    // Bouton dédié « Rafraîchir les favoris » (Reste à voir uniquement) : la note perso
+    // (5★ = favori, voir getMyRating) est cachée 21 jours (MYRATING_TTL) — une note tout
+    // juste postée sur Crunchyroll n'apparaît donc pas ici avant ce délai. Ce bouton force
+    // le rafraîchissement (ignore le cache) au lieu d'attendre son expiration naturelle.
+    const refreshFavBtn = !isSearching && STATE.tab === 'suivi' && !STATE.loading
+      ? `<button class="crrav-sync crrav-icobtn" data-act="refresh-favorites" aria-busy="${STATE.favRefreshing}"
+          ${STATE.favRefreshing ? 'disabled' : ''}
+          title="Rafraîchir les favoris (notes 5★ postées sur Crunchyroll)"
+          >${STATE.favRefreshing ? '⏳' : '★'}<span class="crrav-btn-label">Favoris</span></button>`
       : '';
 
     // (41) Sous-onglets internes à la sheet Réglages : les 3 panneaux (Réglages /
@@ -14655,6 +15010,7 @@
           ${viewBtn}
           ${moreDiscoverBtn}
           ${legendaryDiscoverBtn}
+          ${refreshFavBtn}
           <button class="crrav-sync crrav-icobtn crrav-hpush" data-act="retry" title="Actualiser">🔄<span class="crrav-btn-label">Actualiser</span></button>
           <button class="crrav-sync crrav-icobtn crrav-tvbtn" data-act="tv" aria-pressed="${CFG.tvMode}"
             title="${CFG.tvMode ? 'Repasser en affichage bureau' : 'Mode TV / salon — gros caractères lisibles de loin'}"
@@ -14686,6 +15042,27 @@
     if (prevSheetScroll > 0) {
       const sheetEl = content.querySelector('.crrav-sheetbody');
       if (sheetEl) sheetEl.scrollTop = prevSheetScroll;
+    }
+
+    // (fix reprise navigation) Restauration du scroll MÉMORISÉ (entre sessions/pages —
+    // voir scrollRestorePending plus haut), distincte de prevScroll ci-dessus qui ne
+    // couvre que les re-rendus EN COURS de session. Ne s'applique QUE si prevScroll n'a
+    // rien restauré (0 : premier rendu après ouverture, ou changement d'onglet — le DOM
+    // vient d'être recréé et repart de 0) — jamais en concurrence avec un scroll bien réel
+    // de l'utilisateur pendant un rafraîchissement de fond sur le MÊME onglet. Retenté à
+    // chaque render() tant que le contenu chargé progressivement n'est pas encore assez
+    // haut pour justifier ce scroll (scrollRestorePending reste actif jusqu'à application
+    // ou constat qu'il n'y a rien à restaurer pour cet onglet).
+    if (prevScroll <= 0 && scrollRestorePending) {
+      const saved = (SESSION_NAV.scrollPos || {})[scrollRestorePending];
+      if (!saved) {
+        scrollRestorePending = null;
+      } else if (content.scrollHeight > content.clientHeight) {
+        content.scrollTop = saved;
+        scrollRestorePending = null;
+      }
+      // sinon : contenu pas encore assez grand (chargement en cours) — nouvelle tentative
+      // au prochain render() du streaming, scrollRestorePending reste actif.
     }
 
     // (fix clavier mobile) Restauration du focus + de la position du curseur (voir
@@ -14798,47 +15175,7 @@
     if (settingsSheetEl) wireDraftHistoryTracking(settingsSheetEl);
 
     // (31) Genres exclus : cases à cocher → met à jour l'<input caché> lu par collectSettings.
-    content.querySelectorAll('.crrav-genrefield').forEach((field) => {
-      const hidden = field.querySelector('.crrav-genre-hidden');
-      const list = field.querySelector('.crrav-genrelist');
-      if (!hidden || !list) return;
-      const recompute = () => {
-        const toks = [...list.querySelectorAll('.crrav-genre-cb:checked')]
-          .map((cb) => cb.value.trim().toLowerCase()).filter(Boolean);
-        hidden.value = [...new Set(toks)].join(', ');
-      };
-      list.addEventListener('change', (e) => {
-        const cb = e.target.closest('.crrav-genre-cb'); if (!cb) return;
-        const lab = cb.closest('.crrav-genre'); if (lab) lab.classList.toggle('on', cb.checked);
-        recompute();
-      });
-      const more = field.querySelector('.crrav-genre-more');
-      const addBtn = field.querySelector('.crrav-genre-addbtn');
-      const empty = list.querySelector('.crrav-genre-empty');
-      const add = () => {
-        const raw = (more.value || '').trim(); if (!raw) return;
-        const low = raw.toLowerCase();
-        const existing = [...list.querySelectorAll('.crrav-genre-cb')]
-          .find((cb) => cb.value.toLowerCase() === low);
-        if (existing) {
-          existing.checked = true;
-          const lab = existing.closest('.crrav-genre'); if (lab) lab.classList.add('on');
-        } else {
-          if (empty) empty.remove();
-          const lab = document.createElement('label');
-          lab.className = 'crrav-genre on';
-          const cb = document.createElement('input');
-          cb.type = 'checkbox'; cb.className = 'crrav-genre-cb'; cb.checked = true; cb.value = low;
-          const sp = document.createElement('span'); sp.textContent = raw;
-          lab.appendChild(cb); lab.appendChild(sp); list.appendChild(lab);
-        }
-        more.value = ''; recompute(); more.focus();
-      };
-      if (addBtn) addBtn.addEventListener('click', add);
-      if (more) more.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') { e.preventDefault(); add(); }
-      });
-    });
+    wireGenreFields(content);
 
     const search = content.querySelector('.crrav-search-global');
     if (search) {
@@ -14968,6 +15305,20 @@
       // qui ne réécrivent que .crrav-content.
       root.innerHTML = '<div class="crrav-ptr">↓</div><div class="crrav-content"></div>';
       attachPullToRefresh(root, root.querySelector('.crrav-ptr'));
+      // (fix reprise navigation) Mémorise le scroll de l'onglet actif en sessionStorage
+      // (SESSION_NAV, PAS localStorage), débattu (400 ms après la fin du défilement) pour
+      // ne pas écrire à chaque pixel. Rien à faire pendant une recherche globale (panneau
+      // transitoire, pas d'onglet).
+      const scrollContent = root.querySelector('.crrav-content');
+      let scrollSaveTimer = null;
+      scrollContent.addEventListener('scroll', () => {
+        clearTimeout(scrollSaveTimer);
+        scrollSaveTimer = setTimeout(() => {
+          if (STATE.filters.globalQ.trim()) return;
+          SESSION_NAV.scrollPos[STATE.tab] = scrollContent.scrollTop;
+          saveSessionNav(SESSION_NAV);
+        }, 400);
+      }, { passive: true });
       root.addEventListener('click', (e) => {
         // Lien vers l'appli Crunchyroll (voir crUrl) : dans certains contextes — surtout une
         // PWA installée (« mode application »), display:standalone — un simple <a href="intent://…">
@@ -15071,6 +15422,33 @@
           handleAddToList(seriesId, title, pickOpt.dataset.picklist);
           return;
         }
+        // Retrait d'une série de tes listes (Reste à voir uniquement) — l'INVERSE de
+        // data-addlist ci-dessus. Action destructive côté Crunchyroll : jamais exécutée
+        // directement au clic, toujours via la modale de confirmation générique (voir
+        // confirmModalHtml / STATE.confirmModal) qui rappelle onConfirm à la validation.
+        const removeBtn = e.target.closest('[data-removelist]');
+        if (removeBtn) {
+          e.preventDefault();
+          const seriesId = removeBtn.dataset.removelist;
+          const title = removeBtn.dataset.title || 'cette série';
+          const s = (STATE.series || []).find((x) => x.id === seriesId);
+          const listNames = [
+            ...((s && s.listIds) || []).map((l) => l.title || 'une Crunchylist'),
+            ...(s && s.inWatchlist ? ['ta watchlist'] : []),
+          ];
+          const where = listNames.length ? listNames.join(', ') : 'tes listes';
+          STATE.confirmModal = {
+            title: 'Retirer de tes listes ?',
+            message: `<p>Retirer <b>${escapeHtml(title)}</b> de <b>${escapeHtml(where)}</b> ?</p>`
+              + `<p>Ta progression de visionnage n'est pas affectée — seule la présence dans ${
+                listNames.length > 1 ? 'ces listes' : 'cette liste'} l'est.</p>`,
+            confirmLabel: 'Retirer',
+            danger: true,
+            onConfirm: () => handleRemoveFromList(seriesId, title),
+          };
+          forceRender();
+          return;
+        }
         if (e.target.closest('[data-picklist-cancel]')) {
           e.preventDefault();
           STATE.listPicker = null;
@@ -15151,6 +15529,11 @@
         if (tabBtn) {
           STATE.tab = tabBtn.dataset.tab;
           STATE.filters.globalQ = '';   // (7) revient à la navigation par onglet normale
+          // (fix reprise navigation) Mémorise l'onglet actif en sessionStorage — restauré
+          // au prochain démarrage du script DANS LE MÊME onglet navigateur (voir SESSION_NAV
+          // / STATE.tab = SESSION_NAV.tab à la construction de STATE).
+          SESSION_NAV.tab = STATE.tab;
+          saveSessionNav(SESSION_NAV);
           render();
           if (STATE.tab === 'decouverte' && !STATE.discover.series.length && !STATE.discover.loading) {
             refreshDiscover();
@@ -15248,6 +15631,8 @@
         }
         if (act.dataset.act === 'retry') refreshActive();
         if (act.dataset.act === 'reload') { location.reload(); return; }
+        if (act.dataset.act === 'refresh-favorites') { refreshFavorites(); return; }
+
         if (act.dataset.act === 'search-scan-orphan-discover') {
           // (7) Scan à la demande depuis la recherche globale : ne lance que les sources
           // pas encore chargées (l'autre peut très bien avoir déjà lastSync sans que
