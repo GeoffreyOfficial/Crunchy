@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.27.0
+// @version      3.28.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.27.0';
+  const SCRIPT_VERSION = '3.28.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -875,7 +875,7 @@
   // de la sheet — il vit tant que l'appli reste ouverte, comme l'était déjà l'historique des
   // ignorées (ex-(45), fusionné ici). Boutons ↩/↪ dans la sheet, à côté du titre « Réglages »
   // (voir historyButtonsHtml), masqués sur l'onglet Diagnostic : rien à y annuler.
-  let appHistory = [{ ignored: new Map(IGNORED), draft: null }];   // [0] = état au chargement
+  let appHistory = [{ ignored: new Map(IGNORED), draft: null, label: null }];   // [0] = état au chargement
   let appHistoryIndex = 0;
   const APP_HISTORY_MAX = 50;   // borne mémoire ; au-delà, les plus vieux instantanés tombent
   function currentSheetEl() {
@@ -927,9 +927,37 @@
       });
     });
   }
-  function pushHistory() {
+  // (47) Table de correspondance clé → définition de champ (label, type, unité…), pour
+  // transformer un instantané de brouillon en texte lisible dans les toasts Annuler/Rétablir.
+  const SETTINGS_FIELD_BY_KEY = {};
+  SETTINGS_SCHEMA.forEach((f) => { SETTINGS_FIELD_BY_KEY[f.key] = f; });
+  function formatFieldValue(f, raw) {
+    if (raw === undefined || raw === null || raw === '') return '';
+    if (f && f.type === 'bool') return (raw === true || raw === 'true') ? 'activé' : 'désactivé';
+    if (f && f.type === 'percent') return `${raw}%`;
+    if (f && f.unit) return `${raw}${f.unit}`;
+    return String(raw);
+  }
+  // Compare deux instantanés de brouillon consécutifs et décrit précisément LE champ qui a
+  // changé entre les deux (libellé + ancienne/nouvelle valeur quand c'est pertinent), pour que
+  // le toast d'Annuler/Rétablir soit spécifique — « Réglage par réglage » — plutôt qu'un vague
+  // « changement annulé ». Retourne null si rien de comparable (brouillon absent d'un côté,
+  // ou strictement aucune différence).
+  function diffDraftLabel(oldSnap, newSnap) {
+    if (!oldSnap || !newSnap) return null;
+    const changed = Object.keys(newSnap).filter((k) => oldSnap[k] !== newSnap[k]);
+    if (changed.length === 0) return null;
+    if (changed.length > 1) return 'Plusieurs réglages modifiés';
+    const key = changed[0];
+    const f = SETTINGS_FIELD_BY_KEY[key];
+    const label = f ? f.label : key;
+    if (f && f.type === 'bool') return `${label} ${formatFieldValue(f, newSnap[key])}`;
+    if (f && (f.type === 'list' || f.type === 'listselect')) return `${label} modifié`;
+    return `${label} : ${formatFieldValue(f, oldSnap[key])} → ${formatFieldValue(f, newSnap[key])}`;
+  }
+  function pushHistory(label) {
     appHistory = appHistory.slice(0, appHistoryIndex + 1);
-    appHistory.push({ ignored: new Map(IGNORED), draft: captureDraft() });
+    appHistory.push({ ignored: new Map(IGNORED), draft: captureDraft(), label: label || null });
     if (appHistory.length > APP_HISTORY_MAX) appHistory.shift();
     appHistoryIndex = appHistory.length - 1;
   }
@@ -968,7 +996,7 @@
       if (!snap) return;
       const last = appHistory[appHistoryIndex];
       if (last && last.draft && JSON.stringify(snap) === JSON.stringify(last.draft)) return;
-      pushHistory();
+      pushHistory(diffDraftLabel(last && last.draft, snap));
       updateHistoryButtonsUI(sheetEl);
     }, 300);
     ['input', 'change', 'click', 'pointerup'].forEach((evt) => {
@@ -977,14 +1005,17 @@
   }
 
   function toggleIgnored(id, title, source, poster, synopsis) {
-    if (IGNORED.has(id)) IGNORED.delete(id);
+    const wasIgnored = IGNORED.has(id);
+    if (wasIgnored) IGNORED.delete(id);
     else IGNORED.set(id, {
       title: title || '', source: source || 'watchlist',
       poster: poster || '', synopsis: synopsis || '',
       ignoredAt: Date.now(),   // (43)
     });
     saveIgnored();
-    pushHistory();   // (46)
+    // (46)(47) Libellé du geste pour le toast Annuler/Rétablir — précise quelle série et
+    // dans quel sens, plutôt qu'un vague « changement ».
+    pushHistory(`« ${title || 'Série'} » ${wasIgnored ? 'réaffichée' : 'ignorée'}`);
   }
   function ignoredCount(source) {
     let n = 0;
@@ -8934,6 +8965,9 @@
   .crrav-confirm-msg{font:400 12.5px/1.5 system-ui;color:#c9c9d2}
   .crrav-confirm-msg p{margin:0 0 8px}.crrav-confirm-msg p:last-child{margin-bottom:0}
   .crrav-confirm-msg b{color:#f2f2f4;font-weight:700}
+  .crrav-confirm-list{margin:0 0 8px;padding-left:18px;max-height:160px;overflow-y:auto}
+  .crrav-confirm-list li{margin:2px 0}
+  .crrav-confirm-list li.crrav-confirm-more{color:#8f8f99;list-style:none;margin-left:-18px}
   .crrav-confirm-actions{display:flex;gap:8px;margin-top:2px}
   .crrav-confirm-cancel{flex:1;background:transparent;border:1px solid rgba(255,255,255,.15);
     border-radius:10px;padding:11px;color:#c9c9d2;font:600 13px/1 system-ui;cursor:pointer}
@@ -13887,6 +13921,18 @@
     return patch;
   }
 
+  // (48) Réglages saisis dans le formulaire (sheet ouverte, onglet Réglages) mais pas encore
+  // enregistrés via le bouton « Enregistrer » — c-à-d divergents de CFG. Même logique de
+  // comparaison que le calcul d'impact de 'settings-save' (avant/après JSON.stringify par
+  // clé), appliquée ici au brouillon courant plutôt qu'à un patch déjà sauvegardé. Utilisé
+  // pour avertir avant une fermeture qui perdrait ces changements (voir 'settings' ci-dessous).
+  function unsavedSettingsChanges() {
+    if (!root) return [];
+    const patch = collectSettings();
+    return SETTINGS_SCHEMA.filter((f) => f.key in patch
+      && JSON.stringify(patch[f.key]) !== JSON.stringify(CFG[f.key]));
+  }
+
 
 
   // (2) ne détruit que les données re-téléchargeables (cache IndexedDB + éventuels
@@ -15287,6 +15333,34 @@
           return;
         }
         if (act.dataset.act === 'settings') {
+          // (48) Fermeture (croix ✕ du pied de sheet OU ré-appui sur ⚙, les deux passent par
+          // ce même data-act) alors que des réglages du formulaire diffèrent encore de CFG,
+          // c-à-d pas encore enregistrés via 'settings-save' : on demande confirmation au
+          // lieu de perdre silencieusement la saisie, avec la liste des réglages concernés
+          // (ou juste leur nombre au-delà de MAX_LISTED, pour ne pas noyer la boîte de
+          // dialogue si beaucoup de champs ont été touchés — ex. changement de preset).
+          if (STATE.settingsOpen && settingsSheetTab === 'settings') {
+            const dirty = unsavedSettingsChanges();
+            if (dirty.length) {
+              const MAX_LISTED = 6;
+              const items = dirty.slice(0, MAX_LISTED)
+                .map((f) => `<li>${escapeHtml(f.label)}</li>`).join('');
+              const rest = dirty.length - MAX_LISTED;
+              const n = dirty.length;
+              STATE.confirmModal = {
+                title: 'Fermer sans enregistrer ?',
+                message: `<p><b>${n}</b> réglage${n > 1 ? 's' : ''} modifié${n > 1 ? 's' : ''} `
+                  + `${n > 1 ? "n'ont" : "n'a"} pas été enregistré${n > 1 ? 's' : ''} :</p>`
+                  + `<ul class="crrav-confirm-list">${items}`
+                  + `${rest > 0 ? `<li class="crrav-confirm-more">+ ${rest} autre${rest > 1 ? 's' : ''}…</li>` : ''}</ul>`,
+                confirmLabel: 'Fermer sans enregistrer',
+                danger: true,
+                onConfirm: () => { STATE.settingsOpen = false; forceRender(); },
+              };
+              forceRender();
+              return;
+            }
+          }
           STATE.settingsOpen = !STATE.settingsOpen;
           // (41) Rouvrir la sheet repart toujours sur le sous-onglet Réglages — comme
           // l'ancien empilement, qui affichait toujours ce panneau en premier en haut.
@@ -15391,16 +15465,27 @@
           resetSettings(); scheduleAutoRefresh(); forceRender();
         }
         if (act.dataset.act === 'hist-undo' || act.dataset.act === 'hist-redo') {
-          // (46) Annuler/Rétablir unifié (ignorées + brouillon de Réglages) — voir pushHistory.
-          if (act.dataset.act === 'hist-undo' && appHistoryIndex > 0) {
+          // (46)(47) Annuler/Rétablir unifié (ignorées + brouillon de Réglages), réglage par
+          // réglage : chaque entrée de la pile porte un libellé décrivant CE qu'elle change
+          // (voir pushHistory / diffDraftLabel / toggleIgnored) — un clic ne fait reculer/
+          // avancer l'index que d'UN cran, et le toast confirme précisément ce qui vient
+          // d'être annulé ou rétabli, pas juste « changement annulé ».
+          const isUndo = act.dataset.act === 'hist-undo';
+          let toastLabel;
+          if (isUndo && appHistoryIndex > 0) {
+            toastLabel = appHistory[appHistoryIndex].label;   // libellé du pas qu'on défait
             appHistoryIndex--;
-          } else if (act.dataset.act === 'hist-redo' && appHistoryIndex < appHistory.length - 1) {
+          } else if (!isUndo && appHistoryIndex < appHistory.length - 1) {
             appHistoryIndex++;
+            toastLabel = appHistory[appHistoryIndex].label;   // libellé du pas qu'on rejoue
           } else {
             return;
           }
           applyHistory(appHistory[appHistoryIndex]);
           forceRender();
+          showToast(isUndo
+            ? `↩ Annulé : ${toastLabel || 'dernier changement'}`
+            : `↪ Rétabli : ${toastLabel || 'changement suivant'}`);
           return;
         }
         if (act.dataset.act === 'tv') {
