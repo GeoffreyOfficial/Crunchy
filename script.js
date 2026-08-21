@@ -7134,6 +7134,12 @@
   let ignoredSelected = new Set();
   let ignoredCollapsedGroups = new Set();
   let suppressAccToggle = false;   // évite de polluer statsAccordionOpen lors d'ouvertures programmatiques
+  // (44) Historique Annuler/Rétablir des réglages EN COURS DE MODIFICATION (pas encore
+  // enregistrés) : liste d'instantanés des champs [data-set] de la sheet Réglages, avec un
+  // index pointant l'instantané courant. Repart de zéro à chaque (ré)ouverture de la sheet
+  // (voir wiring de .crrav-settingssheet) — jamais persisté, jamais lié à STATE.
+  let settingsHistory = [];
+  let settingsHistoryIndex = -1;
   safeCall(() => {
     const raw = JSON.parse(localStorage.getItem(LS + 'hues') || '{}');
     for (const [k, v] of Object.entries(raw)) HUE_CACHE.set(k, v);
@@ -9139,6 +9145,20 @@
     .crrav-scoretuner .preset-cell b{margin-bottom:2px}
     .crrav-scoretuner .preset-cell .mobile-tag{display:inline-block;color:var(--st-faint);font:600 10.5px/1 system-ui}
     .crrav-scoretuner .preset-cell .diffchip{margin-top:0;flex:0 0 auto}
+    /* (44) Hauteur fixe + défilement interne : sans ça, la matrice de presets (4 lignes ×
+       3 colonnes empilées) pousse tout le reste de la page vers le bas et « Découverte de
+       réglages » devient un scroll sans fin sur téléphone. Le conteneur garde une hauteur
+       stable et c'est LUI qui défile, pas la page. */
+    .crrav-scoretuner .matrix-wrap{max-height:44vh;overflow-y:auto;-webkit-overflow-scrolling:touch;
+      border:1px solid var(--st-border);border-radius:12px;padding:6px}
+    .crrav-scoretuner .matrix{padding:0}
+    /* (44) Idem pour le bloc « Détail complet » (schéma + les 16 curseurs) : hauteur fixe et
+       défilement interne au lieu de repousser toute la page. Le résumé reste collé en haut du
+       bloc pendant le défilement, pour pouvoir le refermer sans remonter en haut de la sheet. */
+    .crrav-scoretuner details.det[open]{max-height:56vh;overflow-y:auto;-webkit-overflow-scrolling:touch;
+      border:1px solid var(--st-border);border-radius:12px;padding:0 10px 10px}
+    .crrav-scoretuner details.det[open]>summary{position:sticky;top:0;background:var(--st-panel);
+      z-index:2;margin:0 -10px 4px;padding:12px 10px}
   }
 
   /* ---------- schéma interactif ---------- */
@@ -9465,6 +9485,11 @@
     border-top:1px solid rgba(255,255,255,.08)}
   .crrav-sactions-primary>.crrav-btn{flex:1 1 auto;min-width:0}
   .crrav-sactions-primary>[data-act="settings-save"]{flex:2 1 0}
+  /* (44) Boutons Annuler/Rétablir : icônes compactes à largeur fixe, ne doivent jamais
+     grandir/rétrécir avec le reste de la barre (Enregistrer/Valeurs par défaut). */
+  .crrav-sactions .crrav-histbtn,.crrav-sheetfoot .crrav-histbtn{flex:0 0 auto !important;
+    width:40px;padding:9px 0;font-size:16px;text-align:center}
+  .crrav-btn:disabled{opacity:.32;cursor:not-allowed}
   /* Garde-fou libellés : les boutons d'action des Réglages (barre collante « Enregistrer /
      Valeurs par défaut » ET pied de feuille mobile) doivent TOUJOURS afficher leur texte.
      La règle globale .crrav-btn-label{display:none} est réservée aux icônes de la barre du
@@ -12717,6 +12742,7 @@
       </div>
       <div class="crrav-sgroups">${groups}</div>
       <div class="crrav-sactions crrav-sactions-primary">
+        ${settingsHistoryButtonsHtml()}
         <button class="crrav-btn primary" data-act="settings-save">Enregistrer et actualiser</button>
         <button class="crrav-btn ghost" data-act="settings-reset">Valeurs par défaut</button>
       </div>
@@ -13752,6 +13778,92 @@
     return patch;
   }
 
+  // (44) Instantané brut de tous les champs [data-set] de la sheet Réglages, PAS validé/typé
+  // (contrairement à collectSettings) : on veut pouvoir restaurer exactement ce qui était
+  // affiché, y compris une saisie intermédiaire pas encore blur/validée.
+  function snapshotSettingsDraft(sheetRoot) {
+    const snap = {};
+    sheetRoot.querySelectorAll('[data-set]').forEach((el) => {
+      snap[el.dataset.set] = el.type === 'checkbox' ? el.checked : el.value;
+    });
+    return snap;
+  }
+
+  // (44) Réapplique un instantané aux champs de la sheet, en redéclenchant les événements
+  // natifs (input/change) de chaque champ modifié pour que TOUT ce qui en dépend se remette
+  // à jour tout seul — libellé de curseur, matrice de presets, schéma interactif (via son
+  // propre écouteur sur les curseurs de détail), sans jamais toucher CFG (toujours un
+  // brouillon tant qu'on n'a pas cliqué « Enregistrer »).
+  function restoreSettingsDraft(sheetRoot, snap) {
+    if (!snap) return;
+    sheetRoot.querySelectorAll('[data-set]').forEach((el) => {
+      if (!(el.dataset.set in snap)) return;
+      const v = snap[el.dataset.set];
+      if (el.type === 'checkbox') {
+        if (el.checked === v) return;
+        el.checked = v;
+      } else {
+        if (el.value === v) return;
+        el.value = v;
+      }
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    // Chips de genres exclus : dérivées du champ caché restauré ci-dessus (elles ne sont pas
+    // elles-mêmes des [data-set], donc pas capturées par l'instantané — on les resynchronise
+    // à partir de la valeur qu'on vient de réappliquer).
+    sheetRoot.querySelectorAll('.crrav-genrefield').forEach((field) => {
+      const hidden = field.querySelector('.crrav-genre-hidden');
+      if (!hidden) return;
+      const set = new Set(hidden.value.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean));
+      field.querySelectorAll('.crrav-genre-cb').forEach((cb) => {
+        const on = set.has(cb.value.toLowerCase());
+        cb.checked = on;
+        const lab = cb.closest('.crrav-genre'); if (lab) lab.classList.toggle('on', on);
+      });
+    });
+  }
+
+  function updateSettingsHistoryButtons(sheetRoot) {
+    const undoBtn = sheetRoot.querySelector('[data-act="settings-undo"]');
+    const redoBtn = sheetRoot.querySelector('[data-act="settings-redo"]');
+    if (undoBtn) undoBtn.disabled = settingsHistoryIndex <= 0;
+    if (redoBtn) redoBtn.disabled = settingsHistoryIndex >= settingsHistory.length - 1;
+  }
+
+  // (44) Câble le suivi Annuler/Rétablir sur le nœud .crrav-settingssheet. `resetBaseline`
+  // (true à l'ouverture de la sheet) repart d'un historique à un seul point : l'état actuel.
+  // Les écouteurs sont posés UNE FOIS sur ce nœud (garde data-histWired) — comme il n'est
+  // recréé qu'à l'ouverture (voir patchSettingsSheetInPlace, qui ne touche que son intérieur),
+  // ils restent valides même quand le corps/pied de la sheet sont reconstruits en interne.
+  function wireSettingsHistory(sheetEl, resetBaseline) {
+    if (!sheetEl) return;
+    if (resetBaseline) {
+      settingsHistory = [snapshotSettingsDraft(sheetEl)];
+      settingsHistoryIndex = 0;
+    }
+    updateSettingsHistoryButtons(sheetEl);
+    if (sheetEl.dataset.histWired === '1') return;
+    sheetEl.dataset.histWired = '1';
+    // Instantané pris après coup (setTimeout 0) : les gestes qui modifient l'état SANS
+    // déclencher d'événement natif (clic sur un preset, relâchement d'un curseur du schéma)
+    // écrivent directement dans le DOM depuis leurs propres écouteurs internes — on laisse
+    // ces écouteurs s'exécuter d'abord, puis on capture l'état final, débrouncé pour ne pas
+    // empiler un point par frappe/pixel glissé.
+    const scheduleSnapshot = debounce(() => {
+      const snap = snapshotSettingsDraft(sheetEl);
+      const last = settingsHistory[settingsHistoryIndex];
+      if (last && JSON.stringify(snap) === JSON.stringify(last)) return;
+      settingsHistory = settingsHistory.slice(0, settingsHistoryIndex + 1);
+      settingsHistory.push(snap);
+      settingsHistoryIndex = settingsHistory.length - 1;
+      updateSettingsHistoryButtons(sheetEl);
+    }, 300);
+    ['input', 'change', 'click', 'pointerup'].forEach((evt) => {
+      sheetEl.addEventListener(evt, () => setTimeout(scheduleSnapshot, 0));
+    });
+  }
+
   // (2) ne détruit que les données re-téléchargeables (cache IndexedDB + éventuels
   // restes localStorage d'une installation pas encore migrée).
   function clearCache() {
@@ -13893,13 +14005,24 @@
   // complet », au même endroit et avec le même style (.crrav-btn primary) que l'action
   // de Réglages — une seule action principale, toujours au même emplacement collé en
   // bas, quel que soit l'onglet.
+  // (44) Boutons ↩ Annuler / ↪ Rétablir : icônes compactes pour ne pas prendre la place du
+  // bouton principal « Enregistrer » sur la barre d'actions (mobile ET desktop). Désactivés
+  // par défaut — updateSettingsHistoryButtons() les (dés)active selon l'historique courant.
+  function settingsHistoryButtonsHtml() {
+    return `<button class="crrav-btn ghost crrav-histbtn" data-act="settings-undo"
+        aria-label="Annuler le dernier changement" title="Annuler" disabled>↩</button>
+      <button class="crrav-btn ghost crrav-histbtn" data-act="settings-redo"
+        aria-label="Rétablir le changement annulé" title="Rétablir" disabled>↪</button>`;
+  }
+
   function buildSettingsSheetFootHtml() {
     if (settingsSheetTab === 'ignored') return ignoredFootHtml();
     if (settingsSheetTab === 'diag') {
       return `<button class="crrav-btn primary" data-act="full-diag"${STATE.fullDiagRunning ? ' disabled' : ''}>
         ${STATE.fullDiagRunning ? '⏳ Diagnostic en cours…' : '🩺 Lancer le diagnostic complet'}</button>`;
     }
-    return `<button class="crrav-btn ghost" data-act="settings-reset">Valeurs par défaut</button>
+    return `${settingsHistoryButtonsHtml()}
+      <button class="crrav-btn ghost" data-act="settings-reset">Valeurs par défaut</button>
       <button class="crrav-btn primary" data-act="settings-save">Enregistrer et actualiser</button>`;
   }
 
@@ -13944,6 +14067,10 @@
     }
     const footEl = sheetEl.querySelector('.crrav-sheetfoot');
     if (footEl) footEl.innerHTML = buildSettingsSheetFootHtml();
+    // (44) Le pied (boutons Annuler/Rétablir) vient d'être reconstruit : les écouteurs posés
+    // sur sheetEl restent valides (délégation, garde data-histWired), mais l'état
+    // disabled des boutons doit être réappliqué sur ce nouveau markup.
+    wireSettingsHistory(sheetEl, false);
   }
 
   // render() regroupe les appels sur une frame : pendant un chargement, il était invoqué
@@ -14496,6 +14623,10 @@
     // (le drag du schéma n'est jamais interrompu). collectSettings lit ces curseurs à l'enregistrement.
     const scoreTunerEl = content.querySelector('.crrav-scoretuner');
     if (scoreTunerEl) initScoreTuner(scoreTunerEl);
+
+    // (44) Annuler/Rétablir : repart d'un historique neuf à chaque (ré)ouverture de la sheet.
+    const settingsSheetEl = content.querySelector('.crrav-settingssheet');
+    if (settingsSheetEl) wireSettingsHistory(settingsSheetEl, true);
 
     // (31) Genres exclus : cases à cocher → met à jour l'<input caché> lu par collectSettings.
     content.querySelectorAll('.crrav-genrefield').forEach((field) => {
@@ -15215,6 +15346,23 @@
         }
         if (act.dataset.act === 'settings-reset') {
           resetSettings(); scheduleAutoRefresh(); forceRender();
+        }
+        if (act.dataset.act === 'settings-undo' || act.dataset.act === 'settings-redo') {
+          // (44) Ne touche jamais CFG : on ne fait que réappliquer un instantané aux champs
+          // de la sheet, comme n'importe quelle autre modification en cours d'édition —
+          // il faudra toujours cliquer « Enregistrer » pour que ça compte pour de bon.
+          const sheetEl = root.querySelector('.crrav-settingssheet');
+          if (!sheetEl) return;
+          if (act.dataset.act === 'settings-undo' && settingsHistoryIndex > 0) {
+            settingsHistoryIndex--;
+          } else if (act.dataset.act === 'settings-redo' && settingsHistoryIndex < settingsHistory.length - 1) {
+            settingsHistoryIndex++;
+          } else {
+            return;
+          }
+          restoreSettingsDraft(sheetEl, settingsHistory[settingsHistoryIndex]);
+          updateSettingsHistoryButtons(sheetEl);
+          return;
         }
         if (act.dataset.act === 'tv') {
           // Bascule directe : le mode TV se change bien plus souvent que les autres
