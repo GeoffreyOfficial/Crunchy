@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.12.0
+// @version      3.19.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.17.0';
+  const SCRIPT_VERSION = '3.19.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -813,29 +813,50 @@
   // absent sur les entrées migrées d'avant cette version) permet de trier/afficher
   // depuis quand une série est ignorée dans le panneau Réglages.
   let IGNORED = new Map();
+  // (fix) Entrées ignorées avant l'ajout d'ignoredAt (43) : date inconnue → 0, affiché
+  // nulle part faute de mieux. Plutôt qu'un vide gênant dans le tri « par date » et
+  // l'affichage, on leur attribue rétroactivement une date plancher (demande explicite) :
+  // midi UTC le 17 août 2026, pour que le tri par date reste cohérent sans laisser
+  // deviner une heure précise qui n'a jamais existé.
+  const RETRO_IGNORED_AT = Date.UTC(2026, 7, 17, 12, 0, 0);
+  let ignoredRetroApplied = false;
   safeCall(() => {
     const raw = APP_STATE.ignored;
     if (Array.isArray(raw)) {
       // Format < 2.8.2 : simple liste d'identifiants, titres et source inconnus.
-      for (const id of raw) IGNORED.set(id, { title: '', source: 'watchlist' });
+      for (const id of raw) {
+        IGNORED.set(id, { title: '', source: 'watchlist', ignoredAt: RETRO_IGNORED_AT });
+        ignoredRetroApplied = true;
+      }
     } else if (raw && typeof raw === 'object') {
       for (const [id, val] of Object.entries(raw)) {
         if (val && typeof val === 'object') {
           // Format ≥ 2.12 : { title, source }. Format ≥ 2.87 : + { poster, synopsis }
           // pour pouvoir les afficher dans les vues « Ignorées » sans refaire d'appel réseau.
+          if (!val.ignoredAt) ignoredRetroApplied = true;
           IGNORED.set(id, {
             title: val.title || '', source: val.source || 'watchlist',
             poster: val.poster || '', synopsis: val.synopsis || '',
-            ignoredAt: val.ignoredAt || 0,   // (43) 0 = date inconnue (entrée antérieure à cette version)
+            ignoredAt: val.ignoredAt || RETRO_IGNORED_AT,   // (43)
           });
         } else {
           // Format 2.8.2–2.11 : titre en simple chaîne, source inconnue → on suppose
           // watchlist (comportement historique) pour ne rien perdre à la migration.
-          IGNORED.set(id, { title: val || '', source: 'watchlist' });
+          IGNORED.set(id, { title: val || '', source: 'watchlist', ignoredAt: RETRO_IGNORED_AT });
+          ignoredRetroApplied = true;
         }
       }
     }
   }, undefined, 'ignored:load');
+  // Persisté une seule fois : sans ça, la date plancher serait recalculée en mémoire à
+  // chaque chargement sans jamais être écrite, ce qui fonctionne mais fait retomber sur
+  // ignoredAt=0 dans le JSON stocké si un autre outil venait à le lire directement.
+  if (ignoredRetroApplied) {
+    const obj = {};
+    for (const [id, v] of IGNORED) obj[id] = v;
+    APP_STATE.ignored = obj;
+    persistState(APP_STATE);
+  }
 
   function saveIgnored() {
     const obj = {};
@@ -8303,6 +8324,14 @@
   .crrav-select optgroup{background:#1c1c22;color:#f47521;font:700 12px/1 system-ui;font-style:normal}
   .crrav-select optgroup option{color:#f2f2f4;font-weight:400}
   .crrav-chips{display:flex;gap:6px;flex-wrap:wrap;width:100%}
+  /* Toggles rapides (Favoris / Finissable / Masquer saison en cours…) sur une seule
+     ligne plutôt que de repasser à la ligne — mêmes principes que .crrav-groupchips :
+     puces resserrées, défilement horizontal en dernier recours sur les tout petits
+     écrans plutôt qu'un retour à la ligne qui mange de la hauteur. */
+  .crrav-chips-quick{flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;
+    scrollbar-width:none}
+  .crrav-chips-quick::-webkit-scrollbar{display:none}
+  .crrav-chips-quick .crrav-chip{flex:0 0 auto;white-space:nowrap;padding:6px 11px;font-size:12px}
   .crrav-chip{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.12);color:#c9c9d2;
     border-radius:999px;padding:6px 13px;font:600 12.5px/1 system-ui;cursor:pointer;text-decoration:none;
     display:inline-flex;align-items:center;gap:5px}
@@ -9584,8 +9613,8 @@
     display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;white-space:normal;word-break:break-word}
   .crrav-ignrow-src{flex:0 0 auto;color:#8a8a94;font:600 10px/1 system-ui;text-transform:uppercase;
     letter-spacing:.04em}
-  /* (43) date relative d'ignore (fmtRelDay) — absente sur les entrées migrées d'avant
-     cette version (ignoredAt=0), donc pas de style de "vide" à prévoir. */
+  /* (43) date relative d'ignore (fmtRelDay) — toutes les entrées ont désormais une date
+     (voir RETRO_IGNORED_AT : 17 août 2026 rétroactif pour celles migrées sans date). */
   .crrav-ignrow-date{flex:0 0 auto;color:#6f6f79;font:500 10.5px/1 system-ui}
   /* (43) case à cocher de sélection multiple — même emplacement que la jaquette,
      avant elle, pour rester lisible même quand la ligne n'a pas de poster. */
@@ -10012,6 +10041,8 @@
     .crrav-stat b{font-size:17px}
     .crrav-stat small{font-size:9.5px}
     .crrav-select-compact{max-width:92px;font-size:10.5px;padding:6px 20px 6px 7px}
+    .crrav-chips-quick .crrav-chip{padding:5px 9px;font-size:11px}
+    .crrav-groupchip .crrav-chip-toggle{padding:4px 8px;font-size:10.5px}
   }
 
   /* ═══════════════════════════════════════════════════════════════════════════
@@ -11431,7 +11462,7 @@
           </div>` : ''}
           ${groupingControls(f)}
           <div class="crrav-chipgroup crrav-chipgroup-toggle">
-            <div class="crrav-chips crrav-chips-toggle">${toggleChips}</div>
+            <div class="crrav-chips crrav-chips-toggle crrav-chips-quick">${toggleChips}</div>
           </div>
           ${catChips(categoriesOf(STATE.series), f.catsIn, f.catsEx, 'suivi')}
         </div>
@@ -11520,17 +11551,25 @@
             <div class="crrav-stat"><b>${fmtDuration(list.reduce((a, s) => a + (s.secTotal || 0), 0))}</b><small>à voir</small></div>
           </div>
           <select class="crrav-select crrav-select-compact" data-act="sort" data-scope="discover">
-            <option value="relevance"${f.discoverSort === 'relevance' ? ' selected' : ''}>Pertinence (signaux + note)</option>
-            <option value="popularity"${f.discoverSort === 'popularity' ? ' selected' : ''}>Popularité</option>
-            <option value="seasons"${f.discoverSort === 'seasons' ? ' selected' : ''}>Le moins de saisons</option>
-            <option value="duration"${f.discoverSort === 'duration' ? ' selected' : ''}>Le moins de temps à voir</option>
-            <option value="recent"${f.discoverSort === 'recent' ? ' selected' : ''}>Publication récente</option>
-            <option value="oldest"${f.discoverSort === 'oldest' ? ' selected' : ''}>Publication ancienne</option>
-            <option value="seasonsDesc"${f.discoverSort === 'seasonsDesc' ? ' selected' : ''}>Le plus de saisons</option>
-            <option value="durationDesc"${f.discoverSort === 'durationDesc' ? ' selected' : ''}>Le plus de temps à voir</option>
-            <option value="episodes"${f.discoverSort === 'episodes' ? ' selected' : ''}>Le plus d'épisodes</option>
-            <option value="title"${f.discoverSort === 'title' ? ' selected' : ''}>Titre A→Z</option>
-            <option value="titleDesc"${f.discoverSort === 'titleDesc' ? ' selected' : ''}>Titre Z→A</option>
+            <optgroup label="Par pertinence">
+              <option value="relevance"${f.discoverSort === 'relevance' ? ' selected' : ''}>Pertinence (signaux + note)</option>
+              <option value="popularity"${f.discoverSort === 'popularity' ? ' selected' : ''}>Popularité</option>
+            </optgroup>
+            <optgroup label="Par temps">
+              <option value="seasons"${f.discoverSort === 'seasons' ? ' selected' : ''}>Le moins de saisons</option>
+              <option value="duration"${f.discoverSort === 'duration' ? ' selected' : ''}>Le moins de temps à voir</option>
+              <option value="seasonsDesc"${f.discoverSort === 'seasonsDesc' ? ' selected' : ''}>Le plus de saisons</option>
+              <option value="durationDesc"${f.discoverSort === 'durationDesc' ? ' selected' : ''}>Le plus de temps à voir</option>
+              <option value="episodes"${f.discoverSort === 'episodes' ? ' selected' : ''}>Le plus d'épisodes</option>
+            </optgroup>
+            <optgroup label="Par date">
+              <option value="recent"${f.discoverSort === 'recent' ? ' selected' : ''}>Publication récente</option>
+              <option value="oldest"${f.discoverSort === 'oldest' ? ' selected' : ''}>Publication ancienne</option>
+            </optgroup>
+            <optgroup label="Par titre">
+              <option value="title"${f.discoverSort === 'title' ? ' selected' : ''}>Titre A→Z</option>
+              <option value="titleDesc"${f.discoverSort === 'titleDesc' ? ' selected' : ''}>Titre Z→A</option>
+            </optgroup>
           </select>
         </div>
         <div class="crrav-controls">
@@ -11609,23 +11648,29 @@
             <div class="crrav-stat"><b>${fmtDuration(secLeft)}</b><small>à voir</small></div>
           </div>
           <select class="crrav-select crrav-select-compact" data-act="sort" data-scope="orphan">
-            <option value="remaining"${f.orphanSort === 'remaining' ? ' selected' : ''}>Le plus d'épisodes à voir</option>
-            <option value="time"${f.orphanSort === 'time' ? ' selected' : ''}>Le plus de temps à voir</option>
-            <option value="quickest"${f.orphanSort === 'quickest' ? ' selected' : ''}>Finissable ce soir</option>
-            <option value="closest"${f.orphanSort === 'closest' ? ' selected' : ''}>Bientôt fini</option>
-            <option value="progress"${f.orphanSort === 'progress' ? ' selected' : ''}>Progression</option>
-            <option value="lastWatched"${f.orphanSort === 'lastWatched' ? ' selected' : ''}>Dernier vu</option>
-            <option value="recent"${f.orphanSort === 'recent' ? ' selected' : ''}>Publication récente</option>
-            <option value="oldest"${f.orphanSort === 'oldest' ? ' selected' : ''}>Publication ancienne</option>
-            <option value="leastProgress"${f.orphanSort === 'leastProgress' ? ' selected' : ''}>Les plus délaissées</option>
-            <option value="longest"${f.orphanSort === 'longest' ? ' selected' : ''}>Série la plus longue</option>
-            <option value="shortest"${f.orphanSort === 'shortest' ? ' selected' : ''}>Série la plus courte</option>
-            <option value="title"${f.orphanSort === 'title' ? ' selected' : ''}>Titre A→Z</option>
-            <option value="titleDesc"${f.orphanSort === 'titleDesc' ? ' selected' : ''}>Titre Z→A</option>
+            <optgroup label="Par temps">
+              <option value="remaining"${f.orphanSort === 'remaining' ? ' selected' : ''}>Le plus d'épisodes à voir</option>
+              <option value="time"${f.orphanSort === 'time' ? ' selected' : ''}>Le plus de temps à voir</option>
+              <option value="quickest"${f.orphanSort === 'quickest' ? ' selected' : ''}>Finissable ce soir</option>
+              <option value="closest"${f.orphanSort === 'closest' ? ' selected' : ''}>Bientôt fini</option>
+              <option value="progress"${f.orphanSort === 'progress' ? ' selected' : ''}>Progression</option>
+              <option value="leastProgress"${f.orphanSort === 'leastProgress' ? ' selected' : ''}>Les plus délaissées</option>
+              <option value="longest"${f.orphanSort === 'longest' ? ' selected' : ''}>Série la plus longue</option>
+              <option value="shortest"${f.orphanSort === 'shortest' ? ' selected' : ''}>Série la plus courte</option>
+            </optgroup>
+            <optgroup label="Par date">
+              <option value="lastWatched"${f.orphanSort === 'lastWatched' ? ' selected' : ''}>Dernier vu</option>
+              <option value="recent"${f.orphanSort === 'recent' ? ' selected' : ''}>Publication récente</option>
+              <option value="oldest"${f.orphanSort === 'oldest' ? ' selected' : ''}>Publication ancienne</option>
+            </optgroup>
+            <optgroup label="Par titre">
+              <option value="title"${f.orphanSort === 'title' ? ' selected' : ''}>Titre A→Z</option>
+              <option value="titleDesc"${f.orphanSort === 'titleDesc' ? ' selected' : ''}>Titre Z→A</option>
+            </optgroup>
           </select>
         </div>
         <div class="crrav-controls">
-          <div class="crrav-chips">${quickChips(f)}</div>
+          <div class="crrav-chips crrav-chips-quick">${quickChips(f)}</div>
           ${catChips(categoriesOf(STATE.orphan.series), f.orphanCatsIn, f.orphanCatsEx, 'orphan')}
         </div>
       </div>
@@ -11762,6 +11807,10 @@
       <div class="group">
         <div class="group-h">🎯 Genre préféré</div>
         <div id="crst-grpPref"></div>
+      </div>
+      <div class="group">
+        <div class="group-h">💞 Reco d'un favori</div>
+        <div id="crst-grpFavRec"></div>
       </div>
       <div class="group">
         <div class="group-h">🏆 Notes</div>
@@ -12273,6 +12322,8 @@
       ],
       'crst-grpPref': [
         ['discoverPrefGenreBonus', 'Bonus « genre préféré » 🎯', 0, 2, 0.1, 'Ajouté quand la série touche un genre que ton profil identifie comme favori.'],
+      ],
+      'crst-grpFavRec': [
         ['discoverFavRecBonus', 'Bonus « reco d’un favori » 💞', 0, 2, 0.1, 'Ajouté quand la série fait partie des recommandations communautaires AniList d’un de tes favoris (séries notées 5★). Bonus à part, non piloté par les presets — un signal « proche de ce que tu adores ».'],
       ],
       'crst-grpNotes': [
@@ -13460,11 +13511,17 @@
         <input class="crrav-search crrav-search-ignored" placeholder="Chercher une série ignorée…"
           value="${escapeHtml(STATE.ignoredQ)}">
         <select class="crrav-select crrav-ignoredsort" data-act="ignored-sort">
-          <option value="title-asc"${sort === 'title-asc' ? ' selected' : ''}>Titre A→Z</option>
-          <option value="title-desc"${sort === 'title-desc' ? ' selected' : ''}>Titre Z→A</option>
-          ${singleSource ? '' : `<option value="source"${sort === 'source' ? ' selected' : ''}>Par source</option>`}
-          <option value="date-desc"${sort === 'date-desc' ? ' selected' : ''}>Plus récemment ignorée</option>
-          <option value="date-asc"${sort === 'date-asc' ? ' selected' : ''}>Plus anciennement ignorée</option>
+          <optgroup label="Par titre">
+            <option value="title-asc"${sort === 'title-asc' ? ' selected' : ''}>Titre A→Z</option>
+            <option value="title-desc"${sort === 'title-desc' ? ' selected' : ''}>Titre Z→A</option>
+          </optgroup>
+          <optgroup label="Par date">
+            <option value="date-desc"${sort === 'date-desc' ? ' selected' : ''}>Plus récemment ignorée</option>
+            <option value="date-asc"${sort === 'date-asc' ? ' selected' : ''}>Plus anciennement ignorée</option>
+          </optgroup>
+          ${singleSource ? '' : `<optgroup label="Par source">
+            <option value="source"${sort === 'source' ? ' selected' : ''}>Par source</option>
+          </optgroup>`}
         </select>
       </div>
       ${entries.length ? `<label class="crrav-ignselall">
