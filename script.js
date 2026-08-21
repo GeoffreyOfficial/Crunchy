@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.26.0
+// @version      3.27.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.26.0';
+  const SCRIPT_VERSION = '3.27.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -865,26 +865,115 @@
     persistState(APP_STATE);
   }
 
-  // (45) Historique Annuler/Rétablir des séries ignorées/réaffichées — pile d'instantanés de
-  // la Map IGNORED entière, capturée après CHAQUE mutation (ignorer une série, « Tout
-  // ignorer » de Découverte, réafficher une/plusieurs/toutes). Remplace l'ancien historique
-  // de brouillon des Réglages (ex-(44), retiré) : vit tant que l'appli reste ouverte — pas
-  // borné à la sheet Réglages, mais ses boutons ↩/↪ vivent DANS la sheet, à côté du titre
-  // ⚙ Réglages (voir ignoreHistoryButtonsHtml), masqués uniquement quand l'onglet Diagnostic
-  // de la sheet est affiché : rien à y annuler.
-  let ignoreHistory = [new Map(IGNORED)];   // [0] = état tel que chargé depuis le stockage
-  let ignoreHistoryIndex = 0;
-  const IGNORE_HISTORY_MAX = 50;   // borne mémoire ; au-delà, les plus vieux instantanés tombent
-  function recordIgnoreHistory() {
-    ignoreHistory = ignoreHistory.slice(0, ignoreHistoryIndex + 1);
-    ignoreHistory.push(new Map(IGNORED));
-    if (ignoreHistory.length > IGNORE_HISTORY_MAX) ignoreHistory.shift();
-    ignoreHistoryIndex = ignoreHistory.length - 1;
+  // (46) Historique Annuler/Rétablir UNIFIÉ : couvre à la fois les séries ignorées/réaffichées
+  // ET les champs de Réglages en cours de modification (pas encore enregistrés). Chaque
+  // entrée de la pile est un instantané { ignored, draft } : `ignored` est une copie de la
+  // Map IGNORED, `draft` un instantané des champs [data-set] de la sheet Réglages au moment
+  // du changement (null si la sheet n'est pas ouverte sur l'onglet Réglages à cet instant).
+  // Annuler/Rétablir réapplique les DEUX dimensions ensemble. Contrairement à l'ancien
+  // historique de brouillon (ex-(44)), celui-ci n'est PAS remis à zéro à chaque (ré)ouverture
+  // de la sheet — il vit tant que l'appli reste ouverte, comme l'était déjà l'historique des
+  // ignorées (ex-(45), fusionné ici). Boutons ↩/↪ dans la sheet, à côté du titre « Réglages »
+  // (voir historyButtonsHtml), masqués sur l'onglet Diagnostic : rien à y annuler.
+  let appHistory = [{ ignored: new Map(IGNORED), draft: null }];   // [0] = état au chargement
+  let appHistoryIndex = 0;
+  const APP_HISTORY_MAX = 50;   // borne mémoire ; au-delà, les plus vieux instantanés tombent
+  function currentSheetEl() {
+    return root && root.querySelector('.crrav-settingssheet');
   }
-  function applyIgnoreHistory(map) {
-    IGNORED = new Map(map);
+  // Instantané brut de tous les champs [data-set] de la sheet Réglages, PAS validé/typé
+  // (contrairement à collectSettings) : on veut pouvoir restaurer exactement ce qui était
+  // affiché, y compris une saisie intermédiaire pas encore blur/validée. null si la sheet
+  // n'est pas ouverte sur l'onglet Réglages (les autres onglets n'ont pas de [data-set]).
+  function captureDraft() {
+    const sheetEl = currentSheetEl();
+    if (!sheetEl || settingsSheetTab !== 'settings') return null;
+    const snap = {};
+    sheetEl.querySelectorAll('[data-set]').forEach((el) => {
+      snap[el.dataset.set] = el.type === 'checkbox' ? el.checked : el.value;
+    });
+    return snap;
+  }
+  // Réapplique un instantané de brouillon aux champs de la sheet, en redéclenchant les
+  // événements natifs (input/change) de chaque champ modifié pour que TOUT ce qui en dépend
+  // se remette à jour tout seul — libellé de curseur, matrice de presets, schéma interactif —
+  // sans jamais toucher CFG (toujours un brouillon tant qu'on n'a pas cliqué « Enregistrer »).
+  function restoreDraft(sheetEl, snap) {
+    if (!snap) return;
+    sheetEl.querySelectorAll('[data-set]').forEach((el) => {
+      if (!(el.dataset.set in snap)) return;
+      const v = snap[el.dataset.set];
+      if (el.type === 'checkbox') {
+        if (el.checked === v) return;
+        el.checked = v;
+      } else {
+        if (el.value === v) return;
+        el.value = v;
+      }
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    // Chips de genres exclus : dérivées du champ caché restauré ci-dessus (elles ne sont pas
+    // elles-mêmes des [data-set], donc pas capturées par l'instantané — on les resynchronise
+    // à partir de la valeur qu'on vient de réappliquer).
+    sheetEl.querySelectorAll('.crrav-genrefield').forEach((field) => {
+      const hidden = field.querySelector('.crrav-genre-hidden');
+      if (!hidden) return;
+      const set = new Set(hidden.value.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean));
+      field.querySelectorAll('.crrav-genre-cb').forEach((cb) => {
+        const on = set.has(cb.value.toLowerCase());
+        cb.checked = on;
+        const lab = cb.closest('.crrav-genre'); if (lab) lab.classList.toggle('on', on);
+      });
+    });
+  }
+  function pushHistory() {
+    appHistory = appHistory.slice(0, appHistoryIndex + 1);
+    appHistory.push({ ignored: new Map(IGNORED), draft: captureDraft() });
+    if (appHistory.length > APP_HISTORY_MAX) appHistory.shift();
+    appHistoryIndex = appHistory.length - 1;
+  }
+  function applyHistory(entry) {
+    IGNORED = new Map(entry.ignored);
     ignoredSelected.clear();   // (43) sélection multiple du panneau Ignorées, peut référencer des id disparus
     saveIgnored();
+    const sheetEl = currentSheetEl();
+    if (sheetEl && entry.draft && settingsSheetTab === 'settings') restoreDraft(sheetEl, entry.draft);
+  }
+  // Met à jour juste le disabled des boutons ↩/↪ sans re-render : appelé après une frappe/un
+  // glissement de curseur détecté par wireDraftHistoryTracking, pour ne JAMAIS interrompre la
+  // saisie en cours (un forceRender() reconstruirait les champs sous les doigts de l'utilisateur).
+  function updateHistoryButtonsUI(sheetEl) {
+    if (!sheetEl) return;
+    const undoBtn = sheetEl.querySelector('[data-act="hist-undo"]');
+    const redoBtn = sheetEl.querySelector('[data-act="hist-redo"]');
+    if (undoBtn) undoBtn.disabled = appHistoryIndex <= 0;
+    if (redoBtn) redoBtn.disabled = appHistoryIndex >= appHistory.length - 1;
+  }
+  // Câble le suivi des changements de brouillon (champs [data-set]) sur le nœud
+  // .crrav-settingssheet — une seule fois par ouverture de sheet (garde data-histWired), vu
+  // qu'il n'est recréé qu'à l'ouverture (patchSettingsSheetInPlace ne touche que son
+  // intérieur). Les mutations sur les ignorées sont, elles, poussées directement par
+  // pushHistory() à leurs propres points d'appel (toggleIgnored, ignoreAll, ignored-clear).
+  function wireDraftHistoryTracking(sheetEl) {
+    if (!sheetEl || sheetEl.dataset.histWired === '1') return;
+    sheetEl.dataset.histWired = '1';
+    // Instantané pris après coup (setTimeout 0) : les gestes qui modifient l'état SANS
+    // déclencher d'événement natif (clic sur un preset, relâchement d'un curseur du schéma)
+    // écrivent directement dans le DOM depuis leurs propres écouteurs internes — on laisse
+    // ces écouteurs s'exécuter d'abord, puis on capture l'état final, débrouncé pour ne pas
+    // empiler un point par frappe/pixel glissé.
+    const scheduleSnapshot = debounce(() => {
+      const snap = captureDraft();
+      if (!snap) return;
+      const last = appHistory[appHistoryIndex];
+      if (last && last.draft && JSON.stringify(snap) === JSON.stringify(last.draft)) return;
+      pushHistory();
+      updateHistoryButtonsUI(sheetEl);
+    }, 300);
+    ['input', 'change', 'click', 'pointerup'].forEach((evt) => {
+      sheetEl.addEventListener(evt, () => setTimeout(scheduleSnapshot, 0));
+    });
   }
 
   function toggleIgnored(id, title, source, poster, synopsis) {
@@ -895,7 +984,7 @@
       ignoredAt: Date.now(),   // (43)
     });
     saveIgnored();
-    recordIgnoreHistory();   // (45)
+    pushHistory();   // (46)
   }
   function ignoredCount(source) {
     let n = 0;
@@ -933,7 +1022,7 @@
       });
       added++;
     }
-    if (added) { saveIgnored(); recordIgnoreHistory(); }   // UNE seule écriture, quel que soit le nombre de séries
+    if (added) { saveIgnored(); pushHistory(); }   // UNE seule écriture, quel que soit le nombre de séries
     return added;
   }
 
@@ -13951,15 +14040,16 @@
       <button class="crrav-btn primary" data-act="settings-save">Enregistrer et actualiser</button>`;
   }
 
-  // (45) Boutons ↩ Annuler / ↪ Rétablir de l'historique des ignorées — à côté du titre
-  // « Réglages » dans l'en-tête de la sheet (.crrav-sheethead-hist), rafraîchis explicitement
-  // par patchSettingsSheetInPlace puisque forceRender() ne reconstruit pas le sheethead.
-  function ignoreHistoryButtonsHtml() {
-    return `<button class="crrav-sync crrav-icobtn" data-act="ignore-undo"
-        aria-label="Annuler la dernière action sur les ignorées" title="Annuler"${ignoreHistoryIndex <= 0 ? ' disabled' : ''}
+  // (46) Boutons ↩ Annuler / ↪ Rétablir de l'historique unifié (ignorées + brouillon des
+  // champs de Réglages) — à côté du titre « Réglages » dans l'en-tête de la sheet
+  // (.crrav-sheethead-hist), rafraîchis explicitement par patchSettingsSheetInPlace puisque
+  // forceRender() ne reconstruit pas le sheethead.
+  function historyButtonsHtml() {
+    return `<button class="crrav-sync crrav-icobtn" data-act="hist-undo"
+        aria-label="Annuler le dernier changement" title="Annuler"${appHistoryIndex <= 0 ? ' disabled' : ''}
         >↩<span class="crrav-btn-label">Annuler</span></button>
-      <button class="crrav-sync crrav-icobtn" data-act="ignore-redo"
-        aria-label="Rétablir l'action annulée sur les ignorées" title="Rétablir"${ignoreHistoryIndex >= ignoreHistory.length - 1 ? ' disabled' : ''}
+      <button class="crrav-sync crrav-icobtn" data-act="hist-redo"
+        aria-label="Rétablir le changement annulé" title="Rétablir"${appHistoryIndex >= appHistory.length - 1 ? ' disabled' : ''}
         >↪<span class="crrav-btn-label">Rétablir</span></button>`;
   }
 
@@ -13976,12 +14066,14 @@
   // qu'une fois, à l'ouverture réelle. Appelée automatiquement par renderNow() : aucun
   // site d'appel n'a besoin de savoir que la sheet est ouverte ou non.
   function patchSettingsSheetInPlace(sheetEl) {
-    // (45) Boutons Annuler/Rétablir des ignorées dans l'en-tête de la sheet : leur état
-    // disabled dépend d'ignoreHistoryIndex, qui change à chaque ignorer/réafficher — ces
-    // actions passent TOUTES par ce chemin de patch (forceRender, sheet déjà ouverte), donc
-    // sans ce refresh explicite les boutons resteraient figés sur l'état de l'ouverture.
+    // (46) Boutons Annuler/Rétablir dans l'en-tête de la sheet : leur état disabled dépend
+    // d'appHistoryIndex, qui change à chaque ignorer/réafficher — ces actions passent TOUTES
+    // par ce chemin de patch (forceRender, sheet déjà ouverte), donc sans ce refresh explicite
+    // les boutons resteraient figés sur l'état de l'ouverture. (Les changements de brouillon
+    // de champs, eux, mettent juste à jour le disabled sans forceRender — voir
+    // wireDraftHistoryTracking/updateHistoryButtonsUI — pour ne jamais interrompre la saisie.)
     const histEl = sheetEl.querySelector('.crrav-sheethead-hist');
-    if (histEl) histEl.innerHTML = settingsSheetTab !== 'diag' ? ignoreHistoryButtonsHtml() : '';
+    if (histEl) histEl.innerHTML = settingsSheetTab !== 'diag' ? historyButtonsHtml() : '';
     const subtabsEl = sheetEl.querySelector('.crrav-subtabs');
     if (subtabsEl) subtabsEl.innerHTML = buildSettingsSubtabsHtml();
     const bodyEl = sheetEl.querySelector('.crrav-sheetbody');
@@ -14383,7 +14475,7 @@
       <div class="crrav-settingssheet">
         <div class="crrav-sheethead">
           <h2>Réglages</h2>
-          <div class="crrav-sheethead-hist">${settingsSheetTab !== 'diag' ? ignoreHistoryButtonsHtml() : ''}</div>
+          <div class="crrav-sheethead-hist">${settingsSheetTab !== 'diag' ? historyButtonsHtml() : ''}</div>
           <button class="crrav-close" data-act="settings" aria-label="Fermer les réglages">✕</button>
         </div>
         <div class="crrav-subtabs" role="tablist">${settingsSubtabs}</div>
@@ -14521,23 +14613,9 @@
       if (settingsSearchQ) { setSearch.value = settingsSearchQ; applySettingsFilter(setSearch); }
     }
 
-    // (31) Boutons − / + des champs numériques : incrémentent d'un pas, en respectant min/max.
-    content.querySelectorAll('.crrav-step').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const inp = btn.closest('.crrav-numwrap') && btn.closest('.crrav-numwrap').querySelector('input[data-set]');
-        if (!inp) return;
-        const step = parseFloat(inp.step) || 1;
-        const dir = btn.dataset.stepDir === 'up' ? 1 : -1;
-        let v = parseFloat(String(inp.value).replace(',', '.'));
-        if (!Number.isFinite(v)) v = parseFloat(inp.min) || 0;
-        v = Math.round((v + dir * step) / step) * step;          // évite la dérive flottante
-        v = parseFloat(v.toFixed(2));
-        if (inp.min !== '') v = Math.max(parseFloat(inp.min), v);
-        if (inp.max !== '') v = Math.min(parseFloat(inp.max), v);
-        inp.value = v;
-        inp.dispatchEvent(new Event('input', { bubbles: true }));
-      });
-    });
+    // (31)(45) Boutons − / + des champs numériques : gérés par délégation sur `root` (voir le
+    // handler de clic principal, bloc [data-step-dir]) plutôt que câblés ici un par un — un
+    // wiring direct ne survivait pas au patch-in-place de la sheet Réglages.
 
     // (31) Curseur de note : libellé « ≥ x ★ » mis à jour en direct.
     content.querySelectorAll('.crrav-rangeinput').forEach((rg) => {
@@ -14563,6 +14641,11 @@
     // (le drag du schéma n'est jamais interrompu). collectSettings lit ces curseurs à l'enregistrement.
     const scoreTunerEl = content.querySelector('.crrav-scoretuner');
     if (scoreTunerEl) initScoreTuner(scoreTunerEl);
+
+    // (46) Câble le suivi Annuler/Rétablir du brouillon des champs de Réglages, si la sheet
+    // vient d'être (re)construite entièrement (seule situation où ce nœud est neuf).
+    const settingsSheetEl = content.querySelector('.crrav-settingssheet');
+    if (settingsSheetEl) wireDraftHistoryTracking(settingsSheetEl);
 
     // (31) Genres exclus : cases à cocher → met à jour l'<input caché> lu par collectSettings.
     content.querySelectorAll('.crrav-genrefield').forEach((field) => {
@@ -14953,6 +15036,30 @@
           forceRender();
           return;
         }
+        // (31)(45) Boutons − / + des champs numériques de Réglages : délégués sur `root`
+        // (comme le reste) plutôt que câblés un par un sur chaque bouton — l'ancien wiring
+        // direct (content.querySelectorAll('.crrav-step').forEach(...)) ne survivait pas au
+        // patch-in-place de la sheet (voir patchSettingsSheetInPlace) qui remplace tout
+        // .crrav-sheetbody par du markup neuf sans jamais rappeler ce wiring : dès qu'un
+        // forceRender() survenait pendant que la sheet restait ouverte (ex. Annuler/Rétablir
+        // des ignorées, cocher une case…), les boutons perdaient silencieusement leur clic.
+        const stepBtn = e.target.closest('.crrav-step');
+        if (stepBtn) {
+          const inp = stepBtn.closest('.crrav-numwrap') && stepBtn.closest('.crrav-numwrap').querySelector('input[data-set]');
+          if (inp) {
+            const step = parseFloat(inp.step) || 1;
+            const dir = stepBtn.dataset.stepDir === 'up' ? 1 : -1;
+            let v = parseFloat(String(inp.value).replace(',', '.'));
+            if (!Number.isFinite(v)) v = parseFloat(inp.min) || 0;
+            v = Math.round((v + dir * step) / step) * step;          // évite la dérive flottante
+            v = parseFloat(v.toFixed(2));
+            if (inp.min !== '') v = Math.max(parseFloat(inp.min), v);
+            if (inp.max !== '') v = Math.min(parseFloat(inp.max), v);
+            inp.value = v;
+            inp.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+          return;
+        }
         const act = e.target.closest('[data-act]');
         if (!act) return;
         if (act.dataset.act === 'close') close();
@@ -15130,7 +15237,7 @@
             // ou cochées, pas la totalité des séries ignorées (qui peut être bien plus
             // large). Action ciblée et délibérée : pas de confirmation nécessaire.
             for (const id of scopeIds.split(',')) { IGNORED.delete(id); ignoredSelected.delete(id); }
-            saveIgnored(); recordIgnoreHistory(); forceRender();
+            saveIgnored(); pushHistory(); forceRender();
           } else {
             // (2) Pas de portée = restauration de TOUTES les séries ignorées (potentiellement
             // des centaines, sans lien entre elles) : irréversible en un clic, donc
@@ -15143,7 +15250,7 @@
                 + `(Reste à voir, Hors listes, Découverte, Nouveautés).</p>`,
               confirmLabel: '↺ Tout réafficher',
               danger: true,
-              onConfirm: () => { IGNORED.clear(); ignoredSelected.clear(); saveIgnored(); recordIgnoreHistory(); forceRender(); },
+              onConfirm: () => { IGNORED.clear(); ignoredSelected.clear(); saveIgnored(); pushHistory(); forceRender(); },
             };
             forceRender();
           }
@@ -15283,16 +15390,16 @@
         if (act.dataset.act === 'settings-reset') {
           resetSettings(); scheduleAutoRefresh(); forceRender();
         }
-        if (act.dataset.act === 'ignore-undo' || act.dataset.act === 'ignore-redo') {
-          // (45) Annuler/Rétablir sur les séries ignorées/réaffichées — voir recordIgnoreHistory.
-          if (act.dataset.act === 'ignore-undo' && ignoreHistoryIndex > 0) {
-            ignoreHistoryIndex--;
-          } else if (act.dataset.act === 'ignore-redo' && ignoreHistoryIndex < ignoreHistory.length - 1) {
-            ignoreHistoryIndex++;
+        if (act.dataset.act === 'hist-undo' || act.dataset.act === 'hist-redo') {
+          // (46) Annuler/Rétablir unifié (ignorées + brouillon de Réglages) — voir pushHistory.
+          if (act.dataset.act === 'hist-undo' && appHistoryIndex > 0) {
+            appHistoryIndex--;
+          } else if (act.dataset.act === 'hist-redo' && appHistoryIndex < appHistory.length - 1) {
+            appHistoryIndex++;
           } else {
             return;
           }
-          applyIgnoreHistory(ignoreHistory[ignoreHistoryIndex]);
+          applyHistory(appHistory[appHistoryIndex]);
           forceRender();
           return;
         }
