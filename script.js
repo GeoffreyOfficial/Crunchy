@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.28.4
+// @version      3.28.5
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.28.4';
+  const SCRIPT_VERSION = '3.28.5';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -8273,7 +8273,21 @@
     const nothing = !mSuivi.length && !mOrphan.length && !mDiscover.length
       && !STATE.orphan.loading && !STATE.discover.loading;
 
+    // (7) Scan à la demande : Hors listes / Découverte ne se chargent plus tout seuls dès
+    // la frappe (voir le handler d'input) — ce bouton n'apparaît que si l'une des deux
+    // sections n'a JAMAIS été chargée (lastSync encore à null) et n'est pas déjà en cours
+    // de chargement. Un clic lance le(s) scan(s) manquant(s) ; le bouton disparaît ensuite
+    // de lui-même au prochain rendu (lastSync ou loading devient vrai).
+    const orphanNeverLoaded = !STATE.orphan.lastSync && !STATE.orphan.loading;
+    const discoverNeverLoaded = !STATE.discover.lastSync && !STATE.discover.loading;
+    const showScanBtn = orphanNeverLoaded || discoverNeverLoaded;
+
     return `<div class="crrav-globalresults">
+      ${showScanBtn ? `<div class="crrav-globalscan">
+        <button class="crrav-btn" data-act="search-scan-orphan-discover" type="button">
+          🔎 Chercher aussi dans Hors listes / Découverte
+        </button>
+      </div>` : ''}
       ${html}
       ${nothing ? `<div class="crrav-msg"><h3>Rien à afficher</h3>
         <p>Aucun résultat pour « ${escapeHtml(STATE.filters.globalQ.trim())} ».</p></div>` : ''}
@@ -8476,6 +8490,8 @@
   .crrav-globalclear:hover{background:rgba(255,255,255,.1);color:#f2f2f4}
   .crrav-globalresults{display:flex;flex-direction:column;gap:20px;margin-top:14px}
   .crrav-globalsec .crrav-stath2{margin-bottom:10px}
+  .crrav-globalscan{display:flex}
+  .crrav-globalscan>.crrav-btn{width:100%}
   .crrav-globalloading{color:#9a9aa4;font:600 12.5px/1 system-ui;margin:0 0 10px}
   .crrav-select{background:#1c1c22;border:1px solid rgba(255,255,255,.12);border-radius:10px;
     padding:9px 12px;color:#f2f2f4;font-size:14px;cursor:pointer;
@@ -14473,6 +14489,18 @@
     renderToastOverlay();
     const content = root.querySelector('.crrav-content');
     if (!content) return;
+    // (fix clavier mobile) Sauvegarde le champ actif AVANT reconstruction : content.innerHTML
+    // est réécrit plus bas, ce qui détruit le nœud <input> en cours de frappe. Un scan de fond
+    // (Découverte, Hors listes…) appelle render() à répétition PENDANT que l'utilisateur tape
+    // dans la recherche — seul le handler de la recherche elle-même se refocalisait après SON
+    // propre rendu (voir plus bas), jamais après ceux déclenchés par le scan : le clavier se
+    // fermait alors tout seul en pleine frappe et ne se rouvrait plus. Restauré générique·ment
+    // pour tout champ texte (recherche globale, recherche réglages, recherche ignorées…).
+    const activeFieldInfo = (() => {
+      const ae = document.activeElement;
+      if (!ae || !content.contains(ae) || typeof ae.selectionStart !== 'number') return null;
+      return { cls: ae.className, start: ae.selectionStart, end: ae.selectionEnd };
+    })();
     // Le DOM est intégralement remplacé : sans ça, un rafraîchissement de fond pendant
     // que l'utilisateur fait défiler une longue liste le renvoyait en haut de page.
     const prevScroll = content.scrollTop;
@@ -14660,6 +14688,21 @@
       if (sheetEl) sheetEl.scrollTop = prevSheetScroll;
     }
 
+    // (fix clavier mobile) Restauration du focus + de la position du curseur (voir
+    // activeFieldInfo plus haut) : même classe CSS ⇒ même champ logique, on suppose qu'il n'y
+    // en a qu'un seul de visible à la fois (recherche globale / réglages / ignorées ne
+    // coexistent jamais). preventScroll évite un saut de page au passage.
+    if (activeFieldInfo) {
+      const cls = activeFieldInfo.cls.trim();
+      if (cls) {
+        const again = content.querySelector('.' + CSS.escape(cls.split(/\s+/).join('.')));
+        if (again && document.activeElement !== again) {
+          again.focus({ preventScroll: true });
+          try { again.setSelectionRange(activeFieldInfo.start, activeFieldInfo.end); } catch (_) { /* champ non textuel */ }
+        }
+      }
+    }
+
     // (9) compteurs animés : uniquement les valeurs numériques pures posées via
     // data-countup dans les templates (list.length, totalRemaining, events.length, in7…) —
     // les stats formatées par fmtDuration ("12h 30") en sont volontairement exclues.
@@ -14801,14 +14844,11 @@
     if (search) {
       search.addEventListener('input', debounce((e) => {
         STATE.filters.globalQ = e.target.value;
-        // (7) La recherche porte sur les 3 sources : si Hors listes ou Découverte
-        // n'ont encore jamais été chargées, on lance leur scan en tâche de fond —
-        // comme à l'ouverture normale de ces onglets — pour que leurs résultats
-        // apparaissent dès qu'ils sont prêts, sans que l'utilisateur ait à y penser.
-        if (STATE.filters.globalQ.trim()) {
-          if (!STATE.orphan.series.length && !STATE.orphan.loading) refreshOrphelines();
-          if (!STATE.discover.series.length && !STATE.discover.loading) refreshDiscover();
-        }
+        // (7) La recherche porte sur les 3 sources, mais Hors listes / Découverte ne sont
+        // PLUS scannées automatiquement ici (ça se déclenchait dès 2 lettres tapées) : si
+        // elles n'ont jamais été chargées, un bouton explicite dans renderGlobalSearch
+        // permet à l'utilisateur de lancer le scan à la demande (voir data-act
+        // 'search-scan-orphan-discover').
         renderNow();                       // le focus est repris juste après : rendu immédiat
         const s = root.querySelector('.crrav-search-global');
         if (s) { s.focus(); s.setSelectionRange(s.value.length, s.value.length); }
@@ -15208,6 +15248,15 @@
         }
         if (act.dataset.act === 'retry') refreshActive();
         if (act.dataset.act === 'reload') { location.reload(); return; }
+        if (act.dataset.act === 'search-scan-orphan-discover') {
+          // (7) Scan à la demande depuis la recherche globale : ne lance que les sources
+          // pas encore chargées (l'autre peut très bien avoir déjà lastSync sans que
+          // celle-ci en ait un, ou être déjà en cours).
+          if (!STATE.orphan.lastSync && !STATE.orphan.loading) refreshOrphelines();
+          if (!STATE.discover.lastSync && !STATE.discover.loading) refreshDiscover();
+          forceRender();
+          return;
+        }
         if (act.dataset.act === 'more-discover') refreshMoreDiscover();
         if (act.dataset.act === 'toggle-genres') {
           const scg = act.dataset.gscope || '';
