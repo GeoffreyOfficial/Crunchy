@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.28.1
+// @version      3.28.4
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.28.1';
+  const SCRIPT_VERSION = '3.28.4';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -8244,19 +8244,30 @@
     const mOrphan = STATE.orphan.series.filter((s) => !IGNORED.has(s.id) && matches(s));
     const mDiscover = STATE.discover.series.filter((s) => !IGNORED.has(s.id) && !STATE.addedToList.has(s.id) && matches(s));
 
+    // (50) card() bascule déjà tout seul sur listRow() en mode liste compacte, mais le
+    // conteneur doit porter la classe crrav-list en face (grille 1 colonne au lieu des
+    // colonnes ~178px pensées pour la carte complète) — sinon la carte compacte se
+    // retrouve coincée dans une colonne trop étroite et le texte se chevauche. Même
+    // logique que Reste à voir / Hors listes / Découverte, qui font déjà ce choix.
+    const useList = STATE.filters.view === 'list';
     const section = (icon, title, arr, cardFn, loading) => {
       if (!arr.length && !loading) return '';
       return `<section class="crrav-globalsec">
         <h2 class="crrav-stath2">${icon} ${title} (${arr.length})</h2>
         ${loading && !arr.length ? '<p class="crrav-globalloading">Recherche en cours…</p>' : ''}
-        <div class="crrav-grid">${arr.map(cardFn).join('')}</div>
+        <div class="crrav-grid${useList ? ' crrav-list' : ''}">${arr.map(cardFn).join('')}</div>
       </section>`;
     };
+
+    const discoverProfile = activeSimilarProfile() || buildTasteProfile();
+    const discoverCardFn = useList
+      ? (s) => discoverListRow(s, discoverProfile)
+      : (s) => discoverCard(s, discoverProfile);
 
     const html = [
       section('📋', 'Dans tes listes', mSuivi, (s, i) => card(s, i, 'watchlist'), false),
       section('🧭', 'Hors listes (épisodes non vus)', mOrphan, (s, i) => card(s, i, 'orphan'), STATE.orphan.loading),
-      section('✨', 'Découverte', mDiscover, discoverCard, STATE.discover.loading),
+      section('✨', 'Découverte', mDiscover, discoverCardFn, STATE.discover.loading),
     ].join('');
 
     const nothing = !mSuivi.length && !mOrphan.length && !mDiscover.length
@@ -14122,6 +14133,23 @@
   // reste le même élément DOM tant qu'elle reste ouverte, donc son animation ne se rejoue
   // qu'une fois, à l'ouverture réelle. Appelée automatiquement par renderNow() : aucun
   // site d'appel n'a besoin de savoir que la sheet est ouverte ou non.
+  // (30)(51) Câblage de la recherche interne aux Réglages — factorisé car buildSettingsSheetBodyHtml()
+  // régénère un TOUT NOUVEAU nœud <input> à chaque reconstruction du corps de la sheet, que ce
+  // soit via renderNow() (premier rendu) OU via patchSettingsSheetInPlace() (tout render de fond
+  // pendant que la sheet reste ouverte — bien plus fréquent). Ce dernier chemin ne rappelait
+  // jamais ce câblage : le nouveau champ n'avait alors aucun écouteur 'input', la recherche
+  // semblait totalement inerte dès qu'un rendu de fond survenait pendant qu'elle était ouverte.
+  function wireSettingsSearch(scopeEl) {
+    const setSearch = scopeEl.querySelector('.crrav-setsearch-input');
+    if (!setSearch) return;
+    setSearch.addEventListener('input', () => applySettingsFilter(setSearch));
+    const setClr = scopeEl.querySelector('.crrav-setsearch-clear');
+    if (setClr) setClr.addEventListener('click', () => {
+      setSearch.value = ''; applySettingsFilter(setSearch); setSearch.focus();
+    });
+    if (settingsSearchQ) { setSearch.value = settingsSearchQ; applySettingsFilter(setSearch); }
+  }
+
   function patchSettingsSheetInPlace(sheetEl) {
     // (46) Boutons Annuler/Rétablir dans l'en-tête de la sheet : leur état disabled dépend
     // d'appHistoryIndex, qui change à chaque ignorer/réafficher — ces actions passent TOUTES
@@ -14156,6 +14184,9 @@
       // sur ce nœud tout neuf le répare sans rien casser côté ancien nœud.
       const scoreTunerEl = bodyEl.querySelector('.crrav-scoretuner');
       if (scoreTunerEl) initScoreTuner(scoreTunerEl);
+      // (51) Même raisonnement que pour le tuner : le nouveau champ de recherche n'a
+      // aucun écouteur tant qu'on ne le recâble pas explicitement ici.
+      wireSettingsSearch(bodyEl);
     }
     const footEl = sheetEl.querySelector('.crrav-sheetfoot');
     if (footEl) footEl.innerHTML = buildSettingsSheetFootHtml();
@@ -14687,15 +14718,7 @@
     });
 
     // (30) Recherche interne aux Réglages (filtre les champs à la volée, sans re-render).
-    const setSearch = content.querySelector('.crrav-setsearch-input');
-    if (setSearch) {
-      setSearch.addEventListener('input', () => applySettingsFilter(setSearch));
-      const setClr = content.querySelector('.crrav-setsearch-clear');
-      if (setClr) setClr.addEventListener('click', () => {
-        setSearch.value = ''; applySettingsFilter(setSearch); setSearch.focus();
-      });
-      if (settingsSearchQ) { setSearch.value = settingsSearchQ; applySettingsFilter(setSearch); }
-    }
+    wireSettingsSearch(content);
 
     // (31)(45) Boutons − / + des champs numériques : gérés par délégation sur `root` (voir le
     // handler de clic principal, bloc [data-step-dir]) plutôt que câblés ici un par un — un
@@ -15146,7 +15169,36 @@
         }
         const act = e.target.closest('[data-act]');
         if (!act) return;
-        if (act.dataset.act === 'close') close();
+        if (act.dataset.act === 'close') {
+          // (49) Le bouton ✕ global (header du panneau) ne doit pas court-circuiter le
+          // garde-fou anti-perte-silencieuse des réglages : mêmes réglages modifiés mais
+          // pas encore enregistrés que ceux vérifiés par data-act="settings" (voir plus
+          // haut) — sinon fermer tout le panneau pendant que la sheet réglages est ouverte
+          // rinçait la saisie sans jamais demander confirmation.
+          if (STATE.settingsOpen && settingsSheetTab === 'settings') {
+            const dirty = unsavedSettingsChanges();
+            if (dirty.length) {
+              const MAX_LISTED = 6;
+              const items = dirty.slice(0, MAX_LISTED)
+                .map((f) => `<li>${escapeHtml(f.label)}</li>`).join('');
+              const rest = dirty.length - MAX_LISTED;
+              const n = dirty.length;
+              STATE.confirmModal = {
+                title: 'Fermer sans enregistrer ?',
+                message: `<p><b>${n}</b> réglage${n > 1 ? 's' : ''} modifié${n > 1 ? 's' : ''} `
+                  + `${n > 1 ? "n'ont" : "n'a"} pas été enregistré${n > 1 ? 's' : ''} :</p>`
+                  + `<ul class="crrav-confirm-list">${items}`
+                  + `${rest > 0 ? `<li class="crrav-confirm-more">+ ${rest} autre${rest > 1 ? 's' : ''}…</li>` : ''}</ul>`,
+                confirmLabel: 'Fermer sans enregistrer',
+                danger: true,
+                onConfirm: () => { STATE.settingsOpen = false; close(); },
+              };
+              forceRender();
+              return;
+            }
+          }
+          close();
+        }
         if (act.dataset.act === 'clearglobal') {
           STATE.filters.globalQ = '';
           renderNow();                     // idem : on relit le DOM juste derrière
