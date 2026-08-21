@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.38.0
+// @version      3.39.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.38.0';
+  const SCRIPT_VERSION = '3.39.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -817,6 +817,32 @@
     persistState(APP_STATE);
   }
   forceRecalibratedDefaults();
+
+  // Migration one-shot (v3.39.0) : le mode 🪄 séries similaires pouvait laisser
+  // discoverCatsIn/discoverCatsInMode (« garder uniquement ce genre ») figés en
+  // permanence dans les filtres persistés après un rechargement de page pendant une
+  // session similaire (voir le fix dans saveFilters ci-dessus, qui empêche toute
+  // récidive) — mais ce fix ne nettoie pas un reliquat DÉJÀ écrit avant cette version.
+  // Purge donc UNE SEULE FOIS ce reliquat pour les installations déjà affectées :
+  // sans lui, Découverte pouvait rejeter ~95 % des candidats sur un genre resté
+  // silencieusement verrouillé, avec pour seul symptôme visible « 🔎 Pourquoi seulement
+  // 0/X pépites ? » → « Genre écarté » à un pourcentage anormalement élevé.
+  const CLEANUP_STUCK_GENRE_FILTER_VERSION = '3.39.0';
+  function cleanupStuckSimilarGenreFilter() {
+    const last = APP_STATE.cleanedStuckGenreFilterVersion || '0.0.0';
+    if (compareVersions(last, CLEANUP_STUCK_GENRE_FILTER_VERSION) >= 0) return;
+    if (APP_STATE.filters && typeof APP_STATE.filters === 'object') {
+      if (APP_STATE.filters.discoverCatsIn && APP_STATE.filters.discoverCatsIn.length) {
+        LOG('migration : filtre « garder uniquement » de Découverte réinitialisé (reliquat mode similaire) :',
+          APP_STATE.filters.discoverCatsIn);
+      }
+      APP_STATE.filters.discoverCatsIn = [];
+      APP_STATE.filters.discoverCatsInMode = 'any';
+    }
+    APP_STATE.cleanedStuckGenreFilterVersion = CLEANUP_STUCK_GENRE_FILTER_VERSION;
+    persistState(APP_STATE);
+  }
+  cleanupStuckSimilarGenreFilter();
 
   applySettings();
 
@@ -4527,6 +4553,25 @@
   }
   function saveFilters() {
     const { q, discoverQ, orphanQ, globalQ, ...rest } = STATE.filters;
+    // (fix « Découverte ne montre plus rien ») Le mode 🪄 séries similaires réécrit
+    // discoverCatsIn/discoverCatsInMode/discoverCatsEx/discoverSort EN MÉMOIRE pour
+    // restreindre Découverte à la série source (voir discoverSimilarTo) — mais
+    // STATE.discover.similarTo, LUI, n'est jamais persisté (repart toujours à null au
+    // prochain chargement du script). Persister ces 4 champs PENDANT une session
+    // similaire les figeait à tort en permanence : un rechargement de page perdait le
+    // contexte « mode similaire » mais gardait le filtre « un seul genre » qu'il
+    // impliquait, verrouillant silencieusement Découverte normale sur un genre quasi
+    // inexistant (~94% de rejets « genre écarté » vus en pratique). Tant que le mode
+    // similaire est actif, on persiste donc les valeurs D'AVANT (déjà en stockage) pour
+    // ces 4 champs plutôt que leurs valeurs actuelles — la vraie préférence manuelle de
+    // l'utilisateur reste intacte, et reprend la main dès la sortie du mode similaire.
+    if (STATE.discover.similarTo) {
+      const prev = (APP_STATE.filters && typeof APP_STATE.filters === 'object') ? APP_STATE.filters : {};
+      rest.discoverCatsIn = prev.discoverCatsIn || [];
+      rest.discoverCatsInMode = prev.discoverCatsInMode || 'any';
+      rest.discoverCatsEx = prev.discoverCatsEx || [];
+      rest.discoverSort = prev.discoverSort || DEFAULT_FILTERS.discoverSort;
+    }
     APP_STATE.filters = rest;
     persistState(APP_STATE);
   }
@@ -15873,6 +15918,10 @@
           STATE.filters.discoverCatsIn = [];
           STATE.filters.discoverCatsInMode = 'any';
           STATE.discover.series = [];
+          // (fix) similarTo est déjà null à ce stade : saveFilters() persiste maintenant
+          // ce reset pour de vrai (avant ce fix, rien n'écrivait ce retour à la normale
+          // dans le stockage — un F5 juste après pouvait donc ramener l'ancien filtre).
+          saveFilters();
           render();
           refreshDiscover();
           return;
