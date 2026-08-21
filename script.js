@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.10.3
+// @version      3.12.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.10.3';
+  const SCRIPT_VERSION = '3.12.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -152,6 +152,12 @@
     // PUREMENT informatif, sans aucun effet sur le score « pépite ».
     // (fix) Défaut adopté d'après tes essais : 0.7.
     discoverPrefGenreBonus: 0.8,
+    // 💞 Bonus (léger) quand la candidate figure parmi les recommandations communautaires
+    // AniList d'un de tes favoris (séries notées 5★) — un signal « proche de ce que tu adores »
+    // indépendant du recoupement de genres/tags, cumulable avec 🎯. 0 = badge purement informatif.
+    discoverFavRecBonus: 0.3,
+    // Fraîcheur du cache des recommandations de favoris (favrecs:) qui alimente le bonus 💞.
+    favRecsDays: 14,
     // Pondération du profil de goût (voir buildTasteProfile) entre volume d'écoute brut
     // (nombre d'épisodes vus, 0 = comportement historique) et taux de complétion (part de
     // la série effectivement finie, 1 = seule l'adhésion compte). Une série de 100 épisodes
@@ -658,6 +664,9 @@
       impact: 'discover', sub: 'discoverScoringTaste' },
     { key: 'discoverPrefGenreBonus', tuner: true, label: 'Bonus « genre préféré » 🎯', type: 'float', min: 0, max: 2, step: 0.1,
       help: 'Points ajoutés directement au score quand la série contient un de tes 3 tags/genres les plus représentés ET que le goût global reste positif. 0 = 🎯 reste un badge purement informatif, sans effet sur le score.',
+      impact: 'discover', sub: 'discoverScoringTaste' },
+    { key: 'discoverFavRecBonus', tuner: true, label: 'Bonus « reco d’un favori » 💞', type: 'float', min: 0, max: 2, step: 0.1,
+      help: 'Points ajoutés au score quand la série fait partie des recommandations communautaires AniList d’un de tes favoris (séries que TU notes 5★). Signal « proche de ce que tu adores » distinct du recoupement de genres/tags, cumulable avec 🎯. 0 = 💞 reste un badge purement informatif. Les recommandations de tes favoris sont récupérées en fond automatiquement.',
       impact: 'discover', sub: 'discoverScoringTaste' },
     { key: 'discoverCompletionWeight', tuner: true, label: 'Poids de la complétion dans le profil', type: 'float', min: 0, max: 1, step: 0.05,
       help: 'Dans le calcul de ton PROFIL de goût (pas dans le score d’une série directement) : 0 = seul le nombre d’épisodes vus compte (comme avant), 1 = seul le taux de complétion compte (finir une série pèse plus que la survoler). Une série de 100 épisodes vue à 20 % vs une série de 12 épisodes terminée — ce curseur arbitre entre les deux. Il ne s’ajoute jamais au score : il change seulement à QUOI chaque candidate est comparée (le goût net = similarité avec ce profil).',
@@ -1916,7 +1925,7 @@
   // (fix) 'watchedids:' et 'anilist:' inclus : ce sont les entrées les plus volumineuses
   // (historique de visionnage détaillé, et schedule/genres/tags par série) — sans elles,
   // la purge tapait sur des entrées bien plus légères en épargnant les grosses.
-  const EVICTABLE = ['rating:', 'myrating:', 'series:', 'series-en:', 'seasoncount:', 'snapshot', 'crmatch:', 'watchedids:', 'anilist:', 'discep:', 'discbrowse:', 'nugget:'];
+  const EVICTABLE = ['rating:', 'myrating:', 'series:', 'series-en:', 'seasoncount:', 'snapshot', 'crmatch:', 'watchedids:', 'anilist:', 'discep:', 'discbrowse:', 'nugget:', 'favrecs:'];
   function evictOldest(fraction) {
     let evicted = eps3EvictOldest(fraction);
     const entries = Object.keys(BIGCACHE)
@@ -4122,7 +4131,15 @@
   //  4. État + filtres mémorisés (7)
   // ─────────────────────────────────────────────────────────────
   const DEFAULT_FILTERS = {
-    q: '', status: 'todo', sort: 'remaining', hideAiringSeason: false,
+    q: '', status: 'all', sort: 'remaining', hideAiringSeason: false,
+    // Regroupement de « Reste à voir » par progression (sections En cours / Pas commencé /
+    // Terminé). suiviGroupOrder = groupes AFFICHÉS, dans l'ordre (retirer une clé masque la
+    // section). suiviGroupBy = interrupteur global du regroupement.
+    suiviGroupBy: true,
+    suiviGroupOrder: ['started', 'notstarted', 'done'],
+    // Scopes dont la liste de genres (puces garder/exclure) est DÉPLIÉE. Vide = tout replié
+    // par défaut (la liste peut être longue).
+    genresOpen: [],
     discoverQ: '', discoverSort: 'relevance',
     orphanQ: '', orphanSort: 'remaining',
     globalQ: '',               // (7) recherche unifiée — remplace les 3 barres par onglet
@@ -4155,6 +4172,16 @@
       }
     }
     const saved = (APP_STATE.filters && typeof APP_STATE.filters === 'object') ? { ...APP_STATE.filters } : {};
+    // Les statuts « À finir » et « À jour » ont été retirés du filtre (remplacés par le
+    // regroupement par progression) : on rebascule une préférence mémorisée sur « Tout ».
+    if (saved.status === 'todo' || saved.status === 'uptodate') saved.status = 'all';
+    // Ordre des sections : on ne garde que des clés valides ; vide/absent → défaut.
+    if ('suiviGroupOrder' in saved) {
+      const ok = ['started', 'notstarted', 'done'];
+      saved.suiviGroupOrder = Array.isArray(saved.suiviGroupOrder)
+        ? saved.suiviGroupOrder.filter((k) => ok.includes(k)) : null;
+      if (!saved.suiviGroupOrder || !saved.suiviGroupOrder.length) delete saved.suiviGroupOrder;
+    }
     // Migration : avant la 2.8.1, les puces n'excluaient que.
     if (Array.isArray(saved.discoverCats) && !saved.discoverCatsEx) {
       saved.discoverCatsEx = saved.discoverCats;
@@ -5723,6 +5750,9 @@
       D.loading = false;
       D.scan = null;
       render();
+      // (favRec) Complète en fond le cache des recos de tes favoris (favrecs:) — il alimente le
+      // bonus 💞 « reco d'un favori » ; no-op une fois le cache complet.
+      idle(() => prefetchFavRecs());
     }
   }
 
@@ -6027,6 +6057,76 @@
       out.push(rm);   // triées par rating desc : les plus « votées similaires » d'abord
     }
     return out;
+  }
+
+  // ─── Bonus « reco d'un favori » 💞 ─────────────────────────────────────────────
+  // Un candidat Découverte est « similaire d'un favori » si son id AniList figure dans les
+  // recommandations communautaires (favrecs:<id>) d'au moins une de tes séries notées 5★. Le
+  // Set est reconstruit à partir du CACHE (aucune requête), mémoïsé, et invalidé dès que
+  // l'ensemble de tes favoris change (favRecKey) — c'est ce qui fait vivre le bonus 💞.
+  function favRecKey() {
+    return (STATE.series || []).filter((s) => s && s.favorite && s.id).map((s) => s.id).sort().join(',');
+  }
+  let _favRecSet = null, _favRecSetKey = null;
+  function favRecSet() {
+    const key = favRecKey();
+    if (_favRecSet && _favRecSetKey === key) return _favRecSet;
+    const set = new Set();
+    const ttl = Math.max(1, (CFG.favRecsDays ?? 14)) * DAY;
+    for (const s of (STATE.series || [])) {
+      if (!s || !s.favorite || !s.id) continue;
+      const recs = cacheGet('favrecs:' + s.id, ttl);   // lecture cache seule, zéro réseau
+      if (Array.isArray(recs)) for (const rm of recs) if (rm && rm.id != null) set.add(rm.id);
+    }
+    _favRecSet = set; _favRecSetKey = key;
+    return set;
+  }
+  // Signature courte du Set — entre dans l'empreinte de scoring pour que le cache des verdicts
+  // pépite ('nugget:') s'invalide de lui-même quand tes favoris (donc leurs recos) changent.
+  function favRecFingerprint() { return favRecKey() + ':' + favRecSet().size; }
+  // Vrai si le candidat (série CR) figure dans les recos d'un favori. Résolu via l'id AniList
+  // déjà mis en cache (anilist:<crId>.aniId). Mémoïsé sur l'objet (recalcul si le Set change).
+  function candidateFavRec(s) {
+    if (!s || !s.id) return false;
+    const set = favRecSet();
+    if (s.__favRecKey === _favRecSetKey && s.__favRec !== undefined) return s.__favRec;
+    let aniId = null;
+    try { const raw = cacheReadRaw('anilist:' + s.id); if (raw && raw.v && raw.v.aniId != null) aniId = raw.v.aniId; } catch (_) { /* pas de cache AniList */ }
+    const val = aniId != null && set.has(aniId);
+    try { s.__favRec = val; s.__favRecKey = _favRecSetKey; } catch (_) { /* objet gelé, tant pis */ }
+    return val;
+  }
+  // Préchargement en fond des recommandations des favoris (favrecs:<id>) — alimente le bonus 💞
+  // sans intervention. Pour chaque favori sans entrée fraîche en cache : recommandations
+  // communautaires AniList via fetchAnilistSimilar (repli sur le titre anglais si le titre FR
+  // ne matche rien). Séquentiel (doux pour l'API), cooldown-aware, on cache même une liste vide
+  // (évite de réinterroger un favori sans reco). No-op une fois le cache complet.
+  let favRecsPrefetchInFlight = false;
+  async function prefetchFavRecs() {
+    if (favRecsPrefetchInFlight || !CFG.discoverAnilistEnabled) return;
+    if (anilistCooldownRemainingMs() > 0) return;
+    const ttl = Math.max(1, (CFG.favRecsDays ?? 14)) * DAY;
+    const missing = (STATE.series || []).filter((s) => s && s.favorite && s.id && s.title
+      && cacheGet('favrecs:' + s.id, ttl) == null);
+    if (!missing.length) return;
+    favRecsPrefetchInFlight = true;
+    let touched = false;
+    try {
+      for (const fav of missing) {
+        if (anilistCooldownRemainingMs() > 0) break;
+        let recs = await fetchAnilistSimilar({ title: fav.title });
+        if ((!recs || !recs.length) && anilistCooldownRemainingMs() <= 0) {
+          const en = await getSeriesEnglishTitle(fav.id);
+          if (en && en !== fav.title) recs = await fetchAnilistSimilar({ title: en });
+        }
+        // Ne garder que les ids (le bonus n'a besoin de rien d'autre) → entrée cache légère.
+        try { cacheSet('favrecs:' + fav.id, Array.isArray(recs) ? recs.map((r) => ({ id: r.id })) : []); touched = true; } catch (_) { /* quota plein */ }
+      }
+    } catch (e) { safeCall.log(e, 'prefetchFavRecs'); }
+    finally {
+      favRecsPrefetchInFlight = false;
+      if (touched) { _favRecSet = null; if (STATE.tab === 'decouverte') render(); }
+    }
   }
 
   // ─── Découverte — second bassin AniList (en complément du classement popularité
@@ -6532,8 +6632,16 @@
   function catChips(cats, inArr, exArr, scope) {
     if (!cats.length) return '';
     const sc = scope ? ` data-catscope="${scope}"` : '';
-    return `<div class="crrav-chips">
-      <span class="crrav-catlegend">Genres — 1 clic&nbsp;: garder · 2 clics&nbsp;: exclure</span>
+    // Repliée par défaut (la liste de genres peut être longue) : un bouton l'ouvre/la ferme,
+    // et affiche le nombre de filtres actifs même repliée. État par scope dans f.genresOpen.
+    const open = (STATE.filters.genresOpen || []).includes(scope);
+    const activeN = inArr.length + exArr.length;
+    const head = `<button type="button" class="crrav-chip crrav-genretoggle" data-act="toggle-genres" data-gscope="${scope}" aria-expanded="${open}"
+      >Genres${activeN ? ` · ${activeN} actif${activeN > 1 ? 's' : ''}` : ''}<span class="crrav-genrechev">▾</span></button>`;
+    if (!open) return `<div class="crrav-chips crrav-genres-wrap">${head}</div>`;
+    return `<div class="crrav-chips crrav-genres-wrap crrav-genres-open">
+      ${head}
+      <span class="crrav-catlegend">1 clic&nbsp;: garder · 2 clics&nbsp;: exclure</span>
       ${cats.map((c) => {
         const inc = inArr.includes(c), exc = exArr.includes(c);
         const st = inc ? 'in' : exc ? 'ex' : '';
@@ -6550,8 +6658,6 @@
     return [
       ['onlyAiring', 'En diffusion', 'Uniquement les séries dont un épisode sort encore'],
       ['onlyFavorite', '★ Favoris', 'Uniquement tes favoris — celles que TU as notées 5 étoiles'],
-      ['onlyRated', 'Notées 4★+', 'Uniquement celles que tu as notées 4 étoiles ou plus'],
-      ['onlyShort', 'Courtes (≤12 ép.)', 'Séries de 12 épisodes ou moins au total'],
       ['quickFinish', 'Finissable (≤3 ép.)', 'Il te reste 3 épisodes ou moins'],
     ].map(([k, label, title]) =>
       // (37) crrav-chip-toggle : voir renderSuivi, distingue visuellement les toggles
@@ -6928,7 +7034,7 @@
   function heroCard(list) {
     if (!CFG.showHero) return '';
     if (STATE.loading || STATE.filters.view === 'list') return '';
-    if (STATE.filters.status !== 'todo' || STATE.filters.q.trim()) return '';
+    if (STATE.filters.status !== 'all' || STATE.filters.q.trim()) return '';
     // Candidat : commencé, pas fini, et le plus proche de la fin en temps restant.
     const started = list.filter((s) => s.seen > 0 && s.remaining > 0 && s.secLeft > 0);
     if (!started.length) return '';
@@ -7462,7 +7568,7 @@
   function discoverScoreFingerprint(profile) {
     const raw = [
       CFG.discoverTasteWeight, CFG.discoverTasteNeutralCos, CFG.discoverGoodTasteThreshold,
-      CFG.discoverPrefGenreBonus,
+      CFG.discoverPrefGenreBonus, CFG.discoverFavRecBonus, favRecFingerprint(),
       CFG.discoverWellRatedThresholdCr, CFG.discoverWellRatedThresholdAni, CFG.discoverWellRatedBonus,
       CFG.discoverSuperRatedThresholdCr, CFG.discoverSuperRatedThresholdAni, CFG.discoverSuperRatedBonus,
       CFG.discoverLegendaryScore, CFG.discoverNotableScore,
@@ -7493,6 +7599,7 @@
       && (crRating5 == null || crRating5 >= CFG.discoverSuperRatedThresholdCr)
       && (aniRating5 == null || aniRating5 >= CFG.discoverSuperRatedThresholdAni);
     const prefBoost = isPref && taste > 0;
+    const favRec = candidateFavRec(s);   // 💞 recommandée par un de tes favoris (voir favRecSet)
 
     const badges = [];
     // 🎯 reste informatif (« contient un de tes tags/genres préférés »), mais seulement si
@@ -7501,6 +7608,7 @@
     if (prefBoost) badges.push(['🎯', 'Un de tes tags/genres préférés']);
     if (goodTaste) badges.push(['💚', 'Dans tes goûts']);
     if (wellRated) badges.push(['🏆', 'Très bien notée']);
+    if (favRec) badges.push(['💞', 'Recommandée par un de tes favoris']);
 
     // Score « pépite ». Le goût NET pèse le plus, et il peut être NÉGATIF : un vecteur de
     // tags/genres qui ne recoupe pas ton profil fait baisser le score, pas seulement « ne
@@ -7511,9 +7619,10 @@
     const prefBonusVal = prefBoost ? CFG.discoverPrefGenreBonus : 0;
     const wellBonusVal = wellRated ? CFG.discoverWellRatedBonus : 0;
     const superBonusVal = superRated ? CFG.discoverSuperRatedBonus : 0;
-    const score = tasteContrib + prefBonusVal + wellBonusVal + superBonusVal;
+    const favRecBonusVal = favRec ? CFG.discoverFavRecBonus : 0;
+    const score = tasteContrib + prefBonusVal + wellBonusVal + superBonusVal + favRecBonusVal;
 
-    const lead = prefBoost ? 'pref' : goodTaste ? 'aff' : wellRated ? 'rated' : '';
+    const lead = prefBoost ? 'pref' : goodTaste ? 'aff' : wellRated ? 'rated' : favRec ? 'favrec' : '';
     // (fix arrondi) Le PALIER (notable/légendaire) est décidé sur le score ARRONDI au dixième
     // — le même chiffre que celui affiché sur la carte — et non sur le brut. Sinon deux séries
     // affichant toutes deux « +1.7 » pouvaient tomber dans des paliers différents (l'une à
@@ -7525,14 +7634,15 @@
     const prefShown = r1(prefBonusVal);
     const wellShown = r1(wellBonusVal);
     const superShown = r1(superBonusVal);
-    const scoreShown = tasteShown + prefShown + wellShown + superShown;
+    const favRecShown = r1(favRecBonusVal);
+    const scoreShown = tasteShown + prefShown + wellShown + superShown + favRecShown;
     const legendary = scoreShown >= CFG.discoverLegendaryScore;
     const notable = !legendary && scoreShown >= CFG.discoverNotableScore;
     // Décomposition chiffrée AFFICHÉE (termes arrondis, somme = scoreShown) pour l'affichage
     // détaillé optionnel (voir scoreDetailHtml / CFG.discoverShowScoreDetail).
     const parts = {
       taste, tasteWeight: tw, tasteContrib: tasteShown,
-      prefBonus: prefShown, wellBonus: wellShown, superBonus: superShown,
+      prefBonus: prefShown, wellBonus: wellShown, superBonus: superShown, favRecBonus: favRecShown,
     };
     // `score` (brut) reste pour le TRI (pertinence, fin) ; `scoreShown` sert à l'affichage ET
     // au palier, pour que chiffre montré et badge soient toujours cohérents.
@@ -7564,13 +7674,14 @@
     const prefBonus = C.discoverPrefGenreBonus;
     const rated1 = C.discoverWellRatedBonus;
     const rated2 = C.discoverSuperRatedBonus;
+    const favRecBonus = C.discoverFavRecBonus;
     const rated1ThrCr = C.discoverWellRatedThresholdCr;
     const rated1ThrAni = C.discoverWellRatedThresholdAni;
     const rated2ThrCr = C.discoverSuperRatedThresholdCr;
     const rated2ThrAni = C.discoverSuperRatedThresholdAni;
     const notable = C.discoverNotableScore;
     const legend = C.discoverLegendaryScore;
-    const min = -tw, max = tw + prefBonus + rated1 + rated2;
+    const min = -tw, max = tw + prefBonus + rated1 + rated2 + favRecBonus;
     const span = (max - min) || 1;
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
     const pct = (v) => clamp((v - min) / span * 100, 0, 100);
@@ -7603,7 +7714,7 @@
       : sc >= 0 ? ['plain', 'Ordinaire']
       : ['neg', '\u2715 Hors de tes go\u00fbts'];
     const examples = [
-      { lbl: 'Pile dans tes go\u00fbts, un genre pr\u00e9f\u00e9r\u00e9, tr\u00e8s bien not\u00e9e', taste: 0.85, pref: true, r1: true, r2: false },
+      { lbl: 'Pile dans tes go\u00fbts, reco d\u2019un favori, tr\u00e8s bien not\u00e9e', taste: 0.85, pref: true, r1: true, r2: false, fav: true },
       { lbl: 'Go\u00fbt ti\u00e8de, mais tr\u00e8s bien not\u00e9e', taste: 0.10, pref: false, r1: true, r2: false },
       { lbl: 'Correcte, mais loin de tes go\u00fbts', taste: -0.40, pref: false, r1: false, r2: false },
     ].map((e) => {
@@ -7611,6 +7722,7 @@
       if (e.pref && prefBonus > 0) items.push({ ic: '\ud83c\udfaf', v: r1n(prefBonus) });
       if (e.r1 && rated1 > 0) items.push({ ic: '\ud83c\udfc6', v: r1n(rated1) });
       if (e.r2 && rated2 > 0) items.push({ ic: '\u2728', v: r1n(rated2) });
+      if (e.fav && favRecBonus > 0) items.push({ ic: '\ud83d\udc9e', v: r1n(favRecBonus) });
       const total = r1n(items.reduce((a, b) => a + b.v, 0));
       const t = tierOf(total);
       const parts = items.map((it) => (it.ic ? it.ic + ' ' : '') + fmtS(it.v)).join(' <i>+</i> ');
@@ -7635,6 +7747,7 @@
           ${prefBonus > 0 ? `<span class="crrav-ss-op">+</span><span class="crrav-ss-fchip pref">\ud83c\udfaf <b>${fmt1(prefBonus)}</b></span>` : ''}
           ${rated1 > 0 ? `<span class="crrav-ss-op">+</span><span class="crrav-ss-fchip b1">\ud83c\udfc6 <b>${fmt1(rated1)}</b></span>` : ''}
           ${rated2 > 0 ? `<span class="crrav-ss-op">+</span><span class="crrav-ss-fchip b2">\u2728 <b>${fmt1(rated2)}</b></span>` : ''}
+          ${favRecBonus > 0 ? `<span class="crrav-ss-op">+</span><span class="crrav-ss-fchip favrec">\ud83d\udc9e <b>${fmt1(favRecBonus)}</b></span>` : ''}
         </div>
       </div>
 
@@ -7710,6 +7823,15 @@
               <div class="crrav-ss-ibar"><span class="b2" style="width:${barW(rated2)}%"></span></div>
             </div>
           </div>` : ''}
+          ${favRecBonus > 0 ? `<div class="crrav-ss-ingrow">
+            <span class="crrav-ss-inum">5</span>
+            <span class="crrav-ss-idot favrec"></span>
+            <div class="crrav-ss-imain">
+              <div class="crrav-ss-iname">\ud83d\udc9e Reco d'un favori <span class="crrav-ss-ival favrec">${fmt1(favRecBonus)}</span></div>
+              <div class="crrav-ss-idesc">Bonus fixe si la s\u00e9rie fait partie des <b>recommandations communautaires AniList d'un de tes favoris</b> (s\u00e9ries not\u00e9es 5\u2605) \u2014 un signal \u00ab proche de ce que tu adores \u00bb, ind\u00e9pendant du recoupement de genres/tags.</div>
+              <div class="crrav-ss-ibar"><span class="favrec" style="width:${barW(favRecBonus)}%"></span></div>
+            </div>
+          </div>` : ''}
         </div>
       </div>
 
@@ -7764,6 +7886,7 @@
     if (p.prefBonus) chips.push(`<span class="crrav-scd-term" title="Bonus genre/tag préféré">🎯 ${fs(p.prefBonus)}</span>`);
     if (p.wellBonus) chips.push(`<span class="crrav-scd-term" title="Bonus très bien notée">🏆 ${fs(p.wellBonus)}</span>`);
     if (p.superBonus) chips.push(`<span class="crrav-scd-term" title="Bonus note exceptionnelle">✨ ${fs(p.superBonus)}</span>`);
+    if (p.favRecBonus) chips.push(`<span class="crrav-scd-term" title="Bonus reco d’un de tes favoris">💞 ${fs(p.favRecBonus)}</span>`);
     const tier = sig.legendary ? '✨ Légendaire' : sig.notable ? '◆ Notable' : shown >= 0 ? 'Ordinaire' : '✕ Hors goûts';
     return `<div class="crrav-scoredetail${CFG.discoverShowScoreDetail ? ' show' : ''}">${chips.join('<span class="crrav-scd-op">+</span>')}
       <span class="crrav-scd-op">=</span><span class="crrav-scd-total ${sig.legendary ? 'legendary' : sig.notable ? 'notable' : ''}">${fs(shown)} · ${tier}</span></div>`;
@@ -8182,6 +8305,26 @@
   .crrav-chip:focus-visible{outline:2px solid #fff;outline-offset:2px}
   .crrav-catlegend{font:600 11px/1 system-ui;color:#8a8a94;align-self:center;
     text-transform:uppercase;letter-spacing:.06em}
+  /* Sections « Reste à voir » regroupées par progression. */
+  .crrav-group{margin:0 0 20px}
+  .crrav-group-h{display:flex;align-items:center;gap:9px;margin:0 0 11px;padding:0 2px;
+    font:800 15px/1.2 system-ui;color:#e8e8ee}
+  .crrav-group-h::before{content:"";width:4px;height:16px;border-radius:2px;background:#f47521}
+  .crrav-group-n{font:700 11px/1 system-ui;color:#b9b9c2;background:rgba(255,255,255,.07);
+    border:1px solid rgba(255,255,255,.09);border-radius:999px;padding:3px 8px}
+  /* Config des sections (choix + ordre). */
+  .crrav-groupcfg{margin-top:5px;align-items:center}
+  .crrav-groupchip{display:inline-flex;align-items:center;gap:4px}
+  .crrav-groupchip .crrav-chip-toggle{opacity:.5}
+  .crrav-groupchip.on .crrav-chip-toggle{opacity:1;border-style:solid;
+    box-shadow:inset 0 0 0 1px rgba(244,117,33,.35)}
+  .crrav-groupup{cursor:pointer;border:1px solid rgba(255,255,255,.14);
+    background:rgba(255,255,255,.05);color:#d8d8e0;border-radius:7px;
+    font:800 11px/1 system-ui;padding:6px 7px}
+  /* Liste de genres repliable (bouton d'en-tête + chevron). */
+  .crrav-genretoggle{display:inline-flex;align-items:center;gap:7px;border-style:dashed}
+  .crrav-genretoggle .crrav-genrechev{font-size:10px;opacity:.75;transition:transform .18s}
+  .crrav-genres-open .crrav-genretoggle .crrav-genrechev{transform:rotate(180deg)}
   .crrav-chip[aria-pressed="true"]{box-shadow:inset 0 0 0 1px rgba(244,117,33,.35)}
   .crrav-cat.in{background:#f47521;border-color:#f47521;color:#12120f}
   .crrav-cat.ex{background:rgba(224,87,74,.16);border-color:rgba(224,87,74,.55);color:#ff9a8f;
@@ -8256,6 +8399,7 @@
   .crrav-sig-pref{--sig:#b98bff}
   .crrav-sig-aff{--sig:#4ade80}
   .crrav-sig-rated{--sig:#ffd166}
+  .crrav-sig-favrec{--sig:#ff8ac2}
   /* Note « obtenue » = score pépite (voir scoreChip) : neutre par défaut, doré si légendaire,
      argenté si notable — cohérent avec le liseré/halo des cartes elles-mêmes. */
   .crrav-scorechip{display:inline-flex;align-items:center;flex:0 0 auto;padding:2px 7px;
@@ -8289,6 +8433,19 @@
     overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;
     scrollbar-width:none;-ms-overflow-style:none}
   .crrav-siglegend::-webkit-scrollbar{display:none}
+  /* La légende peut être repliée derrière un bouton quand elle ne tient pas sur une ligne
+     (mesuré après rendu, voir renderNow) — sinon elle s'affiche telle quelle, sans bouton. */
+  .crrav-siglegend-wrap{margin:14px 0 13px}
+  .crrav-siglegend-wrap .crrav-siglegend{margin:0}
+  .crrav-siglegend-toggle{display:none;align-items:center;gap:8px;width:100%;cursor:pointer;text-align:left;
+    background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:9px;
+    color:#c9c9d2;font:700 11px/1.2 system-ui;padding:8px 11px;margin:0}
+  .crrav-siglegend-toggle .crrav-siglegend-chev{margin-left:auto;font-size:10px;opacity:.8;transition:transform .18s}
+  .crrav-siglegend-wrap.crrav-siglegend-overflow .crrav-siglegend-toggle{display:flex}
+  .crrav-siglegend-wrap.crrav-siglegend-overflow.crrav-siglegend-collapsed .crrav-siglegend{display:none}
+  .crrav-siglegend-wrap.crrav-siglegend-overflow:not(.crrav-siglegend-collapsed) .crrav-siglegend{flex-wrap:wrap;overflow:visible;margin-top:9px}
+  .crrav-siglegend-wrap.crrav-siglegend-overflow:not(.crrav-siglegend-collapsed) .crrav-siglegend-chip{flex:0 1 auto}
+  .crrav-siglegend-wrap.crrav-siglegend-overflow:not(.crrav-siglegend-collapsed) .crrav-siglegend-chev{transform:rotate(180deg)}
   .crrav-siglegend-chip{display:inline-flex;align-items:center;justify-content:center;gap:5px;
     white-space:nowrap;flex:1 1 0;min-width:0;overflow:hidden;text-overflow:ellipsis;
     font:600 11px/1 system-ui;color:#d3d4da;padding:6px 8px;border-radius:9px;
@@ -9014,6 +9171,7 @@
   .crrav-ss-fchip.pref{background:rgba(185,139,255,.14);border-color:rgba(185,139,255,.4)}
   .crrav-ss-fchip.b1{background:rgba(255,209,102,.14);border-color:rgba(255,209,102,.4)}
   .crrav-ss-fchip.b2{background:rgba(255,179,71,.14);border-color:rgba(255,179,71,.4)}
+  .crrav-ss-fchip.favrec{background:rgba(255,138,194,.14);border-color:rgba(255,138,194,.4)}
   /* Échelle / jauge */
   .crrav-ss-gauge{margin:0 2px}
   .crrav-ss-flags{position:relative;height:48px}
@@ -9061,6 +9219,7 @@
   .crrav-ss-idot.pref{background:#b98bff}
   .crrav-ss-idot.b1{background:#ffd166}
   .crrav-ss-idot.b2{background:#ffb347}
+  .crrav-ss-idot.favrec{background:#ff8ac2}
   .crrav-ss-imain{min-width:0}
   .crrav-ss-iname{display:flex;align-items:center;gap:8px;flex-wrap:wrap;
     font:700 12.5px/1.3 system-ui;color:#fff;margin:0 0 3px}
@@ -9069,6 +9228,7 @@
   .crrav-ss-ival.pref{background:rgba(185,139,255,.22)}
   .crrav-ss-ival.b1{background:rgba(255,209,102,.22)}
   .crrav-ss-ival.b2{background:rgba(255,179,71,.22)}
+  .crrav-ss-ival.favrec{background:rgba(255,138,194,.22)}
   .crrav-ss-idesc{font:500 11px/1.55 system-ui;color:#9a9aa4;margin:0 0 6px}
   .crrav-ss-idesc b{color:#c9c9d2;font-weight:700}
   .crrav-ss-ibar{position:relative;height:7px;border-radius:999px;background:rgba(255,255,255,.07);overflow:hidden}
@@ -9076,6 +9236,7 @@
   .crrav-ss-ibar>span.pref{left:0;background:#b98bff}
   .crrav-ss-ibar>span.b1{left:0;background:#ffd166}
   .crrav-ss-ibar>span.b2{left:0;background:#ffb347}
+  .crrav-ss-ibar>span.favrec{left:0;background:#ff8ac2}
   .crrav-ss-ibar.diverge{box-shadow:inset 0 0 0 1px rgba(255,255,255,.06)}
   .crrav-ss-ibar.diverge .crrav-ss-ibar-neg{left:0;width:50%;min-width:0;background:linear-gradient(90deg,#f2545b,rgba(242,84,91,.22))}
   .crrav-ss-ibar.diverge .crrav-ss-ibar-pos{left:50%;width:50%;min-width:0;background:linear-gradient(90deg,rgba(74,222,128,.22),#4ade80)}
@@ -9708,11 +9869,16 @@
   .crrav-schedcur{margin-top:3px;font:500 12px/1.3 system-ui;color:#9a9aa4}
   .crrav-schedempty{margin:0;color:#8a8a94;font:400 12.5px/1.4 system-ui}
   /* Calendrier enrichi */
-  .crrav-calweek{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0 6px}
-  .crrav-calweekstat{background:linear-gradient(180deg,#16161c,#121217);border:1px solid rgba(255,255,255,.08);
-    border-radius:14px;padding:10px 16px;min-width:98px}
-  .crrav-calweekstat b{display:block;font:800 20px/1.1 system-ui;font-variant-numeric:tabular-nums}
-  .crrav-calweekstat small{color:#9a9aa4;font-size:10.5px;text-transform:uppercase;letter-spacing:.07em}
+  /* (fix) 3 pastilles à min-width:98px + padding généreux dépassaient la largeur d'un
+     écran mobile et retombaient sur 2 lignes (gain de hauteur demandé). Passées en flex
+     à parts égales (flex:1, min-width:0) : elles se partagent toujours la largeur
+     disponible et restent sur une seule ligne, quel que soit le nombre de pastilles. */
+  .crrav-calweek{display:flex;gap:8px;margin:12px 0 6px}
+  .crrav-calweekstat{flex:1 1 0;min-width:0;background:linear-gradient(180deg,#16161c,#121217);
+    border:1px solid rgba(255,255,255,.08);border-radius:14px;padding:9px 10px;text-align:left}
+  .crrav-calweekstat b{display:block;font:800 18px/1.1 system-ui;font-variant-numeric:tabular-nums}
+  .crrav-calweekstat small{color:#9a9aa4;font-size:9.5px;line-height:1.2;display:block;
+    text-transform:uppercase;letter-spacing:.04em}
   .crrav-calweekstat.hot b{color:#ffb347}
   .crrav-calday{margin:18px 0 9px;font:800 12px/1 system-ui;color:#9a9aa4;display:flex;align-items:center;
     gap:10px;text-transform:uppercase;letter-spacing:.09em}
@@ -9746,14 +9912,24 @@
   .crrav-calmain{flex:1;min-width:0}
   .crrav-caltitle{font:700 14px/1.25 system-ui;color:#f2f2f4;display:block;overflow-wrap:anywhere}
   .crrav-calrow:hover .crrav-caltitle{color:#f47521}
-  .crrav-calmeta{margin-top:4px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;font:600 11.5px/1.3 system-ui;color:#9a9aa4}
-  .crrav-calnext{color:#9fd6ff;border:1px solid rgba(159,214,255,.3);border-radius:6px;padding:2px 6px;white-space:nowrap}
+  /* (fix) Carte calendrier allégée : avant, jusqu'à 3 puces encadrées empilées (prochain
+     épisode + badge source + reste de saison) donnaient une impression de boîtes dans des
+     boîtes. Un seul accent encadré est conservé (le prochain épisode, l'info la plus
+     actionnable) ; le badge source et le reste de saison passent en texte discret sans
+     fond ni bordure, sur une ligne de méta plus compacte. */
+  .crrav-calmeta{margin-top:3px;display:flex;gap:6px;flex-wrap:wrap;align-items:baseline;font:600 11px/1.3 system-ui;color:#9a9aa4}
+  .crrav-calnext{color:#9fd6ff;border:1px solid rgba(159,214,255,.28);border-radius:6px;padding:1px 6px;white-space:nowrap;font-size:11px}
   .crrav-calwhen{color:#f47521;font-variant-numeric:tabular-nums}
-  .crrav-calcount{color:#9a9aa4}
+  .crrav-calcount{color:#83838d}
   .crrav-late{color:#ffb347;font-weight:700}
   .crrav-uptodate{color:#5ce6a0;font-weight:700}
-  .crrav-realbadge{font:800 9.5px/1 system-ui;text-transform:uppercase;letter-spacing:.06em;color:#5ce6a0;border:1px solid rgba(92,230,160,.4);border-radius:5px;padding:3px 6px}
-  .crrav-estbadge{font:800 9.5px/1 system-ui;text-transform:uppercase;letter-spacing:.06em;color:#9fd6ff;border:1px solid rgba(159,214,255,.35);border-radius:5px;padding:3px 6px}
+  .crrav-realbadge,.crrav-estbadge{font:700 10.5px/1 system-ui;letter-spacing:.02em;
+    border:none;background:none;padding:0;white-space:nowrap}
+  .crrav-realbadge{color:#5ce6a0}
+  .crrav-estbadge{color:#7d7d87}
+  .crrav-planned{display:inline-flex;align-items:center;gap:4px;max-width:100%;
+    font:600 11px/1.25 system-ui;color:#c9a24b;background:none;border:none;padding:0;
+    box-sizing:border-box}
 
   @media(max-width:600px){
     .crrav-statswrap{padding:14px}
@@ -10033,6 +10209,7 @@
   // opération a maintenant sa propre variable ; renderActivityBar affiche une ligne PAR
   // opération réellement en cours (voir plus bas), jamais mélangées.
   let progressMsgDiscover = '', progressMsgOrphan = '', progressMsgPremieres = '';
+  let siglegendExpanded = false;   // (favRec) légende Découverte dépliée à la main (sinon repliée si elle déborde)
   // Horodatage de départ de l'activité générique en cours (chargement watchlist/listes/
   // épisodes, découverte, orphelines, nouveautés). Posé/retiré par renderActivityBar() selon
   // `anyBusy`, sert uniquement à estimer un temps restant quand un message contient un
@@ -10733,12 +10910,13 @@
     }
     return `<div class="crrav-statsection">
       <h2 class="crrav-stath2">🆕 Nouveautés</h2>
-      <p class="crrav-schedhint">Deux cas mélangés ici : épisode 1 tout juste sorti (repéré via
-        AniList), épisode 2 pas encore publié — et épisode 1 pas encore sorti mais prévu
-        prochainement (« Bientôt »). Seules les séries dont la fiche Crunchyroll a pu être
-        confirmée avec certitude sont proposées ici — pas de lien vers une simple recherche.
-        Une série « déjà sortie » disparaît d'elle-même dès que son épisode 2 sort ; une série
-        « à venir » bascule automatiquement en « déjà sortie » le jour J.</p>
+      <p class="crrav-schedhint">Des séries toutes nouvelles, pas encore dans tes listes.
+        Deux étiquettes possibles : <b>déjà sorti</b>, l'épisode 1 est disponible mais
+        le 2 ne l'est pas encore ; <b>bientôt</b>, l'épisode 1 n'est pas encore sorti mais
+        sa date est annoncée. Seules les séries dont la fiche Crunchyroll est confirmée
+        apparaissent ici. Chaque carte se met à jour toute seule : « déjà sorti »
+        disparaît dès que l'épisode 2 sort, « bientôt » devient « déjà sorti » le jour de
+        sa sortie.</p>
       ${chips}
       ${body}
     </div>`;
@@ -10768,7 +10946,13 @@
     const events = est.map((r) => {
       const s = r.s;
       let whenTs, source, nextN, nextRank, seasonMayEnd, exactTime;
-      if (s.aniNextTs && s.aniNextTs > now - DAY && s.aniNextNum) {
+      // (fix) Avant, une date AniList encore acceptée jusqu'à 24h après son passage
+      // (`now - DAY`) pouvait s'afficher comme « prochain épisode » alors qu'elle était
+      // déjà dans le passé — d'où un épisode annoncé « imminent » alors qu'il datait de
+      // la veille. AniList doit désormais annoncer une date strictement future ; sinon on
+      // retombe sur l'estimation hebdomadaire (r.nextTs), qui est TOUJOURS dans le futur
+      // par construction (voir estimatedSchedule).
+      if (s.aniNextTs && s.aniNextTs > now && s.aniNextNum) {
         whenTs = s.aniNextTs; source = 'anilist'; nextN = s.aniNextNum;
         nextRank = r.seasonRank; seasonMayEnd = false; exactTime = true;
       } else {
@@ -10851,7 +11035,11 @@
         ? `${String(d.getHours()).padStart(2, '0')}h${d.getMinutes() ? String(d.getMinutes()).padStart(2, '0') : ''}`
         : 'heure inconnue';
       const diffH = (e.whenTs - now) / 3600e3;
-      const countdown = diffH < 0 ? 'imminent'
+      // (fix) « imminent » désignait en fait un événement déjà PASSÉ (diffH<0) — contresens
+      // gardé ici en filet de sécurité seulement (ne devrait plus arriver, voir plus haut le
+      // garde-fou sur s.aniNextTs). « imminent » désigne maintenant un événement à moins d'1h.
+      const countdown = diffH < 0 ? 'à l’instant'
+        : diffH < 1 ? 'imminent'
         : diffH < 24 ? `dans ${Math.max(1, Math.round(diffH))} h`
         : `dans ${Math.round(diffH / 24)} j`;
       const nextLabel = (e.seasonMayEnd || e.nextN == null) ? 'prochain épisode'
@@ -11032,6 +11220,44 @@
     </div>`;
   }
 
+  // ─── Regroupement de « Reste à voir » par progression ──────────────────────────
+  // Partition COMPLÈTE et DISJOINTE des séries (total > 0) : chaque série tombe dans
+  // exactement un groupe. « Terminé » absorbe les séries rattrapées encore en diffusion
+  // (l'ancien statut « à jour », retiré du filtre).
+  const SUIVI_GROUPS = {
+    started:    { label: 'En cours',     test: (s) => s.seen > 0 && s.remaining > 0 },
+    notstarted: { label: 'Pas commencé', test: (s) => s.seen === 0 },
+    done:       { label: 'Terminé',      test: (s) => s.remaining === 0 },
+  };
+  const SUIVI_GROUPS_ALL = ['started', 'notstarted', 'done'];
+  // Ordre effectif des sections affichées (clés valides only). Tableau vide = pas de section
+  // (repli sur la liste à plat). Champ absent = ordre par défaut.
+  function suiviGroupOrder(f) {
+    return Array.isArray(f.suiviGroupOrder)
+      ? f.suiviGroupOrder.filter((k) => SUIVI_GROUPS[k])
+      : SUIVI_GROUPS_ALL.slice();
+  }
+  // Contrôles : interrupteur du regroupement + choix des sections affichées et de leur ordre.
+  function groupingControls(f) {
+    const order = suiviGroupOrder(f);
+    const ordered = [...order, ...SUIVI_GROUPS_ALL.filter((k) => !order.includes(k))];
+    const cfg = f.suiviGroupBy ? `<div class="crrav-chips crrav-groupcfg">
+        <span class="crrav-catlegend">Sections — clic&nbsp;: afficher/masquer · ↑&nbsp;: monter</span>
+        ${ordered.map((k) => {
+          const pos = order.indexOf(k), on = pos >= 0;
+          return `<span class="crrav-groupchip${on ? ' on' : ''}">${
+            on && pos > 0 ? `<button class="crrav-groupup" data-act="group-up" data-g="${k}" title="Monter cette section">↑</button>` : ''
+          }<button class="crrav-chip crrav-chip-toggle" data-act="group-toggle" data-g="${k}" aria-pressed="${on}"
+            >${on ? `${pos + 1}. ` : ''}${SUIVI_GROUPS[k].label}</button></span>`;
+        }).join('')}
+      </div>` : '';
+    return `<div class="crrav-chipgroup crrav-chipgroup-toggle">
+        <div class="crrav-chips crrav-chips-toggle"><button class="crrav-chip crrav-chip-toggle" data-toggle="suiviGroupBy" aria-pressed="${!!f.suiviGroupBy}"
+          title="Regrouper la liste par progression (En cours / Pas commencé / Terminé)">⊞ Grouper par progression</button></div>
+        ${cfg}
+      </div>`;
+  }
+
   function renderSuivi() {
     const list = visibleSeries();
     const f = STATE.filters;
@@ -11047,24 +11273,15 @@
     // et leur classe commune .crrav-chipgroup) ; data-status / data-toggle et la logique
     // de filtrage existante ne changent pas.
     const statusChips = [
-      ['todo', 'À finir'],
       ['started', 'En cours'],
       ['notstarted', 'Pas commencées'],
-      ['uptodate', 'À jour'],
       ['done', 'Terminées'],
       ['all', 'Tout'],
     ].map(([v, label]) =>
       `<button class="crrav-chip" data-status="${v}" aria-pressed="${f.status === v}">${label}</button>`
     ).join('');
 
-    const toggleChips =
-      `<button class="crrav-chip crrav-chip-toggle" data-toggle="hideAiringSeason" aria-pressed="${f.hideAiringSeason}"
-        title="Masque les séries dont la saison où tu en es sort encore chaque semaine"
-        >Masquer les saisons en cours</button>` +
-      `<button class="crrav-chip crrav-chip-toggle" data-toggle="showIgnored" aria-pressed="${f.showIgnored}"
-        title="Affiche uniquement les séries que tu as ignorées, pour les restaurer"
-        >Ignorées${ignoredCount('watchlist') ? ` (${ignoredCount('watchlist')})` : ''}</button>` +
-      quickChips(f);
+    const toggleChips = quickChips(f);
 
     let body;
     if (STATE.loading && !list.length) {
@@ -11086,6 +11303,20 @@
     } else if (!list.length) {
       body = `<div class="crrav-msg"><h3>Rien à afficher</h3>
         <p>Aucune série ne correspond à ce filtre.</p></div>`;
+    } else if (f.suiviGroupBy && suiviGroupOrder(f).length) {
+      // Sections par progression, dans l'ordre choisi ; une section vide est masquée.
+      const gridCls = STATE.filters.view === 'list' ? ' crrav-list' : '';
+      const secs = suiviGroupOrder(f).map((k) => {
+        const g = SUIVI_GROUPS[k];
+        const items = list.filter(g.test);
+        if (!items.length) return '';
+        return `<section class="crrav-group">
+          <h3 class="crrav-group-h">${g.label}<span class="crrav-group-n">${items.length}</span></h3>
+          <div class="crrav-grid${gridCls}">${items.map((s, i) => card(s, i, 'watchlist')).join('')}</div>
+        </section>`;
+      }).join('');
+      body = secs || `<div class="crrav-msg"><h3>Rien à afficher</h3>
+        <p>Aucune des sections choisies ne contient de série avec ce filtre.</p></div>`;
     } else {
       body = `<div class="crrav-grid${STATE.filters.view === 'list' ? ' crrav-list' : ''}">${list.map((s, i) => card(s, i, 'watchlist')).join('')}</div>`;
     }
@@ -11130,6 +11361,7 @@
           <div class="crrav-chipgroup crrav-chipgroup-status">
             <div class="crrav-chips crrav-chips-status">${statusChips}</div>
           </div>
+          ${groupingControls(f)}
           <div class="crrav-chipgroup crrav-chipgroup-toggle">
             <div class="crrav-chips crrav-chips-toggle">${toggleChips}</div>
           </div>
@@ -11207,10 +11439,16 @@
           <button class="crrav-simbar-x" data-act="clear-similar" title="Réinitialiser la découverte" aria-label="Réinitialiser">✕</button>
         </div>` : ''}
         ${list.length && !f.showIgnoredDiscover ? `
-        <div class="crrav-siglegend">
+        <div class="crrav-siglegend-wrap">
+          <button type="button" class="crrav-siglegend-toggle" data-act="toggle-siglegend" aria-expanded="${siglegendExpanded}">
+            <span>Repères des cartes</span><span class="crrav-siglegend-chev">▾</span>
+          </button>
+          <div class="crrav-siglegend">
           ${profile.size ? `<span class="crrav-siglegend-chip crrav-sig-pref" title="Un de tes 3 tags/genres les plus représentés">🎯 genre préféré</span>
           <span class="crrav-siglegend-chip crrav-sig-aff" title="Colle à tes tags/genres les plus représentés">💚 dans tes goûts</span>` : ''}
+          <span class="crrav-siglegend-chip crrav-sig-favrec" title="Recommandée par la communauté à partir d'un de tes favoris (séries notées 5★)">💞 reco d'un favori</span>
           <span class="crrav-siglegend-chip crrav-sig-rated" title="Note bien au-dessus du minimum">🏆 bien notée</span>
+          </div>
         </div>` : ''}
         ${D.warning ? `<p class="crrav-warn">${escapeHtml(D.warning)}</p>` : ''}
         <div class="crrav-stats">
@@ -11232,21 +11470,19 @@
             <option value="title"${f.discoverSort === 'title' ? ' selected' : ''}>Titre A→Z</option>
             <option value="titleDesc"${f.discoverSort === 'titleDesc' ? ' selected' : ''}>Titre Z→A</option>
           </select>
-          ${!D.loading && D.series.length && !f.showIgnoredDiscover
-            ? '<button class="crrav-sync" data-act="more-discover">🔄 30 autres pépites</button>'
-            : ''}
-          ${!D.loading && !f.showIgnoredDiscover
-            ? `<button class="crrav-sync" data-act="legendary-discover"
-                 title="Scanne beaucoup plus profond dans le classement popularité pour dénicher spécifiquement des pépites légendaires (score élevé)"><span class="crrav-dice-gold">🎲</span> ${
-                D.legendaryHunt ? 'Encore des légendaires' : 'Dé légendaire'}</button>`
-            : ''}
           <div class="crrav-chips">
             <button class="crrav-chip" data-toggle="showIgnoredDiscover" aria-pressed="${f.showIgnoredDiscover}"
               title="Affiche uniquement les pépites que tu as ignorées ici, pour les restaurer"
               >Ignorées${ignoredCount('discover') ? ` (${ignoredCount('discover')})` : ''}</button>
           </div>
-          ${cats.length && !f.showIgnoredDiscover ? `<div class="crrav-chips">
-            <span class="crrav-catlegend">Genres — 1 clic&nbsp;: garder · 2 clics&nbsp;: exclure</span>
+          ${cats.length && !f.showIgnoredDiscover ? (() => {
+            const dOpen = (f.genresOpen || []).includes('discover');
+            const dN = f.discoverCatsIn.length + f.discoverCatsEx.length;
+            const dHead = `<button type="button" class="crrav-chip crrav-genretoggle" data-act="toggle-genres" data-gscope="discover" aria-expanded="${dOpen}"
+              >Genres${dN ? ` · ${dN} actif${dN > 1 ? 's' : ''}` : ''}<span class="crrav-genrechev">▾</span></button>`;
+            return dOpen ? `<div class="crrav-chips crrav-genres-wrap crrav-genres-open">
+            ${dHead}
+            <span class="crrav-catlegend">1 clic&nbsp;: garder · 2 clics&nbsp;: exclure</span>
             ${cats.map((c) => {
               const inc = f.discoverCatsIn.includes(c);
               const exc = f.discoverCatsEx.includes(c);
@@ -11258,7 +11494,8 @@
             }).join('')}
             ${f.discoverCatsIn.length || f.discoverCatsEx.length
               ? '<button class="crrav-chip" data-act="cats-clear">Réinitialiser</button>' : ''}
-          </div>` : ''}
+          </div>` : `<div class="crrav-chips crrav-genres-wrap">${dHead}</div>`;
+          })() : ''}
           ${!D.loading && D.series.length && D.searchedFilters !== undefined
             && D.searchedFilters !== genreFilterKey()
             ? `<button class="crrav-relaunch" data-act="relaunch-discover"
@@ -11414,7 +11651,7 @@
   function scoreTunerHtml(cfg, extraHtml) {
     const TUNER_KEYS = [
       'discoverTasteWeight', 'discoverTasteNeutralCos', 'discoverGoodTasteThreshold', 'discoverCompletionWeight',
-      'discoverPrefGenreBonus', 'discoverMinRatingCr', 'discoverMinRatingAni',
+      'discoverPrefGenreBonus', 'discoverFavRecBonus', 'discoverMinRatingCr', 'discoverMinRatingAni',
       'discoverWellRatedThresholdCr', 'discoverWellRatedThresholdAni', 'discoverWellRatedBonus',
       'discoverSuperRatedThresholdCr', 'discoverSuperRatedThresholdAni', 'discoverSuperRatedBonus',
       'discoverNotableScore', 'discoverLegendaryScore',
@@ -11448,6 +11685,7 @@
           <span><i style="background:rgb(var(--pref))"></i>Bonus 🎯 genre préféré</span>
           <span><i style="background:rgb(var(--well))"></i>Bonus 🏆 bien notée</span>
           <span><i style="background:rgb(var(--super))"></i>Bonus ✨ note exceptionnelle</span>
+          <span><i style="background:#ff8ac2"></i>Bonus 💞 reco d’un favori</span>
         </div>
         <div class="range-stats" id="crst-rangeStats"></div>
         <div class="schema-axis" id="crst-axis"></div>
@@ -11491,7 +11729,7 @@
     // (point neutre, seuil badge, poids complétion). Alignées sur les défauts CFG du script.
     const D = {
       discoverTasteWeight: 3, discoverTasteNeutralCos: 0.3, discoverGoodTasteThreshold: 0.15, discoverCompletionWeight: 0.6,
-      discoverPrefGenreBonus: 0.8,
+      discoverPrefGenreBonus: 0.8, discoverFavRecBonus: 0.3,
       discoverMinRatingCr: 3.1, discoverMinRatingAni: 2.3,
       discoverWellRatedThresholdCr: 4.1, discoverWellRatedThresholdAni: 3.3, discoverWellRatedBonus: 0.3,
       discoverSuperRatedThresholdCr: 4.6, discoverSuperRatedThresholdAni: 3.8, discoverSuperRatedBonus: 0.5,
@@ -11499,7 +11737,7 @@
     };
     const RANGE = {
       discoverTasteWeight: [0.5, 5], discoverTasteNeutralCos: [0.05, 0.95], discoverGoodTasteThreshold: [-1, 1], discoverCompletionWeight: [0, 1],
-      discoverPrefGenreBonus: [0, 2],
+      discoverPrefGenreBonus: [0, 2], discoverFavRecBonus: [0, 2],
       discoverMinRatingCr: [0, 5], discoverMinRatingAni: [0, 5],
       discoverWellRatedThresholdCr: [3, 5], discoverWellRatedThresholdAni: [2, 5], discoverWellRatedBonus: [0, 2],
       discoverSuperRatedThresholdCr: [3, 5], discoverSuperRatedThresholdAni: [2, 5], discoverSuperRatedBonus: [0, 2],
@@ -11535,6 +11773,7 @@
       return {
         discoverTasteWeight: c.tasteWeight,
         discoverPrefGenreBonus: c.prefBonus,
+        discoverFavRecBonus: D.discoverFavRecBonus,
         discoverWellRatedBonus: +(c.ratingTotal * 0.375).toFixed(2),
         discoverSuperRatedBonus: +(c.ratingTotal * 0.625).toFixed(2),
         discoverWellRatedThresholdCr: e.wellCr,
@@ -11607,7 +11846,7 @@
       // Le score final ne peut jamais dépasser discoverTasteWeight (goût max = 1) + tous les
       // bonus à fond. Un seuil Notable/Légendaire au-dessus est un piège : inatteignable.
       const theoreticalMax = +(state.discoverTasteWeight + state.discoverPrefGenreBonus
-        + state.discoverWellRatedBonus + state.discoverSuperRatedBonus).toFixed(2);
+        + state.discoverWellRatedBonus + state.discoverSuperRatedBonus + (state.discoverFavRecBonus || 0)).toFixed(2);
       if (state.discoverLegendaryScore > theoreticalMax) {
         state.discoverLegendaryScore = theoreticalMax; fixed.push(`Légendaire plafonné au score max théoriquement atteignable (${theoreticalMax})`);
       }
@@ -11759,7 +11998,7 @@
     function theoreticalMin() { return +(-state.discoverTasteWeight).toFixed(2); }
     function theoreticalMaxScore() {
       return +(state.discoverTasteWeight + state.discoverPrefGenreBonus
-        + state.discoverWellRatedBonus + state.discoverSuperRatedBonus).toFixed(2);
+        + state.discoverWellRatedBonus + state.discoverSuperRatedBonus + (state.discoverFavRecBonus || 0)).toFixed(2);
     }
 
     const REF_THEORETICAL_MAX = 4.6;
@@ -11975,6 +12214,7 @@
       ],
       'crst-grpPref': [
         ['discoverPrefGenreBonus', 'Bonus « genre préféré » 🎯', 0, 2, 0.1, 'Ajouté quand la série touche un genre que ton profil identifie comme favori.'],
+        ['discoverFavRecBonus', 'Bonus « reco d’un favori » 💞', 0, 2, 0.1, 'Ajouté quand la série fait partie des recommandations communautaires AniList d’un de tes favoris (séries notées 5★). Bonus à part, non piloté par les presets — un signal « proche de ce que tu adores ».'],
       ],
       'crst-grpNotes': [
         ['discoverMinRatingCr', 'Note minimale — Crunchyroll', 0, 5, 0.1, 'En dessous de cette note, la série est écartée d’office, quel que soit le goût.'],
@@ -13926,6 +14166,23 @@
       if (tl.scrollWidth > tl.clientWidth) tl.scrollLeft = tl.scrollWidth;
     });
 
+    // Légende des repères Découverte : repliée par défaut derrière son bouton si elle ne tient
+    // pas sur une seule ligne (débordement horizontal OU chip tronqué par l'ellipsis) — sinon
+    // affichée telle quelle. On ne re-mesure jamais quand elle est déjà repliée (display:none →
+    // largeurs nulles) : chaque render reconstruit le DOM à neuf, la mesure se refait à visible.
+    content.querySelectorAll('.crrav-siglegend-wrap').forEach((wrap) => {
+      if (wrap.classList.contains('crrav-siglegend-collapsed')) return;
+      const leg = wrap.querySelector('.crrav-siglegend');
+      if (!leg) return;
+      let truncated = false;
+      leg.querySelectorAll('.crrav-siglegend-chip').forEach((ch) => {
+        if (ch.scrollWidth > ch.clientWidth + 1) truncated = true;
+      });
+      const overflow = leg.scrollWidth > leg.clientWidth + 1 || truncated;
+      wrap.classList.toggle('crrav-siglegend-overflow', overflow);
+      if (overflow && !siglegendExpanded) wrap.classList.add('crrav-siglegend-collapsed');
+    });
+
     // (30) Recherche interne aux Réglages (filtre les champs à la volée, sans re-render).
     const setSearch = content.querySelector('.crrav-setsearch-input');
     if (setSearch) {
@@ -14382,6 +14639,26 @@
         if (act.dataset.act === 'retry') refreshActive();
         if (act.dataset.act === 'reload') { location.reload(); return; }
         if (act.dataset.act === 'more-discover') refreshMoreDiscover();
+        if (act.dataset.act === 'toggle-genres') {
+          const scg = act.dataset.gscope || '';
+          const arr = STATE.filters.genresOpen || (STATE.filters.genresOpen = []);
+          const gi = arr.indexOf(scg);
+          if (gi >= 0) arr.splice(gi, 1); else arr.push(scg);
+          saveFilters(); render(); return;
+        }
+        if (act.dataset.act === 'group-toggle') {
+          const o = suiviGroupOrder(STATE.filters).slice();
+          const gi = o.indexOf(act.dataset.g);
+          if (gi >= 0) o.splice(gi, 1); else o.push(act.dataset.g);
+          STATE.filters.suiviGroupOrder = o;
+          saveFilters(); render(); return;
+        }
+        if (act.dataset.act === 'group-up') {
+          const o = suiviGroupOrder(STATE.filters).slice();
+          const gi = o.indexOf(act.dataset.g);
+          if (gi > 0) { [o[gi - 1], o[gi]] = [o[gi], o[gi - 1]]; STATE.filters.suiviGroupOrder = o; saveFilters(); render(); }
+          return;
+        }
         if (act.dataset.act === 'ignore-all-discover') {
           const toIgnore = visibleDiscover();   // exactement la « page actuelle » affichée
           const n = toIgnore.length;
@@ -14409,6 +14686,7 @@
         }
         if (act.dataset.act === 'relaunch-discover') relaunchDiscover();
         if (act.dataset.act === 'legendary-discover') legendaryHuntDiscover();
+        if (act.dataset.act === 'toggle-siglegend') { siglegendExpanded = !siglegendExpanded; forceRender(); return; }
         if (act.dataset.act === 'dismiss-quota') {
           STATE.quotaWarning = null;
           forceRender();
