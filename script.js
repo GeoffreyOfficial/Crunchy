@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.20.1
+// @version      3.23.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.20.1';
+  const SCRIPT_VERSION = '3.23.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -4151,7 +4151,7 @@
   //  4. État + filtres mémorisés (7)
   // ─────────────────────────────────────────────────────────────
   const DEFAULT_FILTERS = {
-    q: '', status: 'all', sort: 'remaining', hideAiringSeason: false,
+    q: '', status: 'all', sort: 'remaining',
     // Regroupement de « Reste à voir » par progression (sections En cours / Pas commencé /
     // Terminé). suiviGroupOrder = ordre COMPLET des 3 sections (toujours les 3 clés).
     // suiviGroupHidden = sections actuellement masquées, sans influence sur l'ordre : les
@@ -4224,18 +4224,16 @@
     if ('dismissedHints' in saved && !Array.isArray(saved.dismissedHints)) {
       delete saved.dismissedHints;
     }
-    // (fix) « Masquer saison en cours » était resté coché chez certains alors que la
-    // puce pour le décocher avait disparu de l'interface entre-temps (régression) : des
-    // séries commencées disparaissaient de Reste à voir sans aucun moyen de les
-    // rafficher. La puce est de retour (voir quickChips) — on force le déverrouillage
-    // une seule fois pour réafficher tout de suite ce qui était resté coincé masqué ;
-    // libre à qui le souhaite vraiment de recocher.
-    if (saved.hideAiringSeason === true) saved.hideAiringSeason = false;
     // Filtre « En diffusion » retiré (redondant avec « Masquer saison en cours » et
     // les badges déjà affichés sur les cartes) : purge un éventuel reliquat pour ne pas
     // laisser une valeur morte trainer dans les réglages sauvegardés. Ne touche à aucune
     // série ni à aucune donnée regardée/notée — seul le filtre d'affichage disparaît.
     delete saved.onlyAiring;
+    // Filtre « Masquer saison en cours » retiré (encombrant, peu utile en pratique) :
+    // purge un éventuel reliquat pour ne pas laisser une valeur morte trainer, ET force
+    // le déverrouillage si jamais il était resté coché — mêmes raisons que onlyAiring
+    // ci-dessus, aucune série ne doit rester cachée à cause d'un filtre qui a disparu.
+    delete saved.hideAiringSeason;
     // Migration : avant la 2.8.1, les puces n'excluaient que.
     if (Array.isArray(saved.discoverCats) && !saved.discoverCatsEx) {
       saved.discoverCatsEx = saved.discoverCats;
@@ -6615,16 +6613,13 @@
   }
 
   function visibleSeries() {
-    const { q, status, sort, hideAiringSeason, showIgnored, suiviGroupBy } = STATE.filters;
+    const { q, status, sort, showIgnored, suiviGroupBy } = STATE.filters;
     let list = STATE.series.filter((s) => s.total > 0);
 
     // Vue « Ignorées » : uniquement celles-là, pour pouvoir les restaurer.
     list = showIgnored ? list.filter((s) => IGNORED.has(s.id)) : list.filter((s) => !IGNORED.has(s.id));
 
     if (CFG.hideMovies) list = list.filter((s) => s.total > 1);
-
-    // Masque les séries dont TA saison sort encore chaque semaine.
-    if (hideAiringSeason) list = list.filter((s) => !s.nextSeasonAiring);
 
     // Le regroupement par progression fait déjà cette partition en sections (voir
     // groupingControls) : le filtre de statut, masqué dans ce mode (voir statusChips),
@@ -6733,7 +6728,6 @@
     return [
       ['onlyFavorite', '★ Favoris', 'Uniquement tes favoris — celles que TU as notées 5 étoiles'],
       ['quickFinish', 'Finissable (≤3 ép.)', 'Il te reste 3 épisodes ou moins'],
-      ['hideAiringSeason', 'Masquer saison en cours', "Cache les séries dont TA saison (celle où tu en es) sort encore chaque semaine"],
     ].map(([k, label, title]) =>
       // (37) crrav-chip-toggle : voir renderSuivi, distingue visuellement les toggles
       // indépendants des chips de statut (filtre exclusif).
@@ -7331,10 +7325,17 @@
     const seriesUrl = crSeriesUrl(s.id, s.slug);
     const done = s.remaining === 0;
     const pinfo = plannedInfo(s, true);
+    // (fix UI) l'anneau de progression quitte la colonne d'actions pour devenir un badge
+    // à cheval sur le coin de la jaquette (comme en vue carte) : ça libère la colonne de
+    // droite pour une hiérarchie plus lisible entre action principale et secondaires, et
+    // le % reste lisible d'un coup d'œil, ancré visuellement à LA série qu'il concerne.
     return `<article class="crrav-lrow${s.isNew ? ' isnew' : ''}" style="--prog:${progColor(s)}">
-      <a class="crrav-lthumb" href="${seriesUrl}">
-        ${s.poster ? `<img loading="lazy" crossorigin="anonymous" src="${s.poster}" alt="" onerror="this.removeAttribute(&quot;crossorigin&quot;);this.src=this.src">` : ''}
-      </a>
+      <div class="crrav-lthumbwrap">
+        <a class="crrav-lthumb" href="${seriesUrl}">
+          ${s.poster ? `<img loading="lazy" crossorigin="anonymous" src="${s.poster}" alt="" onerror="this.removeAttribute(&quot;crossorigin&quot;);this.src=this.src">` : ''}
+        </a>
+        ${ring(s)}
+      </div>
       <div class="crrav-lmain">
         <div class="crrav-lhead">
           <a class="crrav-ltitle" href="${seriesUrl}">${favStar(s, 'crrav-lfavstar')}${escapeHtml(s.title)}</a>
@@ -7344,16 +7345,17 @@
         </div>
         ${ticks(s)}
         <div class="crrav-meta">
-          <span>${s.seen}/${s.total} vus${done ? '' : ` · ${s.remaining} restants`}${plannedTotalHint(s)}</span>
-          <span class="crrav-left">${done ? '' : fmtDuration(s.secLeft)}</span>
+          <span class="crrav-lseen">${s.seen}/${s.total} vus${plannedTotalHint(s)}</span>
+          <span class="crrav-left">${done ? '' : `${s.remaining} restants · ${fmtDuration(s.secLeft)}`}</span>
         </div>
         ${pinfo}
       </div>
       <div class="crrav-lactions">
-        ${ring(s)}
         ${resumeLink(s, 'crrav-lresume')}
-        ${similarBtn(s)}
-        ${ignoreBtn(s, source)}
+        <div class="crrav-lactions-more">
+          ${similarBtn(s)}
+          ${ignoreBtn(s, source)}
+        </div>
       </div>
     </article>`;
   }
@@ -8439,7 +8441,6 @@
     border-color:rgba(185,139,255,.7);transform:translateY(-1px);
     box-shadow:0 5px 16px -5px rgba(185,139,255,.6)}
   .crrav-similar:active{transform:translateY(0) scale(.94)}
-  .crrav-lactions .crrav-similar{width:32px;height:32px}
   /* Coloration Découverte : pastilles de signaux + liseré coloré (couleur = signal dominant) */
   .crrav-sigs{display:flex;gap:5px;margin:3px 0 2px;font-size:13px;line-height:1;min-height:15px}
   /* (39) Badge devenu <button> (voir sigMarkup/discoverCard) : cercle tappable discret,
@@ -8634,6 +8635,11 @@
   .crrav-meta{display:flex;justify-content:space-between;gap:6px;font:600 11.5px/1 system-ui;
     font-variant-numeric:tabular-nums;color:#8f8f99}
   .crrav-left{color:var(--prog)}
+  /* Vue liste seulement : « X/Y vus » fait maintenant doublon avec le % du badge posé sur
+     la jaquette, donc ce chiffre passe en discret — l'info qui reste au premier plan
+     (couleur --prog) est celle qui sert vraiment à décider : combien il en reste et
+     combien de temps ça prend. */
+  .crrav-lrow:not(.crrav-lrow-discover) .crrav-lseen{color:#6b6b74;font-weight:500}
   .crrav-planned-hint{color:#8fb3ff;font-weight:600}
   .crrav-planned-row{margin-top:5px}
   .crrav-anibadge{color:#8fb3ff!important;border-color:rgba(143,179,255,.45)!important}
@@ -8818,8 +8824,24 @@
   .crrav-lrow{display:flex;align-items:center;gap:10px;min-width:0;padding:7px 9px;background:#141419;
     border:1px solid rgba(255,255,255,.07);border-radius:12px}
   .crrav-lrow:hover{border-color:var(--prog)}
-  .crrav-lthumb{flex:0 0 38px;width:38px;aspect-ratio:2/3;border-radius:5px;overflow:hidden;background:#1d1d24}
+  .crrav-lthumbwrap{position:relative;flex:0 0 38px}
+  .crrav-lthumb{width:38px;aspect-ratio:2/3;border-radius:5px;overflow:hidden;background:#1d1d24;display:block}
   .crrav-lthumb img{width:100%;height:100%;object-fit:cover;display:block}
+  /* Badge de progression à cheval sur le coin haut-gauche de la jaquette — repris du même
+     composant .crrav-ring qu'en vue carte, repositionné et réduit ici. Rapproché du coin
+     (-5px au lieu de -8px) pour qu'il ait l'air posé SUR la jaquette plutôt que de flotter
+     à côté. Un disque de fond plein (::before, couleur fixe indépendante de --prog et de
+     la jaquette) garantit la lisibilité même sur une affiche très claire — l'anneau SVG a
+     un fond semi-transparent (crrav-ring-bg) qui ne suffit pas seul à cette petite taille,
+     l'ombre portée seule non plus sur les affiches à dominante pâle. Une fine bordure
+     claire referme le disque et détache proprement le badge du reste de la jaquette. */
+  .crrav-lthumbwrap .crrav-ringwrap{position:absolute;top:-5px;left:-5px;width:28px;height:28px;
+    z-index:2;filter:drop-shadow(0 2px 5px rgba(0,0,0,.6))}
+  .crrav-lthumbwrap .crrav-ringwrap::before{content:'';position:absolute;inset:-2px;
+    border-radius:50%;background:#141419;border:1px solid rgba(255,255,255,.16)}
+  .crrav-lthumbwrap .crrav-ring{width:28px;height:28px}
+  .crrav-lthumbwrap .crrav-ring-t{font-size:8px}
+  .crrav-lthumbwrap .crrav-ring-t.done{font-size:11px}
   .crrav-lmain{flex:1;min-width:0;display:flex;flex-direction:column;gap:4px}
   .crrav-lhead{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
   /* (fix) le titre occupe sa propre ligne pleine largeur (flex-basis:100%) au lieu de se
@@ -8833,22 +8855,22 @@
   .crrav-ltag{font:700 9.5px/1 system-ui;color:#9fd6ff;border:1px solid rgba(159,214,255,.4);
     border-radius:5px;padding:2px 5px}
   .crrav-lnew{font:800 9.5px/1 system-ui;background:#9fd6ff;color:#08131c;border-radius:5px;padding:2px 5px}
-  .crrav-lactions{display:flex;align-items:center;gap:6px;flex:0 0 auto}
-  /* (fix) le wrapper doit rester un repère de positionnement pour son enfant .crrav-ring
-     (position:absolute;inset:0) — passer en position:static le sortait du flux ET privait
-     le SVG de son ancrage, qui remontait alors se caler sur .crrav-lrow (toute la carte,
-     en haut à gauche) pendant que le texte % restait affiché à part, à droite. */
-  .crrav-lactions .crrav-ringwrap{position:relative;top:0;right:0;width:32px;height:32px;flex:0 0 auto}
-  .crrav-lactions .crrav-ring{width:32px;height:32px}
-  .crrav-lactions .crrav-ignore{position:static;opacity:1}
-  /* (superposition) les 2 boutons secondaires (séries similaires, ignorer) se chevauchent
-     légèrement — bordure teintée comme le fond de la carte pour bien les détacher l'un de
-     l'autre, comme une pile d'icônes. Celui qui a le focus/survol repasse au-dessus et
-     retrouve sa pleine largeur de clic. */
-  .crrav-lactions .crrav-similar{position:relative;z-index:1;border:2px solid #141419}
-  .crrav-lactions .crrav-ignore{margin-left:-10px;border:2px solid #141419}
-  .crrav-lactions .crrav-similar:hover,.crrav-lactions .crrav-similar:focus-visible,
-  .crrav-lactions .crrav-ignore:hover,.crrav-lactions .crrav-ignore:focus-visible{z-index:2;margin-left:0}
+  /* Colonne d'actions : hiérarchie claire plutôt qu'une rangée plate de 4 icônes.
+     L'action principale (reprendre) est seule sur sa ligne, les 2 secondaires (séries
+     similaires, ignorer) sont regroupées juste en dessous dans un même petit bloc uni —
+     l'oeil comprend d'un coup « 1 action + 1 groupe d'options », plus besoin du bricolage
+     à base de chevauchement/marge négative d'avant. */
+  .crrav-lactions{display:flex;flex-direction:column;align-items:flex-end;gap:5px;flex:0 0 auto}
+  .crrav-lactions-more{display:flex;gap:1px;background:rgba(255,255,255,.05);
+    border:1px solid rgba(255,255,255,.09);border-radius:9px;padding:2px}
+  .crrav-lactions-more .crrav-similar,.crrav-lactions-more .crrav-ignore{
+    width:28px;height:28px;border:0;border-radius:7px}
+  .crrav-lactions-more .crrav-similar{background:none}
+  .crrav-lactions-more .crrav-similar:hover{background:rgba(185,139,255,.22);
+    transform:none;box-shadow:none;border-color:transparent}
+  .crrav-lactions-more .crrav-ignore{position:static;opacity:1;background:none}
+  .crrav-lactions-more .crrav-ignore:hover{background:rgba(224,87,74,.22);color:#fff}
+  .crrav-lactions-more .crrav-ignore.on{background:rgba(92,230,160,.18);color:#5ce6a0}
   .crrav-lresume{text-decoration:none;border-radius:8px;padding:7px 10px;white-space:nowrap;
     font:700 11px/1.2 system-ui;color:#12120f;background:var(--prog)}
   @media(max-width:720px){
@@ -8869,27 +8891,25 @@
      forçant des ellipses prématurées et un alignement bancal entre les lignes. */
   @media(max-width:600px){
     .crrav-lrow:not(.crrav-lrow-discover){gap:8px;padding:6px 7px}
-    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lthumb{flex-basis:32px;width:32px}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lthumbwrap{flex-basis:32px}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lthumb{width:32px}
     .crrav-lrow:not(.crrav-lrow-discover) .crrav-lmain{gap:3px}
     .crrav-lrow:not(.crrav-lrow-discover) .crrav-lhead{gap:5px}
     .crrav-lrow:not(.crrav-lrow-discover) .crrav-ltitle{font-size:12.5px}
-    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions{gap:5px}
-    .crrav-lrow:not(.crrav-lrow-discover) .crrav-ringwrap,
-    .crrav-lrow:not(.crrav-lrow-discover) .crrav-ring{width:28px;height:28px}
-    .crrav-lrow:not(.crrav-lrow-discover) .crrav-ring-t{font-size:8.5px}
-    .crrav-lrow:not(.crrav-lrow-discover) .crrav-ring-t.done{font-size:11px}
-    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions .crrav-similar{width:26px;height:26px}
-    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions .crrav-ignore{width:26px;height:26px;margin-left:-8px}
-    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions .crrav-similar:hover,
-    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions .crrav-similar:focus-visible,
-    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions .crrav-ignore:hover,
-    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions .crrav-ignore:focus-visible{margin-left:0}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions{gap:4px}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lthumbwrap .crrav-ringwrap,
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lthumbwrap .crrav-ring{width:24px;height:24px}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lthumbwrap .crrav-ringwrap{top:-4px;left:-4px}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lthumbwrap .crrav-ring-t{font-size:7.5px}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lthumbwrap .crrav-ring-t.done{font-size:9.5px}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions-more .crrav-similar,
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions-more .crrav-ignore{width:25px;height:25px}
   }
   /* Très petit téléphone : la baguette « séries similaires » est la moins essentielle
      des 3 actions (anneau = progression, resume = action principale, ignore = tri) —
      on la retire pour laisser le titre respirer plutôt que tout comprimer davantage. */
   @media(max-width:380px){
-    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions .crrav-similar{display:none}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions-more .crrav-similar{display:none}
   }
 
   /* (5bis) vue liste compacte de Découverte : même carcasse .crrav-lrow, avec note,
@@ -9162,9 +9182,9 @@
   .crrav-scoretuner .handle.super .grip{background:rgb(var(--super))} .crrav-scoretuner .handle.super .tag{background:rgb(var(--super));color:#2b1200}
   .crrav-scoretuner .handle.favrec .grip{background:rgb(var(--favrec))} .crrav-scoretuner .handle.favrec .tag{background:rgb(var(--favrec));color:#2b0a1a}
   .crrav-scoretuner .handle.notable .grip{background:rgb(var(--seuiln));width:3px}
-  .crrav-scoretuner .handle.notable .tag{background:rgb(var(--seuiln));color:#08131c;--tagTop:-42px}
+  .crrav-scoretuner .handle.notable .tag{background:rgb(var(--seuiln));color:#08131c}
   .crrav-scoretuner .handle.legend .grip{background:rgb(var(--seuill));width:3px}
-  .crrav-scoretuner .handle.legend .tag{background:rgb(var(--seuill));color:#2b1a00;--tagTop:-42px}
+  .crrav-scoretuner .handle.legend .tag{background:rgb(var(--seuill));color:#2b1a00}
   @media (max-width:420px){
     .crrav-scoretuner .handle .tag{font-size:9px;padding:2px 5px}
   }
@@ -9915,7 +9935,18 @@
   .crrav-acttime{flex:0 0 auto;font:600 11px/1 system-ui;color:#9a9aa4}
 
   /* Calendrier estimatif — le titre de série n'est JAMAIS tronqué */
+  /* (fix) Explication du bloc Nouveautés : avant affichée en permanence en pavé de
+     texte sous le titre, elle prenait de la place pour une info qu'on ne lit qu'une
+     fois. Repliée derrière un bouton « i » à côté du titre — même mécanique de
+     bascule au clic que le résumé d'une jaquette (.crrav-info/.crrav-syn), mais en
+     ligne plutôt qu'en overlay (voir .crrav-ignrow .crrav-info pour le même principe). */
+  .crrav-newpremhead{display:flex;align-items:center;flex-wrap:wrap;gap:8px 10px}
+  .crrav-schedinfo{position:static;width:20px;height:20px;flex:0 0 auto;font-size:11px;line-height:18px}
+  .crrav-newpremhead .crrav-syn.crrav-schedhint{position:static;inset:auto;opacity:1;visibility:visible;
+    display:none;flex:1 1 100%;order:9;padding:0;margin:0;background:none}
+  .crrav-newpremhead .crrav-syn.crrav-schedhint.show{display:block}
   .crrav-schedhint{margin:-4px 0 4px;font:400 11.5px/1.4 system-ui;color:#8a8a94}
+  .crrav-schedhint p{margin:0;color:#8a8a94}
   .crrav-sched{display:flex;flex-direction:column;gap:8px}
   .crrav-schedrow{display:block;padding:12px 14px;border-radius:12px;text-decoration:none;color:inherit;
     background:#141419;border:1px solid rgba(255,255,255,.08)}
@@ -10983,14 +11014,20 @@
       body = `<div class="crrav-grid">${list.map(newPremiereCard).join('')}</div>`;
     }
     return `<div class="crrav-statsection">
-      <h2 class="crrav-stath2">🆕 Nouveautés</h2>
-      <p class="crrav-schedhint">Des séries toutes nouvelles, pas encore dans tes listes.
-        Deux étiquettes possibles : <b>déjà sorti</b>, l'épisode 1 est disponible mais
-        le 2 ne l'est pas encore ; <b>bientôt</b>, l'épisode 1 n'est pas encore sorti mais
-        sa date est annoncée. Seules les séries dont la fiche Crunchyroll est confirmée
-        apparaissent ici. Chaque carte se met à jour toute seule : « déjà sorti »
-        disparaît dès que l'épisode 2 sort, « bientôt » devient « déjà sorti » le jour de
-        sa sortie.</p>
+      <div class="crrav-newpremhead">
+        <h2 class="crrav-stath2">🆕 Nouveautés</h2>
+        <button type="button" class="crrav-info crrav-schedinfo" aria-expanded="false"
+          aria-label="En savoir plus sur le bloc Nouveautés">i</button>
+        <div class="crrav-syn crrav-schedhint">
+          <p>Des séries toutes nouvelles, pas encore dans tes listes.
+            Deux étiquettes possibles : <b>déjà sorti</b>, l'épisode 1 est disponible mais
+            le 2 ne l'est pas encore ; <b>bientôt</b>, l'épisode 1 n'est pas encore sorti mais
+            sa date est annoncée. Seules les séries dont la fiche Crunchyroll est confirmée
+            apparaissent ici. Chaque carte se met à jour toute seule : « déjà sorti »
+            disparaît dès que l'épisode 2 sort, « bientôt » devient « déjà sorti » le jour de
+            sa sortie.</p>
+        </div>
+      </div>
       ${chips}
       ${body}
     </div>`;
@@ -12315,34 +12352,29 @@
 
     function resolveTagCollisions(axis) {
       const w = axis.getBoundingClientRect().width || axis.offsetWidth || 300;
-      // Deux familles de repères utilisent des bases verticales différentes (--tagTop),
-      // exprès pour ne jamais se toucher : le groupe principal (goût/🎯/🏆/✨/💞) et le
-      // groupe seuils (Notable/Légendaire, décalé de 17px plus haut). Elles doivent donc
-      // empiler leurs niveaux --lvl indépendamment — sinon un tag du groupe principal
-      // poussé en lvl 1 (top:-25-18=-43px) vient chevaucher la base du groupe seuils
-      // (top:-42px), comme observé avec l'ajout du repère 💞 densifiant la zone.
-      const THRESHOLD_CLASSES = ['notable', 'legend'];
-      const isThreshold = (h) => THRESHOLD_CLASSES.some((c) => h.classList.contains(c));
+      // Tous les repères (goût/🎯/🏆/✨/💞 + seuils Notable/Légendaire) partagent
+      // maintenant la même base verticale (--tagTop:-25px, voir CSS) et un seul pass
+      // d'empilement commun : chaque tag qui chevaucherait horizontalement un tag déjà
+      // placé à son niveau est poussé au niveau --lvl suivant, tous types confondus.
+      // Avant, seuils et groupe principal empilaient leurs niveaux indépendamment sur
+      // des bases décalées de seulement 17px — un tag du groupe principal poussé en
+      // lvl 1 (-25-18=-43px) finissait quasi à la même hauteur que la base des seuils
+      // (-42px) et les deux se chevauchaient quand même (cf. capture avec 💞 ajouté).
+      // Un seul groupe = plus aucune collision possible, quelle que soit la densité.
       const allHandles = Array.from(axis.querySelectorAll('.handle'));
-      const groups = [
-        allHandles.filter((h) => !isThreshold(h)),
-        allHandles.filter((h) => isThreshold(h)),
-      ];
-      groups.forEach((handles) => {
-        const items = handles.map((h) => {
-          const tag = h.querySelector('.tag');
-          const tagW = tag ? tag.getBoundingClientRect().width : 40;
-          return { el: h, px: (parseFloat(h.style.left) || 0) / 100 * w, half: tagW / 2 + 5 };
-        });
-        items.sort((a, b) => a.px - b.px);
-        const rightEdgeAtLevel = [];
-        const MAX_LVL = 6;
-        items.forEach((it) => {
-          let lvl = 0;
-          while (lvl < MAX_LVL && rightEdgeAtLevel[lvl] !== undefined && (it.px - it.half) < rightEdgeAtLevel[lvl]) lvl++;
-          rightEdgeAtLevel[lvl] = it.px + it.half;
-          it.el.style.setProperty('--lvl', lvl);
-        });
+      const items = allHandles.map((h) => {
+        const tag = h.querySelector('.tag');
+        const tagW = tag ? tag.getBoundingClientRect().width : 40;
+        return { el: h, px: (parseFloat(h.style.left) || 0) / 100 * w, half: tagW / 2 + 5 };
+      });
+      items.sort((a, b) => a.px - b.px);
+      const rightEdgeAtLevel = [];
+      const MAX_LVL = 10;
+      items.forEach((it) => {
+        let lvl = 0;
+        while (lvl < MAX_LVL && rightEdgeAtLevel[lvl] !== undefined && (it.px - it.half) < rightEdgeAtLevel[lvl]) lvl++;
+        rightEdgeAtLevel[lvl] = it.px + it.half;
+        it.el.style.setProperty('--lvl', lvl);
       });
     }
 
@@ -13881,6 +13913,24 @@
       const prevScroll = bodyEl.scrollTop;
       bodyEl.innerHTML = buildSettingsSheetBodyHtml();
       bodyEl.scrollTop = prevScroll;
+      // (fix) buildSettingsSheetBodyHtml() régénère un NOUVEAU nœud .crrav-scoretuner
+      // (juste le squelette statique : #crst-matrix et #crst-axis sont des <div> vides
+      // dans le markup — voir scoreTunerHtml). Tout leur contenu réel (matrice de
+      // presets, schéma glissable, curseurs du détail) n'est peint qu'en JS par
+      // initScoreTuner(container), normalement appelé une fois plus bas dans
+      // renderNow(). Mais ce chemin de patch-in-place COURT-CIRCUITE renderNow() (voir
+      // le `return` juste après son appel) : ce nouveau nœud ne recevait donc jamais
+      // son init et restait un squelette vide (« preset et schéma cassés, vides »).
+      // Ça se manifestait typiquement à l'ouverture des Réglages pendant le chargement
+      // initial de l'appli : un rendu de fond (progression du scan, etc.) arrivait juste
+      // après l'ouverture, prenait ce chemin de patch, et remplaçait silencieusement le
+      // panneau tout juste initialisé par une coquille vide — jusqu'à ce qu'un
+      // rebuild complet de la sheet (fermeture + réouverture après un vrai render
+      // complet, ex. après « Actualiser ») ne la reconstruise correctement.
+      // initScoreTuner est idempotent (garde interne dataset.stReady) : l'appeler ici
+      // sur ce nœud tout neuf le répare sans rien casser côté ancien nœud.
+      const scoreTunerEl = bodyEl.querySelector('.crrav-scoretuner');
+      if (scoreTunerEl) initScoreTuner(scoreTunerEl);
     }
     const footEl = sheetEl.querySelector('.crrav-sheetfoot');
     if (footEl) footEl.innerHTML = buildSettingsSheetFootHtml();
@@ -14182,6 +14232,23 @@
       stats: 'Statistiques de visionnage',
       calendrier: 'Prochains épisodes estimés',
     };
+    // (fix) Un seul et même booléen pour toutes les incohérences remontées : recherche
+    // globale active ⇒ le panneau affiché n'est PLUS celui de STATE.tab (voir plus bas,
+    // renderGlobalSearch prend le dessus) mais un panneau à part entière. Les boutons et
+    // onglets qui n'ont de sens QUE pour le contenu normal d'un onglet doivent en tenir
+    // compte, sans quoi ils restaient affichés (agissant sur un panneau qui n'est plus
+    // visible) pendant une recherche.
+    const isSearching = !!STATE.filters.globalQ.trim();
+
+    // Bouton filtres (réplie/déplie bannière + stats + contrôles, voir headerCollapsed) :
+    // n'existe que sur les 3 onglets qui ont réellement ce bloc à réplier (Reste à voir /
+    // Hors listes / Découverte, voir .crrav-statsrow + .crrav-controls plus bas). Sur
+    // Stats et Calendrier il n'y a rien à réplier — le bouton restait affiché sans agir
+    // sur rien de visible. Idem pendant une recherche globale : le panneau affiché
+    // (renderGlobalSearch) n'a pas ce bloc non plus.
+    const filtersBtnVisible = !isSearching
+      && (STATE.tab === 'suivi' || STATE.tab === 'orphelines' || STATE.tab === 'decouverte');
+
     const tabs = [
       ['suivi', 'Reste à voir'],
       ['orphelines', 'Hors listes'],
@@ -14189,14 +14256,18 @@
       ['stats', 'Stats'],
       ['calendrier', 'Calendrier'],
     ].map(([v, label]) =>
-      `<button class="crrav-tab" data-tab="${v}" role="tab" aria-selected="${STATE.tab === v}"
+      // Pendant une recherche globale, AUCUN onglet n'est réellement affiché — le panneau
+      // de résultats de recherche prend leur place (voir plus bas) — donc aucun ne doit
+      // apparaître sélectionné, sous peine de laisser croire que « Calendrier » (ou tout
+      // autre onglet resté actif en interne) montre encore son propre contenu.
+      `<button class="crrav-tab" data-tab="${v}" role="tab" aria-selected="${!isSearching && STATE.tab === v}"
         title="${escapeHtml(tabTitles[v])}">${label}</button>`
     ).join('');
 
-    // La bascule grille/liste n'a de sens que là où on affiche des cartes de séries.
-    // Découverte partage le même état (STATE.filters.view) que Reste à voir / Hors listes :
-    // basculer l'un bascule l'autre, comme demandé.
-    const viewBtn = STATE.tab === 'stats' || STATE.tab === 'calendrier' ? '' :
+    // La bascule grille/liste n'a de sens que là où on affiche des cartes de séries en
+    // grille (Reste à voir / Hors listes / Découverte) — jamais sur Stats ou Calendrier,
+    // et jamais pendant une recherche globale (panneau à part, qui ne suit pas ce réglage).
+    const viewBtn = isSearching || STATE.tab === 'stats' || STATE.tab === 'calendrier' ? '' :
       `<button class="crrav-sync" data-act="view"
         title="${STATE.filters.view === 'list' ? 'Afficher en grille' : 'Afficher en liste compacte'}"
         >${STATE.filters.view === 'list' ? '▦' : '☰'}</button>`;
@@ -14204,7 +14275,7 @@
     // Bouton « autres pépites » : la même action que dans les contrôles de l'onglet
     // (repliables), mais toujours visible en haut sur Découverte — sans avoir à déplier
     // les filtres pour la trouver. Mêmes conditions que ce bouton-là (voir renderDecouverte).
-    const moreDiscoverBtn = STATE.tab === 'decouverte' && !STATE.discover.loading
+    const moreDiscoverBtn = !isSearching && STATE.tab === 'decouverte' && !STATE.discover.loading
       && STATE.discover.series.length
       ? `<button class="crrav-sync crrav-icobtn" data-act="more-discover"
           title="Charger 30 autres pépites">🎲<span class="crrav-btn-label">Autres pépites</span></button>`
@@ -14213,7 +14284,7 @@
     // Raccourci « dé légendaire » : 🎲 réservé à CETTE action (scan profond, pépites
     // légendaires uniquement) — ne pas réutiliser cette icône ailleurs, elle porte un sens
     // précis pour l'utilisateur une fois qu'il l'a repérée dans le bouton complet de l'onglet.
-    const legendaryDiscoverBtn = STATE.tab === 'decouverte' && !STATE.discover.loading
+    const legendaryDiscoverBtn = !isSearching && STATE.tab === 'decouverte' && !STATE.discover.loading
       ? `<button class="crrav-sync crrav-icobtn crrav-legendary-btn" data-act="legendary-discover"
           title="Dé légendaire : scan profond pour dénicher des pépites légendaires"><span class="crrav-dice-gold">🎲</span><span class="crrav-btn-label">${
           STATE.discover.legendaryHunt ? 'Encore des légendaires' : 'Dé légendaire'}</span></button>`
@@ -14262,9 +14333,13 @@
           ${!CFG.showSearchBar && !wideSearch ? `<button class="crrav-sync crrav-icobtn" data-act="togglesearch"
             aria-pressed="${searchBarForcedOpen}" title="${searchBarForcedOpen ? 'Masquer la recherche' : 'Chercher partout'}"
             >🔍<span class="crrav-btn-label">Recherche</span></button>` : ''}
+          ${filtersBtnVisible ? `
           <button class="crrav-filtersbtn crrav-icobtn" data-act="filters" aria-pressed="${STATE.filters.headerCollapsed}"
             title="${STATE.filters.headerCollapsed ? 'Déplier les filtres et les stats' : 'Replier les filtres et les stats'}"
-            >${STATE.filters.headerCollapsed ? '▸' : '▾'}<span class="crrav-btn-label">Filtres</span></button>
+            ><svg class="crrav-filtericon" viewBox="0 0 24 24" width="15" height="15" fill="none" aria-hidden="true">
+              <path d="M3 5h18l-6.75 7.5v6L11.75 20v-7.5L5 5z" stroke="currentColor" stroke-width="2"
+                stroke-linejoin="round" stroke-linecap="round"/>
+            </svg><span class="crrav-btn-label">Filtres</span></button>` : ''}
           ${viewBtn}
           ${moreDiscoverBtn}
           ${legendaryDiscoverBtn}
