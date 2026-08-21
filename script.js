@@ -864,6 +864,29 @@
     APP_STATE.ignored = obj;
     persistState(APP_STATE);
   }
+
+  // (45) Historique Annuler/Rétablir des séries ignorées/réaffichées — pile d'instantanés de
+  // la Map IGNORED entière, capturée après CHAQUE mutation (ignorer une série, « Tout
+  // ignorer » de Découverte, réafficher une/plusieurs/toutes). Remplace l'ancien historique
+  // de brouillon des Réglages (ex-(44), retiré) : vit tant que l'appli reste ouverte — pas
+  // borné à la sheet Réglages — avec ses boutons ↩/↪ dans l'en-tête principal, à côté de
+  // ⚙ Réglages (voir ignoreHistoryButtonsHtml), masqués uniquement quand l'onglet Diagnostic
+  // de la sheet est affiché : rien à y annuler.
+  let ignoreHistory = [new Map(IGNORED)];   // [0] = état tel que chargé depuis le stockage
+  let ignoreHistoryIndex = 0;
+  const IGNORE_HISTORY_MAX = 50;   // borne mémoire ; au-delà, les plus vieux instantanés tombent
+  function recordIgnoreHistory() {
+    ignoreHistory = ignoreHistory.slice(0, ignoreHistoryIndex + 1);
+    ignoreHistory.push(new Map(IGNORED));
+    if (ignoreHistory.length > IGNORE_HISTORY_MAX) ignoreHistory.shift();
+    ignoreHistoryIndex = ignoreHistory.length - 1;
+  }
+  function applyIgnoreHistory(map) {
+    IGNORED = new Map(map);
+    ignoredSelected.clear();   // (43) sélection multiple du panneau Ignorées, peut référencer des id disparus
+    saveIgnored();
+  }
+
   function toggleIgnored(id, title, source, poster, synopsis) {
     if (IGNORED.has(id)) IGNORED.delete(id);
     else IGNORED.set(id, {
@@ -872,6 +895,7 @@
       ignoredAt: Date.now(),   // (43)
     });
     saveIgnored();
+    recordIgnoreHistory();   // (45)
   }
   function ignoredCount(source) {
     let n = 0;
@@ -909,7 +933,7 @@
       });
       added++;
     }
-    if (added) saveIgnored();   // UNE seule écriture, quel que soit le nombre de séries
+    if (added) { saveIgnored(); recordIgnoreHistory(); }   // UNE seule écriture, quel que soit le nombre de séries
     return added;
   }
 
@@ -7134,12 +7158,6 @@
   let ignoredSelected = new Set();
   let ignoredCollapsedGroups = new Set();
   let suppressAccToggle = false;   // évite de polluer statsAccordionOpen lors d'ouvertures programmatiques
-  // (44) Historique Annuler/Rétablir des réglages EN COURS DE MODIFICATION (pas encore
-  // enregistrés) : liste d'instantanés des champs [data-set] de la sheet Réglages, avec un
-  // index pointant l'instantané courant. Repart de zéro à chaque (ré)ouverture de la sheet
-  // (voir wiring de .crrav-settingssheet) — jamais persisté, jamais lié à STATE.
-  let settingsHistory = [];
-  let settingsHistoryIndex = -1;
   safeCall(() => {
     const raw = JSON.parse(localStorage.getItem(LS + 'hues') || '{}');
     for (const [k, v] of Object.entries(raw)) HUE_CACHE.set(k, v);
@@ -8229,6 +8247,10 @@
   .crrav-chip:focus-visible,.crrav-btn:focus-visible{outline:2px solid #fff;outline-offset:2px}
   .crrav-filtersbtn[aria-pressed="true"],.crrav-sync[aria-pressed="true"]{
     background:rgba(244,117,33,.18);border-color:rgba(244,117,33,.5)}
+  /* (45) Boutons Annuler/Rétablir des ignorées dans l'en-tête : mêmes icônes compactes que
+     les autres boutons .crrav-sync, mais peuvent être désactivés (pile vide d'un côté). */
+  .crrav-sync:disabled{opacity:.32;cursor:not-allowed}
+  .crrav-sync:disabled:hover{background:rgba(255,255,255,.07)}
   /* Boutons icône seule du header (filtres, recherche, TV, réglages, actualiser) :
      toujours compacts, quelle que soit la largeur. Avant, ils repassaient en icône+texte
      à partir de 720px (pensé pour Z Fold ouvert) — mais sur Découverte (2 boutons de plus
@@ -9485,10 +9507,6 @@
     border-top:1px solid rgba(255,255,255,.08)}
   .crrav-sactions-primary>.crrav-btn{flex:1 1 auto;min-width:0}
   .crrav-sactions-primary>[data-act="settings-save"]{flex:2 1 0}
-  /* (44) Boutons Annuler/Rétablir : icônes compactes à largeur fixe, ne doivent jamais
-     grandir/rétrécir avec le reste de la barre (Enregistrer/Valeurs par défaut). */
-  .crrav-sactions .crrav-histbtn,.crrav-sheetfoot .crrav-histbtn{flex:0 0 auto !important;
-    width:40px;padding:9px 0;font-size:16px;text-align:center}
   .crrav-btn:disabled{opacity:.32;cursor:not-allowed}
   /* Garde-fou libellés : les boutons d'action des Réglages (barre collante « Enregistrer /
      Valeurs par défaut » ET pied de feuille mobile) doivent TOUJOURS afficher leur texte.
@@ -12742,7 +12760,6 @@
       </div>
       <div class="crrav-sgroups">${groups}</div>
       <div class="crrav-sactions crrav-sactions-primary">
-        ${settingsHistoryButtonsHtml()}
         <button class="crrav-btn primary" data-act="settings-save">Enregistrer et actualiser</button>
         <button class="crrav-btn ghost" data-act="settings-reset">Valeurs par défaut</button>
       </div>
@@ -13778,91 +13795,7 @@
     return patch;
   }
 
-  // (44) Instantané brut de tous les champs [data-set] de la sheet Réglages, PAS validé/typé
-  // (contrairement à collectSettings) : on veut pouvoir restaurer exactement ce qui était
-  // affiché, y compris une saisie intermédiaire pas encore blur/validée.
-  function snapshotSettingsDraft(sheetRoot) {
-    const snap = {};
-    sheetRoot.querySelectorAll('[data-set]').forEach((el) => {
-      snap[el.dataset.set] = el.type === 'checkbox' ? el.checked : el.value;
-    });
-    return snap;
-  }
 
-  // (44) Réapplique un instantané aux champs de la sheet, en redéclenchant les événements
-  // natifs (input/change) de chaque champ modifié pour que TOUT ce qui en dépend se remette
-  // à jour tout seul — libellé de curseur, matrice de presets, schéma interactif (via son
-  // propre écouteur sur les curseurs de détail), sans jamais toucher CFG (toujours un
-  // brouillon tant qu'on n'a pas cliqué « Enregistrer »).
-  function restoreSettingsDraft(sheetRoot, snap) {
-    if (!snap) return;
-    sheetRoot.querySelectorAll('[data-set]').forEach((el) => {
-      if (!(el.dataset.set in snap)) return;
-      const v = snap[el.dataset.set];
-      if (el.type === 'checkbox') {
-        if (el.checked === v) return;
-        el.checked = v;
-      } else {
-        if (el.value === v) return;
-        el.value = v;
-      }
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-    });
-    // Chips de genres exclus : dérivées du champ caché restauré ci-dessus (elles ne sont pas
-    // elles-mêmes des [data-set], donc pas capturées par l'instantané — on les resynchronise
-    // à partir de la valeur qu'on vient de réappliquer).
-    sheetRoot.querySelectorAll('.crrav-genrefield').forEach((field) => {
-      const hidden = field.querySelector('.crrav-genre-hidden');
-      if (!hidden) return;
-      const set = new Set(hidden.value.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean));
-      field.querySelectorAll('.crrav-genre-cb').forEach((cb) => {
-        const on = set.has(cb.value.toLowerCase());
-        cb.checked = on;
-        const lab = cb.closest('.crrav-genre'); if (lab) lab.classList.toggle('on', on);
-      });
-    });
-  }
-
-  function updateSettingsHistoryButtons(sheetRoot) {
-    const undoBtn = sheetRoot.querySelector('[data-act="settings-undo"]');
-    const redoBtn = sheetRoot.querySelector('[data-act="settings-redo"]');
-    if (undoBtn) undoBtn.disabled = settingsHistoryIndex <= 0;
-    if (redoBtn) redoBtn.disabled = settingsHistoryIndex >= settingsHistory.length - 1;
-  }
-
-  // (44) Câble le suivi Annuler/Rétablir sur le nœud .crrav-settingssheet. `resetBaseline`
-  // (true à l'ouverture de la sheet) repart d'un historique à un seul point : l'état actuel.
-  // Les écouteurs sont posés UNE FOIS sur ce nœud (garde data-histWired) — comme il n'est
-  // recréé qu'à l'ouverture (voir patchSettingsSheetInPlace, qui ne touche que son intérieur),
-  // ils restent valides même quand le corps/pied de la sheet sont reconstruits en interne.
-  function wireSettingsHistory(sheetEl, resetBaseline) {
-    if (!sheetEl) return;
-    if (resetBaseline) {
-      settingsHistory = [snapshotSettingsDraft(sheetEl)];
-      settingsHistoryIndex = 0;
-    }
-    updateSettingsHistoryButtons(sheetEl);
-    if (sheetEl.dataset.histWired === '1') return;
-    sheetEl.dataset.histWired = '1';
-    // Instantané pris après coup (setTimeout 0) : les gestes qui modifient l'état SANS
-    // déclencher d'événement natif (clic sur un preset, relâchement d'un curseur du schéma)
-    // écrivent directement dans le DOM depuis leurs propres écouteurs internes — on laisse
-    // ces écouteurs s'exécuter d'abord, puis on capture l'état final, débrouncé pour ne pas
-    // empiler un point par frappe/pixel glissé.
-    const scheduleSnapshot = debounce(() => {
-      const snap = snapshotSettingsDraft(sheetEl);
-      const last = settingsHistory[settingsHistoryIndex];
-      if (last && JSON.stringify(snap) === JSON.stringify(last)) return;
-      settingsHistory = settingsHistory.slice(0, settingsHistoryIndex + 1);
-      settingsHistory.push(snap);
-      settingsHistoryIndex = settingsHistory.length - 1;
-      updateSettingsHistoryButtons(sheetEl);
-    }, 300);
-    ['input', 'change', 'click', 'pointerup'].forEach((evt) => {
-      sheetEl.addEventListener(evt, () => setTimeout(scheduleSnapshot, 0));
-    });
-  }
 
   // (2) ne détruit que les données re-téléchargeables (cache IndexedDB + éventuels
   // restes localStorage d'une installation pas encore migrée).
@@ -14005,25 +13938,26 @@
   // complet », au même endroit et avec le même style (.crrav-btn primary) que l'action
   // de Réglages — une seule action principale, toujours au même emplacement collé en
   // bas, quel que soit l'onglet.
-  // (44) Boutons ↩ Annuler / ↪ Rétablir : icônes compactes pour ne pas prendre la place du
-  // bouton principal « Enregistrer » sur la barre d'actions (mobile ET desktop). Désactivés
-  // par défaut — updateSettingsHistoryButtons() les (dés)active selon l'historique courant.
-  function settingsHistoryButtonsHtml() {
-    return `<button class="crrav-btn ghost crrav-histbtn" data-act="settings-undo"
-        aria-label="Annuler le dernier changement" title="Annuler" disabled>↩</button>
-      <button class="crrav-btn ghost crrav-histbtn" data-act="settings-redo"
-        aria-label="Rétablir le changement annulé" title="Rétablir" disabled>↪</button>`;
-  }
-
   function buildSettingsSheetFootHtml() {
     if (settingsSheetTab === 'ignored') return ignoredFootHtml();
     if (settingsSheetTab === 'diag') {
       return `<button class="crrav-btn primary" data-act="full-diag"${STATE.fullDiagRunning ? ' disabled' : ''}>
         ${STATE.fullDiagRunning ? '⏳ Diagnostic en cours…' : '🩺 Lancer le diagnostic complet'}</button>`;
     }
-    return `${settingsHistoryButtonsHtml()}
-      <button class="crrav-btn ghost" data-act="settings-reset">Valeurs par défaut</button>
+    return `<button class="crrav-btn ghost" data-act="settings-reset">Valeurs par défaut</button>
       <button class="crrav-btn primary" data-act="settings-save">Enregistrer et actualiser</button>`;
+  }
+
+  // (45) Boutons ↩ Annuler / ↪ Rétablir de l'historique des ignorées — dans l'en-tête
+  // principal, à côté de ⚙ Réglages (voir buildHeader plus bas), pas dans une sheet : pas
+  // besoin de patch-in-place, ils sont régénérés à chaque render() avec le disabled à jour.
+  function ignoreHistoryButtonsHtml() {
+    return `<button class="crrav-sync crrav-icobtn" data-act="ignore-undo"
+        aria-label="Annuler la dernière action sur les ignorées" title="Annuler"${ignoreHistoryIndex <= 0 ? ' disabled' : ''}
+        >↩<span class="crrav-btn-label">Annuler</span></button>
+      <button class="crrav-sync crrav-icobtn" data-act="ignore-redo"
+        aria-label="Rétablir l'action annulée sur les ignorées" title="Rétablir"${ignoreHistoryIndex >= ignoreHistory.length - 1 ? ' disabled' : ''}
+        >↪<span class="crrav-btn-label">Rétablir</span></button>`;
   }
 
   // Met à jour le CONTENU de la sheet Réglages déjà ouverte, sans jamais recréer le nœud
@@ -14067,10 +14001,6 @@
     }
     const footEl = sheetEl.querySelector('.crrav-sheetfoot');
     if (footEl) footEl.innerHTML = buildSettingsSheetFootHtml();
-    // (44) Le pied (boutons Annuler/Rétablir) vient d'être reconstruit : les écouteurs posés
-    // sur sheetEl restent valides (délégation, garde data-histWired), mais l'état
-    // disabled des boutons doit être réappliqué sur ce nouveau markup.
-    wireSettingsHistory(sheetEl, false);
   }
 
   // render() regroupe les appels sur une frame : pendant un chargement, il était invoqué
@@ -14484,6 +14414,7 @@
           <button class="crrav-sync crrav-icobtn crrav-tvbtn" data-act="tv" aria-pressed="${CFG.tvMode}"
             title="${CFG.tvMode ? 'Repasser en affichage bureau' : 'Mode TV / salon — gros caractères lisibles de loin'}"
             >📺<span class="crrav-btn-label">TV</span></button>
+          ${(!STATE.settingsOpen || settingsSheetTab !== 'diag') ? ignoreHistoryButtonsHtml() : ''}
           <button class="crrav-sync crrav-icobtn" data-act="settings" aria-expanded="${STATE.settingsOpen}"
             title="Réglages">⚙<span class="crrav-btn-label">Réglages</span></button>
           <button class="crrav-close" data-act="close" aria-label="Fermer">✕</button>
@@ -14623,10 +14554,6 @@
     // (le drag du schéma n'est jamais interrompu). collectSettings lit ces curseurs à l'enregistrement.
     const scoreTunerEl = content.querySelector('.crrav-scoretuner');
     if (scoreTunerEl) initScoreTuner(scoreTunerEl);
-
-    // (44) Annuler/Rétablir : repart d'un historique neuf à chaque (ré)ouverture de la sheet.
-    const settingsSheetEl = content.querySelector('.crrav-settingssheet');
-    if (settingsSheetEl) wireSettingsHistory(settingsSheetEl, true);
 
     // (31) Genres exclus : cases à cocher → met à jour l'<input caché> lu par collectSettings.
     content.querySelectorAll('.crrav-genrefield').forEach((field) => {
@@ -15194,7 +15121,7 @@
             // ou cochées, pas la totalité des séries ignorées (qui peut être bien plus
             // large). Action ciblée et délibérée : pas de confirmation nécessaire.
             for (const id of scopeIds.split(',')) { IGNORED.delete(id); ignoredSelected.delete(id); }
-            saveIgnored(); forceRender();
+            saveIgnored(); recordIgnoreHistory(); forceRender();
           } else {
             // (2) Pas de portée = restauration de TOUTES les séries ignorées (potentiellement
             // des centaines, sans lien entre elles) : irréversible en un clic, donc
@@ -15207,7 +15134,7 @@
                 + `(Reste à voir, Hors listes, Découverte, Nouveautés).</p>`,
               confirmLabel: '↺ Tout réafficher',
               danger: true,
-              onConfirm: () => { IGNORED.clear(); ignoredSelected.clear(); saveIgnored(); forceRender(); },
+              onConfirm: () => { IGNORED.clear(); ignoredSelected.clear(); saveIgnored(); recordIgnoreHistory(); forceRender(); },
             };
             forceRender();
           }
@@ -15347,21 +15274,17 @@
         if (act.dataset.act === 'settings-reset') {
           resetSettings(); scheduleAutoRefresh(); forceRender();
         }
-        if (act.dataset.act === 'settings-undo' || act.dataset.act === 'settings-redo') {
-          // (44) Ne touche jamais CFG : on ne fait que réappliquer un instantané aux champs
-          // de la sheet, comme n'importe quelle autre modification en cours d'édition —
-          // il faudra toujours cliquer « Enregistrer » pour que ça compte pour de bon.
-          const sheetEl = root.querySelector('.crrav-settingssheet');
-          if (!sheetEl) return;
-          if (act.dataset.act === 'settings-undo' && settingsHistoryIndex > 0) {
-            settingsHistoryIndex--;
-          } else if (act.dataset.act === 'settings-redo' && settingsHistoryIndex < settingsHistory.length - 1) {
-            settingsHistoryIndex++;
+        if (act.dataset.act === 'ignore-undo' || act.dataset.act === 'ignore-redo') {
+          // (45) Annuler/Rétablir sur les séries ignorées/réaffichées — voir recordIgnoreHistory.
+          if (act.dataset.act === 'ignore-undo' && ignoreHistoryIndex > 0) {
+            ignoreHistoryIndex--;
+          } else if (act.dataset.act === 'ignore-redo' && ignoreHistoryIndex < ignoreHistory.length - 1) {
+            ignoreHistoryIndex++;
           } else {
             return;
           }
-          restoreSettingsDraft(sheetEl, settingsHistory[settingsHistoryIndex]);
-          updateSettingsHistoryButtons(sheetEl);
+          applyIgnoreHistory(ignoreHistory[ignoreHistoryIndex]);
+          forceRender();
           return;
         }
         if (act.dataset.act === 'tv') {
