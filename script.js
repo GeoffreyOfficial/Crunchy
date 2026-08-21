@@ -869,7 +869,7 @@
   // la Map IGNORED entière, capturée après CHAQUE mutation (ignorer une série, « Tout
   // ignorer » de Découverte, réafficher une/plusieurs/toutes). Remplace l'ancien historique
   // de brouillon des Réglages (ex-(44), retiré) : vit tant que l'appli reste ouverte — pas
-  // borné à la sheet Réglages — avec ses boutons ↩/↪ dans l'en-tête principal, à côté de
+  // borné à la sheet Réglages, mais ses boutons ↩/↪ vivent DANS la sheet, à côté du titre
   // ⚙ Réglages (voir ignoreHistoryButtonsHtml), masqués uniquement quand l'onglet Diagnostic
   // de la sheet est affiché : rien à y annuler.
   let ignoreHistory = [new Map(IGNORED)];   // [0] = état tel que chargé depuis le stockage
@@ -9040,6 +9040,9 @@
     display:flex;align-items:center;gap:10px}
   .crrav-sheethead h2::before{content:'';flex:0 0 auto;width:4px;height:20px;border-radius:3px;
     background:linear-gradient(#ffb347,#f47521);box-shadow:0 0 10px rgba(244,117,33,.55)}
+  /* (45) Boutons Annuler/Rétablir des ignorées, à côté du titre « Réglages » — flex:0 pour
+     ne jamais se laisser écraser par h2 (flex:1) ni pousser le bouton fermer hors champ. */
+  .crrav-sheethead-hist{display:flex;gap:8px;flex:0 0 auto}
   /* (41) Sous-onglets de la sheet Réglages (Réglages / Ignorées / Diagnostic) — barre
      fixe entre l'en-tête et le corps défilant, donc toujours visible sans avoir à
      remonter en haut du scroll pour changer de panneau. Style dérivé de .crrav-tabs,
@@ -13948,9 +13951,9 @@
       <button class="crrav-btn primary" data-act="settings-save">Enregistrer et actualiser</button>`;
   }
 
-  // (45) Boutons ↩ Annuler / ↪ Rétablir de l'historique des ignorées — dans l'en-tête
-  // principal, à côté de ⚙ Réglages (voir buildHeader plus bas), pas dans une sheet : pas
-  // besoin de patch-in-place, ils sont régénérés à chaque render() avec le disabled à jour.
+  // (45) Boutons ↩ Annuler / ↪ Rétablir de l'historique des ignorées — à côté du titre
+  // « Réglages » dans l'en-tête de la sheet (.crrav-sheethead-hist), rafraîchis explicitement
+  // par patchSettingsSheetInPlace puisque forceRender() ne reconstruit pas le sheethead.
   function ignoreHistoryButtonsHtml() {
     return `<button class="crrav-sync crrav-icobtn" data-act="ignore-undo"
         aria-label="Annuler la dernière action sur les ignorées" title="Annuler"${ignoreHistoryIndex <= 0 ? ' disabled' : ''}
@@ -13973,6 +13976,12 @@
   // qu'une fois, à l'ouverture réelle. Appelée automatiquement par renderNow() : aucun
   // site d'appel n'a besoin de savoir que la sheet est ouverte ou non.
   function patchSettingsSheetInPlace(sheetEl) {
+    // (45) Boutons Annuler/Rétablir des ignorées dans l'en-tête de la sheet : leur état
+    // disabled dépend d'ignoreHistoryIndex, qui change à chaque ignorer/réafficher — ces
+    // actions passent TOUTES par ce chemin de patch (forceRender, sheet déjà ouverte), donc
+    // sans ce refresh explicite les boutons resteraient figés sur l'état de l'ouverture.
+    const histEl = sheetEl.querySelector('.crrav-sheethead-hist');
+    if (histEl) histEl.innerHTML = settingsSheetTab !== 'diag' ? ignoreHistoryButtonsHtml() : '';
     const subtabsEl = sheetEl.querySelector('.crrav-subtabs');
     if (subtabsEl) subtabsEl.innerHTML = buildSettingsSubtabsHtml();
     const bodyEl = sheetEl.querySelector('.crrav-sheetbody');
@@ -14374,6 +14383,7 @@
       <div class="crrav-settingssheet">
         <div class="crrav-sheethead">
           <h2>Réglages</h2>
+          <div class="crrav-sheethead-hist">${settingsSheetTab !== 'diag' ? ignoreHistoryButtonsHtml() : ''}</div>
           <button class="crrav-close" data-act="settings" aria-label="Fermer les réglages">✕</button>
         </div>
         <div class="crrav-subtabs" role="tablist">${settingsSubtabs}</div>
@@ -14414,7 +14424,6 @@
           <button class="crrav-sync crrav-icobtn crrav-tvbtn" data-act="tv" aria-pressed="${CFG.tvMode}"
             title="${CFG.tvMode ? 'Repasser en affichage bureau' : 'Mode TV / salon — gros caractères lisibles de loin'}"
             >📺<span class="crrav-btn-label">TV</span></button>
-          ${(!STATE.settingsOpen || settingsSheetTab !== 'diag') ? ignoreHistoryButtonsHtml() : ''}
           <button class="crrav-sync crrav-icobtn" data-act="settings" aria-expanded="${STATE.settingsOpen}"
             title="Réglages">⚙<span class="crrav-btn-label">Réglages</span></button>
           <button class="crrav-close" data-act="close" aria-label="Fermer">✕</button>
