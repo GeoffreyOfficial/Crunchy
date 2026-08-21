@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.23.0
+// @version      3.24.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.23.0';
+  const SCRIPT_VERSION = '3.24.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -7230,8 +7230,11 @@
   function resumeLink(s, cls) {
     if (!s.next) return '';
     const label = s.seen === 0 ? 'Commencer' : s.resuming ? '▶ Reprendre' : 'Épisode suivant';
-    return `<a class="${cls}" href="${crWatchUrl(s.next.id)}">${
-      label} · S${s.next.season} E${s.next.n}</a>`;
+    const full = `${label} · S${s.next.season} E${s.next.n}`;
+    // title/aria-label : indispensable maintenant que la variante vue-liste (crrav-lresume)
+    // masque tout texte visible (icône seule) — sans ça, plus aucun moyen de connaître
+    // l'épisode ciblé sans cliquer, ni pour un lecteur d'écran de savoir où mène le lien.
+    return `<a class="${cls}" href="${crWatchUrl(s.next.id)}" title="${escapeHtml(full)}" aria-label="${escapeHtml(full)}">${full}</a>`;
   }
 
   // Bouton « séries similaires » : présent sur les cartes Reste à voir / Hors listes.
@@ -7325,11 +7328,14 @@
     const seriesUrl = crSeriesUrl(s.id, s.slug);
     const done = s.remaining === 0;
     const pinfo = plannedInfo(s, true);
-    // (fix UI) l'anneau de progression quitte la colonne d'actions pour devenir un badge
-    // à cheval sur le coin de la jaquette (comme en vue carte) : ça libère la colonne de
-    // droite pour une hiérarchie plus lisible entre action principale et secondaires, et
-    // le % reste lisible d'un coup d'œil, ancré visuellement à LA série qu'il concerne.
+    // (fix UI) 2 changements demandés : (1) le bouton reprendre passe à GAUCHE de la
+    // jaquette (seul, isolé des 2 autres actions → moins de risque de le toucher par
+    // erreur en visant baguette/ignorer, et inversement) ; (2) baguette + ignorer
+    // repassent en icônes superposées façon pile (comme avant la 1ère refonte de cette
+    // session), mais nettement agrandies — le chevauchement réduit un peu la largeur
+    // totale du bloc, mais chaque icône garde une zone propre bien plus grande qu'avant.
     return `<article class="crrav-lrow${s.isNew ? ' isnew' : ''}" style="--prog:${progColor(s)}">
+      ${resumeLink(s, 'crrav-lresume')}
       <div class="crrav-lthumbwrap">
         <a class="crrav-lthumb" href="${seriesUrl}">
           ${s.poster ? `<img loading="lazy" crossorigin="anonymous" src="${s.poster}" alt="" onerror="this.removeAttribute(&quot;crossorigin&quot;);this.src=this.src">` : ''}
@@ -7350,12 +7356,9 @@
         </div>
         ${pinfo}
       </div>
-      <div class="crrav-lactions">
-        ${resumeLink(s, 'crrav-lresume')}
-        <div class="crrav-lactions-more">
-          ${similarBtn(s)}
-          ${ignoreBtn(s, source)}
-        </div>
+      <div class="crrav-lactions-more">
+        ${similarBtn(s)}
+        ${ignoreBtn(s, source)}
       </div>
     </article>`;
   }
@@ -8855,28 +8858,31 @@
   .crrav-ltag{font:700 9.5px/1 system-ui;color:#9fd6ff;border:1px solid rgba(159,214,255,.4);
     border-radius:5px;padding:2px 5px}
   .crrav-lnew{font:800 9.5px/1 system-ui;background:#9fd6ff;color:#08131c;border-radius:5px;padding:2px 5px}
-  /* Colonne d'actions : hiérarchie claire plutôt qu'une rangée plate de 4 icônes.
-     L'action principale (reprendre) est seule sur sa ligne, les 2 secondaires (séries
-     similaires, ignorer) sont regroupées juste en dessous dans un même petit bloc uni —
-     l'oeil comprend d'un coup « 1 action + 1 groupe d'options », plus besoin du bricolage
-     à base de chevauchement/marge négative d'avant. */
-  .crrav-lactions{display:flex;flex-direction:column;align-items:flex-end;gap:5px;flex:0 0 auto}
-  .crrav-lactions-more{display:flex;gap:1px;background:rgba(255,255,255,.05);
-    border:1px solid rgba(255,255,255,.09);border-radius:9px;padding:2px}
-  .crrav-lactions-more .crrav-similar,.crrav-lactions-more .crrav-ignore{
-    width:28px;height:28px;border:0;border-radius:7px}
-  .crrav-lactions-more .crrav-similar{background:none}
-  .crrav-lactions-more .crrav-similar:hover{background:rgba(185,139,255,.22);
-    transform:none;box-shadow:none;border-color:transparent}
-  .crrav-lactions-more .crrav-ignore{position:static;opacity:1;background:none}
-  .crrav-lactions-more .crrav-ignore:hover{background:rgba(224,87,74,.22);color:#fff}
-  .crrav-lactions-more .crrav-ignore.on{background:rgba(92,230,160,.18);color:#5ce6a0}
-  .crrav-lresume{text-decoration:none;border-radius:8px;padding:7px 10px;white-space:nowrap;
-    font:700 11px/1.2 system-ui;color:#12120f;background:var(--prog)}
-  @media(max-width:720px){
-    .crrav-lresume{padding:7px;font-size:0}
-    .crrav-lresume::after{content:'▸';font-size:13px}
-  }
+  /* Bouton reprendre : sorti à GAUCHE de la jaquette, isolé — plus aucune autre cible
+     tactile à proximité immédiate, donc plus de risque de le toucher en visant baguette
+     ou ignorer (qui sont désormais loin, de l'autre côté de la ligne). Toujours en icône
+     seule (pas de texte) : au-delà de 720px il gardait avant un libellé complet, mais
+     replacé ainsi tout à gauche un pavé de texte aurait détonné avant la jaquette —
+     mieux vaut un rond plein cohérent à toutes les tailles, le title="" porte le détail.
+  */
+  .crrav-lresume{flex:0 0 auto;width:42px;height:42px;border-radius:50%;
+    display:flex;align-items:center;justify-content:center;text-decoration:none;
+    color:#12120f;background:var(--prog);font-size:0;transition:transform .15s ease}
+  .crrav-lresume::after{content:'▸';font-size:16px;line-height:1}
+  .crrav-lresume:active{transform:scale(.92)}
+  /* Baguette + ignorer : de retour en pile superposée (comme avant la refonte précédente
+     de cette session) mais nettement agrandis (28px → 40px) — le chevauchement reste
+     mesuré (12px) pour que chacun garde une bonne zone bien à lui, hors du chevauchement,
+     malgré la taille plus généreuse. Bordure ton-sur-ton avec le fond de la ligne pour
+     bien détacher les 2 ronds l'un de l'autre visuellement. */
+  .crrav-lactions-more{display:flex;align-items:center;flex:0 0 auto}
+  .crrav-lactions-more .crrav-similar{width:40px;height:40px;position:relative;z-index:1;
+    border:2px solid #141419}
+  .crrav-lactions-more .crrav-ignore{width:40px;height:40px;position:static;opacity:1;
+    margin-left:-12px;border:2px solid #141419}
+  .crrav-lactions-more .crrav-similar:hover,.crrav-lactions-more .crrav-similar:focus-visible,
+  .crrav-lactions-more .crrav-ignore:hover,.crrav-lactions-more .crrav-ignore:focus-visible{
+    z-index:2;margin-left:0}
   /* La ligne « X/Y vus · Z restants » + durée restante ne doit jamais passer à la
      ligne (ça décale visuellement chaque .crrav-lrow d'une hauteur différente) : même
      traitement nowrap+ellipsis que la vue liste de Découverte (5bis) plus bas. */
@@ -8896,14 +8902,16 @@
     .crrav-lrow:not(.crrav-lrow-discover) .crrav-lmain{gap:3px}
     .crrav-lrow:not(.crrav-lrow-discover) .crrav-lhead{gap:5px}
     .crrav-lrow:not(.crrav-lrow-discover) .crrav-ltitle{font-size:12.5px}
-    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions{gap:4px}
     .crrav-lrow:not(.crrav-lrow-discover) .crrav-lthumbwrap .crrav-ringwrap,
     .crrav-lrow:not(.crrav-lrow-discover) .crrav-lthumbwrap .crrav-ring{width:24px;height:24px}
     .crrav-lrow:not(.crrav-lrow-discover) .crrav-lthumbwrap .crrav-ringwrap{top:-4px;left:-4px}
     .crrav-lrow:not(.crrav-lrow-discover) .crrav-lthumbwrap .crrav-ring-t{font-size:7.5px}
     .crrav-lrow:not(.crrav-lrow-discover) .crrav-lthumbwrap .crrav-ring-t.done{font-size:9.5px}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lresume{width:36px;height:36px}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lresume::after{font-size:14px}
     .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions-more .crrav-similar,
-    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions-more .crrav-ignore{width:25px;height:25px}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions-more .crrav-ignore{width:34px;height:34px}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions-more .crrav-ignore{margin-left:-10px}
   }
   /* Très petit téléphone : la baguette « séries similaires » est la moins essentielle
      des 3 actions (anneau = progression, resume = action principale, ignore = tri) —
