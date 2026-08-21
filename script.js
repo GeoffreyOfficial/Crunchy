@@ -9050,7 +9050,7 @@
      source de vérité lue par collectSettings — le schéma et la matrice ne font que piloter
      leur valeur (voir initScoreTuner). */
   .crrav-scoretuner{
-    --taste:74,222,128; --pref:159,214,255; --well:255,209,102; --super:255,159,67;
+    --taste:74,222,128; --pref:159,214,255; --well:255,209,102; --super:255,159,67; --favrec:255,138,194;
     --seuiln:159,214,255; --seuill:255,179,71;
     --st-text:#f2f2f4; --st-sub:#9a9aa4; --st-faint:#6f6f7a;
     --st-panel:rgba(255,255,255,.03); --st-panel2:rgba(255,255,255,.05); --st-border:rgba(255,255,255,.09);
@@ -9134,7 +9134,8 @@
   .crrav-scoretuner .seg.taste{background:linear-gradient(90deg,rgba(var(--taste),.1),rgba(var(--taste),.32));border-radius:10px 0 0 10px}
   .crrav-scoretuner .seg.pref{background:rgba(var(--pref),.32)}
   .crrav-scoretuner .seg.well{background:rgba(var(--well),.32)}
-  .crrav-scoretuner .seg.super{background:rgba(var(--super),.4);border-radius:0 10px 10px 0}
+  .crrav-scoretuner .seg.super{background:rgba(var(--super),.4)}
+  .crrav-scoretuner .seg.favrec{background:rgba(var(--favrec),.4);border-radius:0 10px 10px 0}
   .crrav-scoretuner .zero-line{position:absolute;top:-5px;bottom:-5px;width:2px;background:rgba(255,255,255,.35)}
   .crrav-scoretuner .zero-line::after{content:'0';position:absolute;top:-17px;left:50%;transform:translateX(-50%);
     font:700 9.5px/1 system-ui;color:var(--st-faint)}
@@ -9152,6 +9153,7 @@
   .crrav-scoretuner .handle.pref .grip{background:rgb(var(--pref))} .crrav-scoretuner .handle.pref .tag{background:rgb(var(--pref));color:#08131c}
   .crrav-scoretuner .handle.well .grip{background:rgb(var(--well))} .crrav-scoretuner .handle.well .tag{background:rgb(var(--well));color:#2b1a00}
   .crrav-scoretuner .handle.super .grip{background:rgb(var(--super))} .crrav-scoretuner .handle.super .tag{background:rgb(var(--super));color:#2b1200}
+  .crrav-scoretuner .handle.favrec .grip{background:rgb(var(--favrec))} .crrav-scoretuner .handle.favrec .tag{background:rgb(var(--favrec));color:#2b0a1a}
   .crrav-scoretuner .handle.notable .grip{background:rgb(var(--seuiln));width:3px}
   .crrav-scoretuner .handle.notable .tag{background:rgb(var(--seuiln));color:#08131c;--tagTop:-42px}
   .crrav-scoretuner .handle.legend .grip{background:rgb(var(--seuill));width:3px}
@@ -12089,7 +12091,8 @@
     function fullAxisRange() {
       const min = -state.discoverTasteWeight - 0.3;
       const max = Math.max(
-        state.discoverTasteWeight + state.discoverPrefGenreBonus + state.discoverWellRatedBonus + state.discoverSuperRatedBonus + 0.3,
+        state.discoverTasteWeight + state.discoverPrefGenreBonus + state.discoverWellRatedBonus
+          + state.discoverSuperRatedBonus + (state.discoverFavRecBonus || 0) + 0.3,
         state.discoverLegendaryScore + 0.3
       );
       return { min, max };
@@ -12100,7 +12103,8 @@
       const tasteEnd = state.discoverTasteWeight;
       const prefEnd = tasteEnd + state.discoverPrefGenreBonus;
       const wellEnd = prefEnd + state.discoverWellRatedBonus;
-      return { tasteEnd, prefEnd, wellEnd };
+      const superEnd = wellEnd + state.discoverSuperRatedBonus;
+      return { tasteEnd, prefEnd, wellEnd, superEnd };
     }
 
     function theoreticalMin() { return +(-state.discoverTasteWeight).toFixed(2); }
@@ -12157,11 +12161,13 @@
         <div class="seg pref" data-seg="pref"></div>
         <div class="seg well" data-seg="well"></div>
         <div class="seg super" data-seg="super"></div>
+        <div class="seg favrec" data-seg="favrec"></div>
         <div class="zero-line"></div>
         <div class="handle taste" data-h="discoverTasteWeight"><div class="grip"></div><span class="tag">Poids goût <b class="tval"></b></span></div>
         <div class="handle pref" data-h="discoverPrefGenreBonus"><div class="grip"></div><span class="tag">🎯 <b class="tval"></b></span></div>
         <div class="handle well" data-h="discoverWellRatedBonus"><div class="grip"></div><span class="tag">🏆 <b class="tval"></b></span></div>
         <div class="handle super" data-h="discoverSuperRatedBonus"><div class="grip"></div><span class="tag">✨ <b class="tval"></b></span></div>
+        <div class="handle favrec" data-h="discoverFavRecBonus"><div class="grip"></div><span class="tag">💞 <b class="tval"></b></span></div>
         <div class="handle notable" data-h="discoverNotableScore"><div class="grip"></div><span class="tag">Notable <b class="tval"></b></span></div>
         <div class="handle legend" data-h="discoverLegendaryScore"><div class="grip"></div><span class="tag">Légendaire <b class="tval"></b></span></div>
       `;
@@ -12216,11 +12222,12 @@
         curVal = Math.max(fr.min, Math.min(fr.max, curVal + deltaPx * valuePerPx));
         let val = Math.round(curVal * 20) / 20;
 
-        const { tasteEnd, prefEnd, wellEnd } = segEndsLive();
+        const { tasteEnd, prefEnd, wellEnd, superEnd } = segEndsLive();
         if (key === 'discoverTasteWeight') state[key] = Math.max(0.5, +val.toFixed(2));
         else if (key === 'discoverPrefGenreBonus') state[key] = Math.max(0, +(val - tasteEnd).toFixed(2));
         else if (key === 'discoverWellRatedBonus') state[key] = Math.max(0, +(val - prefEnd).toFixed(2));
         else if (key === 'discoverSuperRatedBonus') state[key] = Math.max(0, +(val - wellEnd).toFixed(2));
+        else if (key === 'discoverFavRecBonus') state[key] = Math.max(0, +(val - superEnd).toFixed(2));
         else state[key] = +val.toFixed(2);
         validate(key);
         markCustom();
@@ -12251,12 +12258,14 @@
       const prefEnd = tasteEnd + state.discoverPrefGenreBonus;
       const wellEnd = prefEnd + state.discoverWellRatedBonus;
       const superEnd = wellEnd + state.discoverSuperRatedBonus;
+      const favrecEnd = superEnd + (state.discoverFavRecBonus || 0);
 
       const set = (sel, left, width) => { const el = axis.querySelector(sel); el.style.left = pct(left, r) + '%'; el.style.width = Math.max(0, pct(left + width, r) - pct(left, r)) + '%'; };
       set('[data-seg="taste"]', tasteStart, tasteEnd - tasteStart);
       set('[data-seg="pref"]', tasteEnd, prefEnd - tasteEnd);
       set('[data-seg="well"]', prefEnd, wellEnd - prefEnd);
       set('[data-seg="super"]', wellEnd, superEnd - wellEnd);
+      set('[data-seg="favrec"]', superEnd, favrecEnd - superEnd);
       axis.querySelector('.zero-line').style.left = pct(0, r) + '%';
 
       const placeHandle = (key, val, atPos) => {
@@ -12269,6 +12278,7 @@
       placeHandle('discoverPrefGenreBonus', state.discoverPrefGenreBonus, prefEnd);
       placeHandle('discoverWellRatedBonus', state.discoverWellRatedBonus, wellEnd);
       placeHandle('discoverSuperRatedBonus', state.discoverSuperRatedBonus, superEnd);
+      placeHandle('discoverFavRecBonus', state.discoverFavRecBonus || 0, favrecEnd);
       placeHandle('discoverNotableScore', state.discoverNotableScore);
       placeHandle('discoverLegendaryScore', state.discoverLegendaryScore);
 
