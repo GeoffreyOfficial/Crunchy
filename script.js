@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.24.0
+// @version      3.25.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.24.0';
+  const SCRIPT_VERSION = '3.25.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -7354,7 +7354,7 @@
           <span class="crrav-lseen">${s.seen}/${s.total} vus${plannedTotalHint(s)}</span>
           <span class="crrav-left">${done ? '' : `${s.remaining} restants · ${fmtDuration(s.secLeft)}`}</span>
         </div>
-        ${pinfo}
+        <div class="crrav-lplanned">${pinfo}</div>
       </div>
       <div class="crrav-lactions-more">
         ${similarBtn(s)}
@@ -8645,6 +8645,13 @@
   .crrav-lrow:not(.crrav-lrow-discover) .crrav-lseen{color:#6b6b74;font-weight:500}
   .crrav-planned-hint{color:#8fb3ff;font-weight:600}
   .crrav-planned-row{margin-top:5px}
+  /* Vue liste seulement : la ligne « saison complète » n'existe que pour les séries en
+     diffusion — sans ça, ces lignes-là étaient plus hautes que les autres. On réserve
+     systématiquement sa hauteur (min-height, présente ou vide) plutôt que de laisser
+     chaque .crrav-lrow s'ajuster à son propre contenu : c'est ce qui garantit que TOUTES
+     les lignes de la liste font la même hauteur, avec ou sans cette info. */
+  .crrav-lrow:not(.crrav-lrow-discover) .crrav-lplanned{min-height:14px}
+  .crrav-lrow:not(.crrav-lrow-discover) .crrav-lplanned .crrav-planned-row{margin-top:0}
   .crrav-anibadge{color:#8fb3ff!important;border-color:rgba(143,179,255,.45)!important}
   .crrav-planned{display:inline-flex;align-items:center;gap:4px;max-width:100%;
     font:600 11px/1.25 system-ui;color:#c9a24b;background:rgba(201,162,75,.12);
@@ -8847,12 +8854,12 @@
   .crrav-lthumbwrap .crrav-ring-t.done{font-size:11px}
   .crrav-lmain{flex:1;min-width:0;display:flex;flex-direction:column;gap:4px}
   .crrav-lhead{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
-  /* (fix) le titre occupe sa propre ligne pleine largeur (flex-basis:100%) au lieu de se
-     partager la place avec le tag/la note : il a ainsi bien plus de marge avant de couper,
-     et les badges refluent naturellement en dessous. Un clamp 2 lignes sert de filet de
-     sécurité pour les titres vraiment longs, plutôt qu'une simple ellipse sur 1 ligne. */
+  /* (fix) le titre reste maintenant TOUJOURS sur une seule ligne (ellipse si besoin) —
+     la place libérée à droite (bouton reprendre sorti à gauche, actions resserrées)
+     rend un 2e niveau de clamp inutile, et une hauteur de titre fixe aide à ce que
+     toutes les lignes de la liste fassent la même hauteur. */
   .crrav-ltitle{flex:1 1 100%;font:700 13px/1.25 system-ui;color:#f2f2f4;text-decoration:none;
-    display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;max-width:100%}
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
   .crrav-ltitle:hover{color:var(--prog)}
   .crrav-lrating{font:700 10.5px/1 system-ui;color:#ffcf55;white-space:nowrap}
   .crrav-ltag{font:700 9.5px/1 system-ui;color:#9fd6ff;border:1px solid rgba(159,214,255,.4);
@@ -8870,19 +8877,14 @@
     color:#12120f;background:var(--prog);font-size:0;transition:transform .15s ease}
   .crrav-lresume::after{content:'▸';font-size:16px;line-height:1}
   .crrav-lresume:active{transform:scale(.92)}
-  /* Baguette + ignorer : de retour en pile superposée (comme avant la refonte précédente
-     de cette session) mais nettement agrandis (28px → 40px) — le chevauchement reste
-     mesuré (12px) pour que chacun garde une bonne zone bien à lui, hors du chevauchement,
-     malgré la taille plus généreuse. Bordure ton-sur-ton avec le fond de la ligne pour
-     bien détacher les 2 ronds l'un de l'autre visuellement. */
-  .crrav-lactions-more{display:flex;align-items:center;flex:0 0 auto}
-  .crrav-lactions-more .crrav-similar{width:40px;height:40px;position:relative;z-index:1;
-    border:2px solid #141419}
-  .crrav-lactions-more .crrav-ignore{width:40px;height:40px;position:static;opacity:1;
-    margin-left:-12px;border:2px solid #141419}
-  .crrav-lactions-more .crrav-similar:hover,.crrav-lactions-more .crrav-similar:focus-visible,
-  .crrav-lactions-more .crrav-ignore:hover,.crrav-lactions-more .crrav-ignore:focus-visible{
-    z-index:2;margin-left:0}
+  /* Baguette + ignorer : empilés l'un AU-DESSUS de l'autre (plutôt que côte à côte /
+     superposés en diagonale comme avant) — chacun a sa propre ligne, zéro ambiguïté de
+     ciblage. Toujours agrandis (40px). Bonus : cette colonne à hauteur fixe (40+gap+40)
+     devient l'élément le plus haut de la ligne, ce qui aide à ce que toutes les lignes
+     de la liste aient la même hauteur, quel que soit le texte à côté. */
+  .crrav-lactions-more{display:flex;flex-direction:column;align-items:center;gap:6px;flex:0 0 auto}
+  .crrav-lactions-more .crrav-similar{width:40px;height:40px}
+  .crrav-lactions-more .crrav-ignore{width:40px;height:40px;position:static;opacity:1}
   /* La ligne « X/Y vus · Z restants » + durée restante ne doit jamais passer à la
      ligne (ça décale visuellement chaque .crrav-lrow d'une hauteur différente) : même
      traitement nowrap+ellipsis que la vue liste de Découverte (5bis) plus bas. */
@@ -8909,9 +8911,9 @@
     .crrav-lrow:not(.crrav-lrow-discover) .crrav-lthumbwrap .crrav-ring-t.done{font-size:9.5px}
     .crrav-lrow:not(.crrav-lrow-discover) .crrav-lresume{width:36px;height:36px}
     .crrav-lrow:not(.crrav-lrow-discover) .crrav-lresume::after{font-size:14px}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions-more{gap:4px}
     .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions-more .crrav-similar,
     .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions-more .crrav-ignore{width:34px;height:34px}
-    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions-more .crrav-ignore{margin-left:-10px}
   }
   /* Très petit téléphone : la baguette « séries similaires » est la moins essentielle
      des 3 actions (anneau = progression, resume = action principale, ignore = tri) —
