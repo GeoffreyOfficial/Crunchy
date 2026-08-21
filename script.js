@@ -16310,6 +16310,24 @@
     }
     render();
     if (!STATE.loading && (!STATE.series.length || STATE.fromSnapshot)) refresh();
+    // (fix reprise navigation) L'onglet actif au moment de l'ouverture peut être
+    // « decouverte » / « orphelines » / « calendrier » (restauré depuis SESSION_NAV,
+    // voir STATE.tab = SESSION_NAV.tab), pas seulement « suivi » ci-dessus. Sans ce
+    // bloc, seul un clic MANUEL sur l'onglet (voir le handler data-tab plus bas)
+    // déclenchait le chargement de ces sources : ouvrir le panneau directement dessus
+    // laissait le panneau silencieusement vide (ni squelette de chargement, ni erreur)
+    // jusqu'au premier changement d'onglet. Même logique que le handler data-tab.
+    if (STATE.tab === 'decouverte' && !STATE.discover.series.length && !STATE.discover.loading) {
+      refreshDiscover();
+    }
+    if (STATE.tab === 'decouverte') ensureMyListsLoaded();
+    if (STATE.tab === 'orphelines' && !STATE.orphan.series.length && !STATE.orphan.loading) {
+      refreshOrphelines();
+    }
+    if (STATE.tab === 'calendrier' && CFG.discoverNewPremieres
+      && !STATE.newPremieres.series.length && !STATE.newPremieres.loading) {
+      refreshNewPremieres();
+    }
   }
 
   // (4) tirer vers le bas pour actualiser. Ne s'arme que si on est déjà tout en haut,
