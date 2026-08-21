@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.28.0
+// @version      3.28.1
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.28.0';
+  const SCRIPT_VERSION = '3.28.1';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -9872,6 +9872,18 @@
     border:1px solid rgba(92,230,160,.4);color:#8ef0bd;font:600 13px/1.4 system-ui;
     animation:crrav-in .2s ease}
   @media(max-width:600px){.crrav-toast{margin:0 14px 4px}}
+  /* (49) Variante flottante, position:fixed — utilisée pour les toasts déclenchés
+     depuis la sheet Réglages (undo/redo réglage par réglage, enregistrement…), qui
+     doit rester visible quel que soit l'onglet actif ou l'état d'ouverture de la
+     sheet (contrairement à .crrav-toast ci-dessus, posé dans le flux de l'onglet
+     Reste à voir et donc invisible tant que la sheet la recouvre). Voir renderToastOverlay. */
+  .crrav-toast-fixed{position:fixed;left:50%;bottom:max(18px,env(safe-area-inset-bottom));
+    transform:translateX(-50%);z-index:80;max-width:min(420px,calc(100vw - 32px));
+    padding:11px 16px;border-radius:10px;text-align:center;
+    background:linear-gradient(135deg,rgba(92,230,160,.92),rgba(20,20,25,.92));
+    border:1px solid rgba(92,230,160,.5);color:#0a0a0c;font:700 13px/1.4 system-ui;
+    box-shadow:0 6px 24px rgba(0,0,0,.35);animation:crrav-in .2s ease}
+  @media(prefers-reduced-motion:reduce){.crrav-toast-fixed{animation:none}}
 
   /* Bouton « relancer avec ces genres » : apparaît quand les filtres live diffèrent
      de la dernière recherche. Coloré pour signaler qu'une action est disponible. */
@@ -11647,7 +11659,6 @@
         ${STATE.fromSnapshot && STATE.loading
           ? `<p class="crrav-warn" style="background:rgba(159,214,255,.1);border-color:rgba(159,214,255,.3);color:#9fd6ff">
               Affichage du dernier état connu — actualisation en cours…</p>` : ''}
-        ${toastMsg ? `<div class="crrav-toast">${escapeHtml(toastMsg)}</div>` : ''}
         <div class="crrav-statsrow">
           <div class="crrav-stats">
             <div class="crrav-stat"><b data-countup="${list.length}" data-countup-key="suivi-series">${list.length}</b><small>séries</small></div>
@@ -14407,8 +14418,28 @@
     else setTimeout(run, 16);
   }
 
+  // (49) Toast flottant indépendant du reste du rendu — voir CSS .crrav-toast-fixed.
+  // Recrée/retire un unique nœud fixed, directement enfant de `root`, à CHAQUE passage
+  // dans renderNow() (donc aussi bien depuis le chemin patch-in-place de la sheet Réglages
+  // que depuis un rebuild complet) : contrairement à l'ancien rendu inline (encore présent
+  // dans renderSuivi(), gardé pour compat visuelle sur cet onglet précis), celui-ci reste
+  // visible quel que soit l'onglet actif ou l'état d'ouverture de la sheet.
+  function renderToastOverlay() {
+    if (!root) return;
+    let el = root.querySelector('#crrav-toast-fixed');
+    if (!toastMsg) { if (el) el.remove(); return; }
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'crrav-toast-fixed';
+      el.className = 'crrav-toast-fixed';
+      root.appendChild(el);
+    }
+    el.textContent = toastMsg;   // textContent : jamais besoin d'escapeHtml ici
+  }
+
   function renderNow() {
     if (!root) return;
+    renderToastOverlay();
     const content = root.querySelector('.crrav-content');
     if (!content) return;
     // Le DOM est intégralement remplacé : sans ça, un rafraîchissement de fond pendant
@@ -14431,6 +14462,13 @@
     const existingSheet = content.querySelector('.crrav-settingssheet');
     if (STATE.settingsOpen && existingSheet && sheetOpenInDom) {
       if (FORCE_RENDER) { FORCE_RENDER = false; patchSettingsSheetInPlace(existingSheet); }
+      // (48) La modale de confirmation (fermeture sans enregistrer, etc.) et le sélecteur
+      // de liste vivent en dehors de .crrav-settingssheet (sibling .crrav-modals) : ce
+      // chemin court-circuite le rebuild complet de .crrav-content ci-dessous, donc sans
+      // ce patch explicite un STATE.confirmModal posé pendant que la sheet reste ouverte
+      // ne s'affichait JAMAIS (le clic sur ✕ semblait ne rien faire).
+      const modalsEl = content.querySelector('.crrav-modals');
+      if (modalsEl) modalsEl.innerHTML = listPickerHtml() + confirmModalHtml();
       return;
     }
     FORCE_RENDER = false;
@@ -14582,7 +14620,7 @@
           : STATE.tab === 'stats' ? renderStats()
           : STATE.tab === 'calendrier' ? renderCalendrier()
           : renderSuivi()}`
-      + settingsSheet + listPickerSheet + confirmModalHtml();
+      + settingsSheet + `<div class="crrav-modals">${listPickerSheet}${confirmModalHtml()}</div>`;
 
     // Restauration du défilement, juste après le remplacement du DOM.
     if (prevScroll > 0 && content.scrollHeight > content.clientHeight) content.scrollTop = prevScroll;
@@ -15482,10 +15520,31 @@
             return;
           }
           applyHistory(appHistory[appHistoryIndex]);
-          forceRender();
+          // (49) BUG : sur l'onglet Réglages, applyHistory() vient de restaurer le brouillon
+          // directement sur les champs du DOM (restoreDraft), mais forceRender() reconstruit
+          // ensuite tout le corps de la sheet à partir de CFG — les valeurs ENREGISTRÉES,
+          // voir buildSettingsSheetBodyHtml — donc écrasait INSTANTANÉMENT ce qui venait
+          // d'être restauré. Résultat visible : undo/redo semblait tout réinitialiser d'un
+          // coup au lieu d'avancer/reculer réglage par réglage. Sur cet onglet, on se
+          // contente donc de rafraîchir le disabled des boutons ↩/↪ — exactement comme la
+          // frappe normale (voir wireDraftHistoryTracking) — sans jamais reconstruire le
+          // corps. Sur les autres onglets (Ignorées…), il n'y a pas de brouillon à perdre
+          // et le contenu doit, lui, être reconstruit pour refléter le IGNORED restauré.
+          if (settingsSheetTab === 'settings') {
+            updateHistoryButtonsUI(currentSheetEl());
+          } else {
+            forceRender();
+          }
           showToast(isUndo
             ? `↩ Annulé : ${toastLabel || 'dernier changement'}`
             : `↪ Rétabli : ${toastLabel || 'changement suivant'}`);
+          // (49) showToast() ne déclenche PAS de rendu lui-même (seulement un timer qui en
+          // programmera un pour EFFACER le toast après 4s) — d'ordinaire il apparaît en
+          // à-côté d'un forceRender()/render() déjà déclenché juste à côté ailleurs dans
+          // l'appli. Ici, la branche « onglet Réglages » juste au-dessus n'en déclenche
+          // délibérément aucun (pour ne pas perdre le brouillon restauré) : sans cet appel
+          // explicite, le toast resterait donc invisible pour CE cas précis.
+          renderToastOverlay();
           return;
         }
         if (act.dataset.act === 'tv') {
