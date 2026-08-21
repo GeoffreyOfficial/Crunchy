@@ -26,7 +26,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.13.0';
+  const SCRIPT_VERSION = '3.15.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -4162,6 +4162,9 @@
     onlyFavorite: false,       // uniquement tes favoris (notées 5★ par TOI)
     onlyShort: false,          // séries courtes : 12 épisodes ou moins au total
     quickFinish: false,        // il te reste 3 épisodes ou moins
+    // Textes explicatifs d'en-tête d'onglet (voir hintBlock) fermés par l'utilisateur —
+    // une fois masqués, ils ne réapparaissent plus (mémorisé, pas juste pour la session).
+    dismissedHints: [],
   };
 
   function loadFilters() {
@@ -4196,6 +4199,10 @@
     if (Array.isArray(saved.suiviGroupHidden)) {
       const ok = ['started', 'notstarted', 'done'];
       saved.suiviGroupHidden = saved.suiviGroupHidden.filter((k) => ok.includes(k));
+    }
+    // Explications d'onglet fermées : ne garder que des chaînes valides.
+    if ('dismissedHints' in saved && !Array.isArray(saved.dismissedHints)) {
+      delete saved.dismissedHints;
     }
     // Migration : avant la 2.8.1, les puces n'excluaient que.
     if (Array.isArray(saved.discoverCats) && !saved.discoverCatsEx) {
@@ -6676,6 +6683,21 @@
   }
 
   // Puces de filtres rapides, communes aux deux onglets à listes.
+  // Bandeau explicatif d'en-tête d'onglet, fermable et mémorisé (voir DEFAULT_FILTERS.
+  // dismissedHints) : une fois masqué via le ✕, il ne réapparaît plus, même après
+  // rechargement — contrairement à STATE.quotaWarning (dismiss-quota) qui, lui, n'est
+  // qu'une info de session. `id` doit être stable et unique (clé de mémorisation) ;
+  // `html` est déjà construit (peut contenir du HTML, ex. <b>).
+  function hintBlock(id, html) {
+    if ((STATE.filters.dismissedHints || []).includes(id)) return '';
+    return `<p class="crrav-warn crrav-warn-dismiss" data-hint="${id}"
+        style="background:rgba(159,214,255,.1);border-color:rgba(159,214,255,.3);color:#9fd6ff">
+        <span>${html}</span>
+        <button class="crrav-warn-x" data-act="dismiss-hint" data-hint="${id}"
+          title="Masquer cette explication — ne réapparaîtra plus" aria-label="Masquer cette explication">✕</button>
+      </p>`;
+  }
+
   function quickChips(f) {
     return [
       ['onlyAiring', 'En diffusion', 'Uniquement les séries dont un épisode sort encore'],
@@ -8223,15 +8245,25 @@
 
   .crrav-stats{display:flex;gap:22px;margin:12px 0 4px;flex-wrap:wrap}
   .crrav-stat b{display:block;font:800 24px/1.1 system-ui;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
-  .crrav-stat small{color:#9a9aa4;font-size:11px;text-transform:uppercase;letter-spacing:.09em}
+  .crrav-stat small{color:#9a9aa4;font-size:11px;text-transform:uppercase;letter-spacing:.09em;white-space:nowrap}
   .crrav-stat.hot b{color:#f47521}
+
+  /* Ligne stats + tri : les 3 stats et le <select> de tri partagent une seule ligne
+     (plutôt que le tri sur sa propre ligne dans .crrav-controls juste en dessous) pour
+     gagner de la hauteur, surtout précieux sur téléphone. crrav-select-compact réduit
+     le select pour qu'il tienne à côté des stats sans forcer un retour à la ligne. */
+  .crrav-statsrow{display:flex;align-items:center;justify-content:space-between;gap:12px;
+    flex-wrap:wrap;margin:12px 0 4px}
+  .crrav-statsrow .crrav-stats{margin:0}
+  .crrav-select-compact{flex:0 0 auto;max-width:148px;padding:8px 26px 8px 10px;font-size:12.5px;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
   .crrav-controls{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
 
   /* (16) repli manuel des en-têtes (bannière, stats, contrôles) — un seul bouton,
      valable sur les 3 onglets et sur tous les écrans, état mémorisé. */
   .crrav-overlay.crrav-headercollapsed .crrav-warn:not(.crrav-warn-keep),
-  .crrav-overlay.crrav-headercollapsed .crrav-stats,
+  .crrav-overlay.crrav-headercollapsed .crrav-statsrow,
   .crrav-overlay.crrav-headercollapsed .crrav-controls{display:none}
   .crrav-search{flex:1 1 220px;min-width:160px;background:rgba(255,255,255,.06);
     border:1px solid rgba(255,255,255,.12);border-radius:10px;padding:9px 12px;color:#fff;font-size:14px}
@@ -8289,15 +8321,20 @@
   .crrav-group-collapsed .crrav-group-h{margin-bottom:0}
   .crrav-group-n{font:700 11px/1 system-ui;color:#b9b9c2;background:rgba(255,255,255,.07);
     border:1px solid rgba(255,255,255,.09);border-radius:999px;padding:3px 8px}
-  /* Config des sections (choix + ordre). */
-  .crrav-groupcfg{margin-top:5px;align-items:center}
-  .crrav-groupchip{display:inline-flex;align-items:center;gap:4px}
-  .crrav-groupchip .crrav-chip-toggle{opacity:.5}
+  /* Config des sections (choix + ordre). Légende + puces sur deux lignes séparées
+     (voir groupingControls) : la légende reste en texte plein, les puces défilent
+     horizontalement sans jamais repasser sur 2 lignes (gain de hauteur sur téléphone). */
+  .crrav-groupcfg{margin-top:5px;display:flex;flex-direction:column;gap:6px;width:100%}
+  .crrav-groupchips{display:flex;align-items:center;gap:5px;flex-wrap:nowrap;
+    overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:1px;scrollbar-width:none}
+  .crrav-groupchips::-webkit-scrollbar{display:none}
+  .crrav-groupchip{display:inline-flex;align-items:center;gap:3px;flex:0 0 auto}
+  .crrav-groupchip .crrav-chip-toggle{opacity:.5;padding:5px 10px;font-size:11.5px;white-space:nowrap}
   .crrav-groupchip.on .crrav-chip-toggle{opacity:1;border-style:solid;
     box-shadow:inset 0 0 0 1px rgba(244,117,33,.35)}
-  .crrav-groupup{cursor:pointer;border:1px solid rgba(255,255,255,.14);
+  .crrav-groupup{cursor:pointer;border:1px solid rgba(255,255,255,.14);flex:0 0 auto;
     background:rgba(255,255,255,.05);color:#d8d8e0;border-radius:7px;
-    font:800 11px/1 system-ui;padding:6px 7px}
+    font:800 10px/1 system-ui;padding:5px 6px}
   /* Liste de genres repliable (bouton d'en-tête + chevron). */
   .crrav-genretoggle{display:inline-flex;align-items:center;gap:7px;border-style:dashed}
   .crrav-genretoggle .crrav-genrechev{font-size:10px;opacity:.75;transition:transform .18s}
@@ -9952,9 +9989,19 @@
      est géré plus haut par .crrav-headercollapsed, commun à tous les écrans) */
   @media(max-width:720px){
     .crrav-top{padding:12px 14px 10px}
-    .crrav-stats{gap:16px;margin:10px 0 2px}
+    .crrav-statsrow{gap:8px;margin:10px 0 2px}
+    .crrav-stats{gap:14px}
     .crrav-stat b{font-size:20px}
+    .crrav-select-compact{max-width:118px;font-size:11.5px;padding:7px 22px 7px 8px}
     .crrav-grid{grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:12px;padding:14px}
+  }
+  /* Repli replié Z Fold / très petits écrans : les 3 stats + le tri doivent encore
+     tenir sur une ligne — on resserre encore un cran. */
+  @media(max-width:380px){
+    .crrav-stats{gap:10px}
+    .crrav-stat b{font-size:17px}
+    .crrav-stat small{font-size:9.5px}
+    .crrav-select-compact{max-width:92px;font-size:10.5px;padding:6px 20px 6px 7px}
   }
 
   /* ═══════════════════════════════════════════════════════════════════════════
@@ -11235,15 +11282,21 @@
   function groupingControls(f) {
     const order = suiviGroupOrder(f);
     const hidden = suiviGroupHidden(f);
-    const cfg = f.suiviGroupBy ? `<div class="crrav-chips crrav-groupcfg">
+    // Légende sur sa propre ligne (déjà compacte) ; les puces de sections sur la leur,
+    // en rang serré et sans retour à la ligne (voir .crrav-groupchips) — un swipe
+    // horizontal reste possible sur les tout petits écrans plutôt que de repasser sur
+    // 2 lignes, ce qui mangeait de la hauteur précieuse sur téléphone.
+    const cfg = f.suiviGroupBy ? `<div class="crrav-groupcfg">
         <span class="crrav-catlegend">Sections — clic&nbsp;: afficher/masquer · ↑&nbsp;: monter</span>
+        <div class="crrav-groupchips">
         ${order.map((k, pos) => {
           const on = !hidden.includes(k);
           return `<span class="crrav-groupchip${on ? ' on' : ''}">${
             pos > 0 ? `<button class="crrav-groupup" data-act="group-up" data-g="${k}" title="Monter cette section">↑</button>` : ''
           }<button class="crrav-chip crrav-chip-toggle" data-act="group-toggle" data-g="${k}" aria-pressed="${on}"
-            >${pos + 1}. ${SUIVI_GROUPS[k].label}</button></span>`;
+            >${SUIVI_GROUPS[k].label}</button></span>`;
         }).join('')}
+        </div>
       </div>` : '';
     return `<div class="crrav-chipgroup crrav-chipgroup-toggle">
         <div class="crrav-chips crrav-chips-toggle"><button class="crrav-chip crrav-chip-toggle" data-toggle="suiviGroupBy" aria-pressed="${!!f.suiviGroupBy}"
@@ -11329,17 +11382,17 @@
           ? `<p class="crrav-warn" style="background:rgba(159,214,255,.1);border-color:rgba(159,214,255,.3);color:#9fd6ff">
               Affichage du dernier état connu — actualisation en cours…</p>` : ''}
         ${toastMsg ? `<div class="crrav-toast">${escapeHtml(toastMsg)}</div>` : ''}
-        <div class="crrav-stats">
-          <div class="crrav-stat"><b data-countup="${list.length}" data-countup-key="suivi-series">${list.length}</b><small>séries</small></div>
-          <div class="crrav-stat hot"><b data-countup="${totalRemaining}" data-countup-key="suivi-remaining">${totalRemaining}</b><small>épisodes restants</small></div>
-          <div class="crrav-stat"><b>${fmtDuration(secLeft)}</b><small>à regarder</small></div>
-        </div>
-        <div class="crrav-controls">
+        <div class="crrav-statsrow">
+          <div class="crrav-stats">
+            <div class="crrav-stat"><b data-countup="${list.length}" data-countup-key="suivi-series">${list.length}</b><small>séries</small></div>
+            <div class="crrav-stat hot"><b data-countup="${totalRemaining}" data-countup-key="suivi-remaining">${totalRemaining}</b><small>ép. restants</small></div>
+            <div class="crrav-stat"><b>${fmtDuration(secLeft)}</b><small>à voir</small></div>
+          </div>
           <!-- (36) Options regroupées par thème (temps / date / titre) plutôt qu'à plat —
                13 options plates étaient difficiles à scanner dans un simple <select>. Les
                value et la logique de tri (voir sortSuivi) restent inchangées : seul le
                regroupement visuel via <optgroup> change. -->
-          <select class="crrav-select" data-act="sort">
+          <select class="crrav-select crrav-select-compact" data-act="sort">
             <optgroup label="Par temps">
               <option value="remaining"${f.sort === 'remaining' ? ' selected' : ''}>Le plus d'épisodes à voir</option>
               <option value="time"${f.sort === 'time' ? ' selected' : ''}>Le plus de temps à voir</option>
@@ -11361,6 +11414,8 @@
               <option value="titleDesc"${f.sort === 'titleDesc' ? ' selected' : ''}>Titre Z→A</option>
             </optgroup>
           </select>
+        </div>
+        <div class="crrav-controls">
           ${statusChips ? `<div class="crrav-chipgroup crrav-chipgroup-status">
             <div class="crrav-chips crrav-chips-status">${statusChips}</div>
           </div>` : ''}
@@ -11421,11 +11476,9 @@
     }
 
     return `
-        <p class="crrav-warn" style="background:rgba(159,214,255,.1);border-color:rgba(159,214,255,.3);color:#9fd6ff">
-          Séries populaires que tu n'as jamais regardées, absentes de toutes tes listes,
+        ${hintBlock('discover-intro', `Séries populaires que tu n'as jamais regardées, absentes de toutes tes listes,
           avec au plus ${CFG.discoverMaxSeasons} saisons et notées CR ${CFG.discoverMinRatingCr}★ / AniList ${CFG.discoverMinRatingAni}★ ou plus (notes connues uniquement)
-          ${CFG.discoverExcludeCategories.length ? `(hors ${CFG.discoverExcludeCategories.join(', ')})` : ''}.
-        </p>
+          ${CFG.discoverExcludeCategories.length ? `(hors ${CFG.discoverExcludeCategories.join(', ')})` : ''}.`)}
         ${simActive ? `
         <div class="crrav-simbar">
           <span class="crrav-simbar-txt">${D.similarFetching
@@ -11450,13 +11503,13 @@
           </div>
         </div>` : ''}
         ${D.warning ? `<p class="crrav-warn">${escapeHtml(D.warning)}</p>` : ''}
-        <div class="crrav-stats">
-          <div class="crrav-stat"><b data-countup="${list.length}" data-countup-key="discover-series">${list.length}</b><small>pépites trouvées</small></div>
-          <div class="crrav-stat hot"><b data-countup="${list.reduce((a, s) => a + (s.episodes || 0), 0)}" data-countup-key="discover-episodes">${list.reduce((a, s) => a + (s.episodes || 0), 0)}</b><small>épisodes à voir</small></div>
-          <div class="crrav-stat"><b>${fmtDuration(list.reduce((a, s) => a + (s.secTotal || 0), 0))}</b><small>à regarder</small></div>
-        </div>
-        <div class="crrav-controls">
-          <select class="crrav-select" data-act="sort" data-scope="discover">
+        <div class="crrav-statsrow">
+          <div class="crrav-stats">
+            <div class="crrav-stat"><b data-countup="${list.length}" data-countup-key="discover-series">${list.length}</b><small>trouvées</small></div>
+            <div class="crrav-stat hot"><b data-countup="${list.reduce((a, s) => a + (s.episodes || 0), 0)}" data-countup-key="discover-episodes">${list.reduce((a, s) => a + (s.episodes || 0), 0)}</b><small>ép. à voir</small></div>
+            <div class="crrav-stat"><b>${fmtDuration(list.reduce((a, s) => a + (s.secTotal || 0), 0))}</b><small>à voir</small></div>
+          </div>
+          <select class="crrav-select crrav-select-compact" data-act="sort" data-scope="discover">
             <option value="relevance"${f.discoverSort === 'relevance' ? ' selected' : ''}>Pertinence (signaux + note)</option>
             <option value="popularity"${f.discoverSort === 'popularity' ? ' selected' : ''}>Popularité</option>
             <option value="seasons"${f.discoverSort === 'seasons' ? ' selected' : ''}>Le moins de saisons</option>
@@ -11469,6 +11522,8 @@
             <option value="title"${f.discoverSort === 'title' ? ' selected' : ''}>Titre A→Z</option>
             <option value="titleDesc"${f.discoverSort === 'titleDesc' ? ' selected' : ''}>Titre Z→A</option>
           </select>
+        </div>
+        <div class="crrav-controls">
           ${cats.length ? (() => {
             const dOpen = (f.genresOpen || []).includes('discover');
             const dN = f.discoverCatsIn.length + f.discoverCatsEx.length;
@@ -11534,18 +11589,16 @@
     }
 
     return `
-        <p class="crrav-warn" style="background:rgba(159,214,255,.1);border-color:rgba(159,214,255,.3);color:#9fd6ff">
-          Séries dont tu as vu au moins un épisode mais qui ne sont dans aucune de tes listes
-          (watchlist ou Crunchylists), et qu'il te reste à finir.
-        </p>
+        ${hintBlock('orphan-intro', `Séries dont tu as vu au moins un épisode mais qui ne sont dans aucune de tes listes
+          (watchlist ou Crunchylists), et qu'il te reste à finir.`)}
         ${O.warning ? `<p class="crrav-warn">${escapeHtml(O.warning)}</p>` : ''}
-        <div class="crrav-stats">
-          <div class="crrav-stat"><b data-countup="${list.length}" data-countup-key="orph-series">${list.length}</b><small>séries</small></div>
-          <div class="crrav-stat hot"><b data-countup="${totalRemaining}" data-countup-key="orph-remaining">${totalRemaining}</b><small>épisodes restants</small></div>
-          <div class="crrav-stat"><b>${fmtDuration(secLeft)}</b><small>à regarder</small></div>
-        </div>
-        <div class="crrav-controls">
-          <select class="crrav-select" data-act="sort" data-scope="orphan">
+        <div class="crrav-statsrow">
+          <div class="crrav-stats">
+            <div class="crrav-stat"><b data-countup="${list.length}" data-countup-key="orph-series">${list.length}</b><small>séries</small></div>
+            <div class="crrav-stat hot"><b data-countup="${totalRemaining}" data-countup-key="orph-remaining">${totalRemaining}</b><small>ép. restants</small></div>
+            <div class="crrav-stat"><b>${fmtDuration(secLeft)}</b><small>à voir</small></div>
+          </div>
+          <select class="crrav-select crrav-select-compact" data-act="sort" data-scope="orphan">
             <option value="remaining"${f.orphanSort === 'remaining' ? ' selected' : ''}>Le plus d'épisodes à voir</option>
             <option value="time"${f.orphanSort === 'time' ? ' selected' : ''}>Le plus de temps à voir</option>
             <option value="quickest"${f.orphanSort === 'quickest' ? ' selected' : ''}>Finissable ce soir</option>
@@ -11560,6 +11613,8 @@
             <option value="title"${f.orphanSort === 'title' ? ' selected' : ''}>Titre A→Z</option>
             <option value="titleDesc"${f.orphanSort === 'titleDesc' ? ' selected' : ''}>Titre Z→A</option>
           </select>
+        </div>
+        <div class="crrav-controls">
           <div class="crrav-chips">${quickChips(f)}</div>
           ${catChips(categoriesOf(STATE.orphan.series), f.orphanCatsIn, f.orphanCatsEx, 'orphan')}
         </div>
@@ -14693,6 +14748,17 @@
         if (act.dataset.act === 'dismiss-quota') {
           STATE.quotaWarning = null;
           forceRender();
+          return;
+        }
+        if (act.dataset.act === 'dismiss-hint') {
+          const id = act.dataset.hint;
+          if (id) {
+            const list = (STATE.filters.dismissedHints || []).slice();
+            if (!list.includes(id)) list.push(id);
+            STATE.filters.dismissedHints = list;
+            saveFilters();
+          }
+          render();
           return;
         }
         if (act.dataset.act === 'cancel-discover') {
