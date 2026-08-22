@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.48.0
+// @version      3.55.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -28,7 +28,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.48.0';
+  const SCRIPT_VERSION = '3.55.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -1937,18 +1937,50 @@
       return;
     }
     STATE.addingId = seriesId;
-    forceRender();
+    // (fix v3.51.0) patchDiscoverAction() : ne touche QUE cette carte (état « busy »), au
+    // lieu de reconstruire toute la grille — voir sa définition. Repli sur forceRender() si
+    // la carte n'est pas dans le DOM actuel pour une raison ou une autre.
+    if (!patchDiscoverAction(seriesId)) forceRender();
     try {
       await addToCustomList(listId, seriesId);
       STATE.addedToList.add(seriesId);
+      // (fix v3.49.0) Effet « wahou » — voir discoverCard/discoverListRow et le CSS
+      // .crrav-flourish-add : joué une seule fois, à l'instant précis de l'ajout.
+      discoverFlourish = { id: seriesId, type: 'add' };
       const listTitle = (STATE.myLists.items.find((l) => l.id === listId) || {}).title || 'ta liste';
-      showToast(`✓ ${title || 'Série'} ajoutée à « ${listTitle} »`);
+      // (fix v3.49.0) Bouton Annuler dans le toast : contrairement à ignorer (juste un
+      // marquage local, déjà réversible d'un clic), ajouter à une liste est un appel réseau
+      // réel côté Crunchyroll — sans ce bouton, se rattraper après un clic malheureux
+      // demandait de rouvrir la fiche sur Crunchyroll pour retirer la série à la main.
+      showToast(`✓ ${title || 'Série'} ajoutée à « ${listTitle} »`,
+        { undo: () => handleUndoAddToList(seriesId, listId, title) });
     } catch (e) {
       console.warn('[reste-à-voir] ajout à la liste échoué', e);
       showToast('✗ Ajout impossible — réessaie dans un instant');
     } finally {
       STATE.addingId = null;
-      forceRender();
+      if (!patchDiscoverAction(seriesId)) forceRender();
+    }
+  }
+
+  // Inverse ponctuel de handleAddToList, déclenché UNIQUEMENT par le bouton « Annuler » du
+  // toast qui suit un ajout depuis Découverte (voir showToast/renderToastOverlay) — jamais
+  // par un clic direct sur la carte, qui n'affiche pas ce bouton. `listId` est celui capturé
+  // au moment de l'ajout (pas re-résolu ici) : on retire exactement de LÀ où on a ajouté,
+  // même si la liste par défaut a changé entre-temps.
+  async function handleUndoAddToList(seriesId, listId, title) {
+    STATE.addingId = seriesId;   // même indicateur visuel « busy » que l'ajout
+    if (!patchDiscoverAction(seriesId)) forceRender();
+    try {
+      await removeFromCustomList(listId, seriesId);
+      STATE.addedToList.delete(seriesId);
+      showToast(`↺ « ${title || 'Série'} » retirée — ajout annulé`);
+    } catch (e) {
+      console.warn('[reste-à-voir] annulation d\'ajout échouée', e);
+      showToast('✗ Annulation impossible — retire-la à la main si besoin');
+    } finally {
+      STATE.addingId = null;
+      if (!patchDiscoverAction(seriesId)) forceRender();
     }
   }
 
@@ -7616,12 +7648,17 @@
     const off = C * (1 - Math.min(Math.max(s.pct, 0), 100) / 100);
     const done = s.remaining === 0;
     const label = done ? '✓' : `${s.pct}%`;
+    // (fix v3.53.0) --ring-off porte la valeur finale en variable CSS : la classe .crrav-fresh
+    // (posée sur la carte parente, voir card()/listRow()) déclenche un balayage animé de 0 à
+    // cette valeur — voir @keyframes crrav-ring-sweep. L'attribut stroke-dashoffset garde la
+    // valeur finale en repli statique (JS désactivé, prefers-reduced-motion, etc.).
     return `<span class="crrav-ringwrap" title="${s.seen}/${s.total} vus${
       done ? '' : ` · ${s.remaining} restants`}">
       <svg viewBox="0 0 40 40" class="crrav-ring" aria-hidden="true">
         <circle cx="20" cy="20" r="${R}" class="crrav-ring-bg"/>
         <circle cx="20" cy="20" r="${R}" class="crrav-ring-fg"
-          stroke-dasharray="${C.toFixed(2)}" stroke-dashoffset="${off.toFixed(2)}"/>
+          stroke-dasharray="${C.toFixed(2)}" stroke-dashoffset="${off.toFixed(2)}"
+          style="--ring-off:${off.toFixed(2)}"/>
       </svg>
       <b class="crrav-ring-t${done ? ' done' : ''}">${label}</b>
     </span>`;
@@ -7917,6 +7954,21 @@
   // quelles séries ont déjà joué leur animation d'entrée cette session, pour ne la rejouer
   // qu'une fois par série (voir .crrav-fresh) et non à chaque rafraîchissement de fond.
   const cardsAnimatedOnce = new Set();
+
+  // (fix v3.49.0) Effet « wahou » ponctuel sur une carte Découverte au moment précis où on
+  // l'ignore / l'ajoute à une liste : { id, type: 'add'|'ignore' } posé juste avant le
+  // render qui suit l'action, lu UNE fois par discoverCard/discoverListRow (qui posent la
+  // classe .crrav-flourish-add/-ignore déclenchant l'animation CSS), puis remis à null — un
+  // rafraîchissement de fond ultérieur ne la rejoue donc jamais par erreur.
+  let discoverFlourish = null;
+  function consumeDiscoverFlourish(id) {
+    if (discoverFlourish && discoverFlourish.id === id) {
+      const type = discoverFlourish.type;
+      discoverFlourish = null;
+      return type;
+    }
+    return null;
+  }
   function card(s, i, source) {
     if (STATE.filters.view === 'list') return listRow(s, source);
     const seriesUrl = crSeriesUrl(s.id, s.slug);
@@ -7934,7 +7986,7 @@
     const pinfo = plannedInfo(s);
     const fresh = !cardsAnimatedOnce.has(s.id);
     if (fresh) cardsAnimatedOnce.add(s.id);
-    return `<article class="crrav-card${fresh ? ' crrav-fresh' : ''}${s.isNew ? ' isnew' : ''}${hue ? ' has-hue' : ''}" style="${styleVars}" data-hue-id="${s.id}"${hue ? ' data-hue-done="1"' : ''}>
+    return `<article class="crrav-card${fresh ? ' crrav-fresh' : ''}${s.isNew ? ' isnew' : ''}${hue ? ' has-hue' : ''}" style="${styleVars}" data-hue-id="${s.id}" data-cardid="${s.id}"${hue ? ' data-hue-done="1"' : ''}>
       <div class="crrav-thumb">
         <a class="crrav-cover" href="${seriesUrl}">
           ${s.poster ? `<img loading="lazy" crossorigin="anonymous" src="${s.poster}" alt="" onerror="this.removeAttribute(&quot;crossorigin&quot;);this.src=this.src">` : ''}
@@ -7969,13 +8021,18 @@
     const seriesUrl = crSeriesUrl(s.id, s.slug);
     const done = s.remaining === 0;
     const pinfo = plannedInfo(s, true);
+    // (fix v3.53.0) Même marqueur « une seule fois » que card() (cardsAnimatedOnce partagé) —
+    // manquait ici jusqu'à présent, la vue liste n'avait donc aucun des effets d'entrée qui
+    // en dépendent (voir .crrav-fresh, notamment le balayage de l'anneau ci-dessous).
+    const fresh = !cardsAnimatedOnce.has(s.id);
+    if (fresh) cardsAnimatedOnce.add(s.id);
     // (fix UI) Bouton reprendre toujours seul à GAUCHE de la jaquette (isolé — pas de
     // risque de le toucher en visant une autre action). La baguette 🪄 rejoint désormais
     // cette même colonne, empilée AU-DESSUS du bouton reprendre (au lieu d'être avec
     // ignorer/retirer à droite) : c'est l'action la plus utilisée après reprendre, elle
     // mérite la même proximité immédiate avec la jaquette plutôt que d'être noyée avec
     // les actions plus rares (ignorer, retirer) de l'autre côté de la ligne.
-    return `<article class="crrav-lrow${s.isNew ? ' isnew' : ''}" style="--prog:${progColor(s)}">
+    return `<article class="crrav-lrow${fresh ? ' crrav-fresh' : ''}${s.isNew ? ' isnew' : ''}" style="--prog:${progColor(s)}" data-cardid="${s.id}">
       <div class="crrav-lleftcol">
         ${similarBtn(s)}
         ${resumeLink(s, 'crrav-lresume')}
@@ -8606,13 +8663,28 @@
     const ignored = IGNORED.has(s.id);
     const added = STATE.addedToList.has(s.id);
     const doneCls = ignored ? ' crrav-card-ignored' : added ? ' crrav-card-added' : '';
-    return `<article class="crrav-card${fresh ? ' crrav-fresh' : ''}${doneCls}${sig.lead ? ' crrav-sig crrav-sig-' + sig.lead : ''}${sig.legendary ? ' crrav-legendary' : sig.notable ? ' crrav-notable' : ''}">
+    // (fix v3.49.0) Effet « wahou », joué une seule fois à l'instant précis de l'action —
+    // voir discoverFlourish/consumeDiscoverFlourish. Un badge qui claque au centre de la
+    // carte + un halo coloré tout autour, distinct par type (vert = ajoutée, ambre = ignorée).
+    const flourish = consumeDiscoverFlourish(s.id);
+    const flourishCls = flourish ? ` crrav-flourish-${flourish}` : '';
+    const flourishBadge = flourish === 'add'
+      ? `<div class="crrav-flourish-badge crrav-flourish-badge-add">✓ Ajoutée</div>`
+      : flourish === 'ignore'
+      ? `<div class="crrav-flourish-badge crrav-flourish-badge-ignore">🙈 Ignorée</div>`
+      : '';
+    return `<article class="crrav-card${fresh ? ' crrav-fresh' : ''}${doneCls}${flourishCls}${sig.lead ? ' crrav-sig crrav-sig-' + sig.lead : ''}${sig.legendary ? ' crrav-legendary' : sig.notable ? ' crrav-notable' : ''}" data-cardid="${s.id}">
+      ${flourishBadge}
       <div class="crrav-thumb">
         <a class="crrav-cover" href="${seriesUrl}">
           ${s.poster ? `<img loading="lazy" crossorigin="anonymous" src="${s.poster}" alt="" onerror="this.removeAttribute(&quot;crossorigin&quot;);this.src=this.src">` : ''}
         </a>
         <span class="crrav-rating">${ratingLabel(s)}</span>
-        ${sig.legendary ? `<span class="crrav-legribbon" title="Score pépite élevé (voir Réglages → Découverte) : une pépite en or">✨ Légendaire</span>`
+        ${sig.legendary ? `<span class="crrav-legstar" aria-hidden="true"></span>
+          <span class="crrav-legsparkle crrav-legsparkle-1" aria-hidden="true">✦</span>
+          <span class="crrav-legsparkle crrav-legsparkle-2" aria-hidden="true">✧</span>
+          <span class="crrav-legsparkle crrav-legsparkle-3" aria-hidden="true">✦</span>
+          <span class="crrav-legribbon" title="Score pépite élevé (voir Réglages → Découverte) : une pépite en or">✨ Légendaire</span>`
           : sig.notable ? `<span class="crrav-notaribbon" title="Score pépite au-dessus du seuil « notable » (voir Réglages → Découverte)">◆ Notable</span>` : ''}
         ${ignoreBtn(s, 'discover')}
         ${ignored ? '' : addListBtn(s)}
@@ -8651,10 +8723,21 @@
     const ignored = IGNORED.has(s.id);
     const added = STATE.addedToList.has(s.id);
     const doneCls = ignored ? ' crrav-lrow-ignored' : added ? ' crrav-lrow-added' : '';
-    return `<article class="crrav-lrow crrav-lrow-discover${doneCls}${sig.lead ? ' crrav-sig crrav-sig-' + sig.lead : ''}${sig.legendary ? ' crrav-legendary' : sig.notable ? ' crrav-notable' : ''}">
+    // (fix v3.49.0) Même effet « wahou » qu'en vue grille (voir discoverCard) — badge +
+    // halo coloré, consommé une seule fois via discoverFlourish.
+    const flourish = consumeDiscoverFlourish(s.id);
+    const flourishCls = flourish ? ` crrav-flourish-${flourish}` : '';
+    const flourishBadge = flourish === 'add'
+      ? `<div class="crrav-flourish-badge crrav-flourish-badge-add crrav-flourish-badge-sm">✓ Ajoutée</div>`
+      : flourish === 'ignore'
+      ? `<div class="crrav-flourish-badge crrav-flourish-badge-ignore crrav-flourish-badge-sm">🙈 Ignorée</div>`
+      : '';
+    return `<article class="crrav-lrow crrav-lrow-discover${doneCls}${flourishCls}${sig.lead ? ' crrav-sig crrav-sig-' + sig.lead : ''}${sig.legendary ? ' crrav-legendary' : sig.notable ? ' crrav-notable' : ''}" data-cardid="${s.id}">
+      ${flourishBadge}
       <a class="crrav-lthumb" href="${seriesUrl}">
         ${s.poster ? `<img loading="lazy" crossorigin="anonymous" src="${s.poster}" alt="" onerror="this.removeAttribute(&quot;crossorigin&quot;);this.src=this.src">` : ''}
-        ${sig.legendary ? `<span class="crrav-legribbon crrav-legribbon-sm" title="Score pépite élevé (voir Réglages → Découverte) : une pépite en or">✨</span>`
+        ${sig.legendary ? `<span class="crrav-legsparkle crrav-legsparkle-sm" aria-hidden="true">✦</span>
+          <span class="crrav-legribbon crrav-legribbon-sm" title="Score pépite élevé (voir Réglages → Découverte) : une pépite en or">✨</span>`
           : sig.notable ? `<span class="crrav-notaribbon-sm" title="Score pépite au-dessus du seuil « notable » (voir Réglages → Découverte)">◆</span>` : ''}
       </a>
       <div class="crrav-lmain">
@@ -8718,7 +8801,7 @@
           ? 'Titre repéré sur Crunchyroll par recherche, mais correspondance pas assez sûre pour garantir que c’est la bonne fiche'
           : 'Fiche Crunchyroll confirmée par recherche de titre (lien non déclaré sur AniList)')
         : '';
-    return `<article class="crrav-card crrav-premcard${s.released ? '' : ' crrav-premcard-upcoming'}">
+    return `<article class="crrav-card crrav-premcard${s.released ? '' : ' crrav-premcard-upcoming'}" data-cardid="${s.id}">
       <span class="crrav-premribbon">${ribbon}</span>
       <div class="crrav-thumb">
         <a class="crrav-cover" href="${url}">
@@ -9107,6 +9190,41 @@
   .crrav-card.crrav-fresh{animation:crrav-card-in .32s ease backwards;
     animation-delay:calc(var(--i,0) * 30ms)}
   @keyframes crrav-card-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+  /* (fix v3.53.0) Anneau de progression qui se remplit en un balayage à l'apparition d'une
+     carte — .crrav-fresh est déjà posée UNE seule fois par série (voir card()/listRow()) :
+     ce sélecteur descendant marche donc aussi bien en grille (.crrav-card) qu'en liste
+     compacte (.crrav-lrow). 97.39 = 2×π×15.5, le rayon fixe de l'anneau (voir ring()) — la
+     valeur de départ est donc toujours la même, seule --ring-off (posée en style inline par
+     série) varie. Repli statique automatique si l'animation est coupée : stroke-dashoffset
+     porte déjà la bonne valeur finale en attribut de présentation.
+     Léger délai pour laisser la carte elle-même arriver avant que l'anneau ne se remplisse
+     — un enchaînement plus lisible qu'une explosion simultanée de mouvements. */
+  .crrav-fresh .crrav-ring-fg{
+    animation:crrav-ring-sweep .85s cubic-bezier(.22,1,.36,1) .18s both}
+  @keyframes crrav-ring-sweep{0%{stroke-dashoffset:97.39}100%{stroke-dashoffset:var(--ring-off)}}
+  /* (fix v3.53.0) Ruban « Légendaire »/étoile favorite : petit éclat qui traverse une seule
+     fois à l'apparition (même garde .crrav-fresh, aucun état JS de plus). */
+  .crrav-fresh.crrav-legendary .crrav-legribbon,
+  .crrav-fresh.crrav-legendary .crrav-legribbon-sm{
+    position:relative;overflow:hidden}
+  .crrav-fresh.crrav-legendary .crrav-legribbon::after,
+  .crrav-fresh.crrav-legendary .crrav-legribbon-sm::after{
+    content:'';position:absolute;inset:0;
+    background:linear-gradient(115deg,transparent 30%,rgba(255,255,255,.85) 48%,transparent 66%);
+    background-size:220% 100%;background-position:150% 0;
+    animation:crrav-shine-sweep 1.3s ease .5s 1}
+  @keyframes crrav-shine-sweep{0%{background-position:150% 0}100%{background-position:-50% 0}}
+  .crrav-fresh .crrav-favstar,.crrav-fresh .crrav-lfavstar{
+    display:inline-block;
+    animation:crrav-favpopin .4s ease-out .2s backwards,
+      crrav-favshimmer 5.2s ease-in-out .2s infinite,
+      crrav-favglow 3.6s ease-in-out .2s infinite}
+  @keyframes crrav-favpopin{0%{opacity:0;transform:scale(.55) translateY(2px)}100%{opacity:1;transform:none}}
+  @media(prefers-reduced-motion:reduce){
+    .crrav-fresh .crrav-ring-fg,.crrav-fresh.crrav-legendary .crrav-legribbon::after,
+    .crrav-fresh.crrav-legendary .crrav-legribbon-sm::after,
+    .crrav-fresh .crrav-favstar,.crrav-fresh .crrav-lfavstar{animation:none}
+  }
   /* (#6) teinte tirée de la jaquette, très discrète pour rester lisible */
   .crrav-card.has-hue{background:
     linear-gradient(160deg,rgba(var(--hue),.16),rgba(20,20,25,.6) 62%),#141419}
@@ -9252,6 +9370,38 @@
   .crrav-legribbon-sm{position:absolute;top:2px;right:2px;font-size:11px;line-height:1;
     background:rgba(10,10,12,.75);border-radius:4px;padding:1px 2px;
     box-shadow:0 0 6px rgba(255,196,92,.7)}
+  /* (fix v3.54.0) « Contour en étoile » doux pour les pépites légendaires : une forme
+     d'étoile à 4 branches, floue, qui respire doucement derrière le ruban — en plus (pas à
+     la place) du halo pulsé déjà existant sur toute la carte (.crrav-legpulse). Posée en
+     markup (pas ::before/::after, déjà pris par l'accent de couleur et le halo au survol de
+     .crrav-card) donc positionnée par rapport à .crrav-thumb, qui a l'overflow nécessaire
+     pour la laisser légèrement déborder du coin. z-index:0 comme le ruban : jamais au-dessus
+     du bouton ignorer/ajouter ni du panneau résumé. */
+  .crrav-legstar{position:absolute;top:-12px;right:-12px;width:70px;height:70px;z-index:0;
+    pointer-events:none;
+    background:radial-gradient(circle,rgba(255,224,150,.85) 0%,rgba(255,196,92,.45) 38%,transparent 72%);
+    clip-path:polygon(50% 0%,61% 36%,100% 50%,61% 64%,50% 100%,39% 64%,0% 50%,39% 36%);
+    filter:blur(4px);
+    animation:crrav-legstar-breathe 3.6s ease-in-out infinite}
+  @keyframes crrav-legstar-breathe{
+    0%,100%{transform:scale(.82) rotate(0deg);opacity:.6}
+    50%{transform:scale(1.08) rotate(10deg);opacity:1}}
+  /* Petits scintillements épars autour de la jaquette — décalés dans le temps pour ne
+     jamais clignoter en même temps, comme de vraies étincelles. */
+  .crrav-legsparkle{position:absolute;z-index:1;color:#ffe9b8;pointer-events:none;
+    text-shadow:0 0 6px rgba(255,210,120,.9);font-size:12px;
+    animation:crrav-legtwinkle 2.3s ease-in-out infinite}
+  .crrav-legsparkle-1{top:16px;left:12px;animation-delay:.15s}
+  .crrav-legsparkle-2{bottom:52px;left:26px;font-size:9px;animation-delay:1.05s}
+  .crrav-legsparkle-3{top:42%;left:8px;font-size:10px;animation-delay:1.7s}
+  .crrav-legsparkle-sm{top:3px;left:3px;font-size:8px;text-shadow:0 0 4px rgba(255,210,120,.9);
+    animation-delay:.4s}
+  @keyframes crrav-legtwinkle{
+    0%,100%{opacity:0;transform:scale(.35)}
+    50%{opacity:1;transform:scale(1)}}
+  @media(prefers-reduced-motion:reduce){
+    .crrav-legstar,.crrav-legsparkle{animation:none;opacity:.75;transform:none}
+  }
   /* 🎲 Dé légendaire : même dégradé doré que le ruban « Légendaire », pour que le bouton
      se distingue d'un coup d'œil du 🎲 « autres pépites » (celui-là reste neutre) et du
      🔄 « Actualiser » — trois icônes, trois sens, aucune confusion possible.
@@ -9342,7 +9492,26 @@
   .crrav-title{font:700 13.5px/1.3 system-ui;color:inherit;text-decoration:none;display:-webkit-box;
     -webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:2.6em}
   .crrav-title:hover{color:var(--prog)}
-  .crrav-favstar,.crrav-lfavstar{color:#ffcf55;margin-right:4px;text-shadow:0 0 6px rgba(255,207,85,.5)}
+  .crrav-favstar,.crrav-lfavstar{display:inline-block;margin-right:4px;color:#ffcf55;
+    /* (fix v3.55.0) Repli couleur pleine si background-clip:text n'est pas supporté (rare) —
+       toujours défini avant le dégradé pour que la propriété courte (background) ne
+       l'écrase pas dans l'ordre inverse. */
+    background:linear-gradient(100deg,#ffcf55 0%,#ffcf55 40%,#fff8e0 50%,#ffcf55 60%,#ffcf55 100%);
+    background-size:240% 100%;-webkit-background-clip:text;background-clip:text;
+    -webkit-text-fill-color:transparent;
+    animation:crrav-favshimmer 5.2s ease-in-out infinite,crrav-favglow 3.6s ease-in-out infinite}
+  /* Scintillement métallique doux et permanent (pas juste à l'apparition, contrairement au
+     halo « légendaire » plus démonstratif) : la majeure partie du cycle est immobile, un
+     reflet traverse brièvement toutes les ~5 s — l'effet d'un bijou qui accroche la lumière
+     de temps en temps, plutôt qu'un scintillement continu qui fatiguerait l'œil. */
+  @keyframes crrav-favshimmer{0%,64%{background-position:220% 0}100%{background-position:-40% 0}}
+  @keyframes crrav-favglow{0%,100%{filter:drop-shadow(0 0 3px rgba(255,207,85,.4))}
+    50%{filter:drop-shadow(0 0 7px rgba(255,207,85,.75))}}
+  @media(prefers-reduced-motion:reduce){
+    /* Doit rester APRÈS la règle de base ci-dessus : même spécificité, donc c'est l'ordre
+       dans la feuille de style qui décide laquelle l'emporte. */
+    .crrav-favstar,.crrav-lfavstar{animation:none}
+  }
   .crrav-lrow{position:relative;transition:transform .16s ease,border-color .16s ease;
     content-visibility:auto;contain-intrinsic-size:auto 92px}
   .crrav-lrow::before{content:'';position:absolute;left:0;top:8px;bottom:8px;width:3px;border-radius:3px;
@@ -9697,6 +9866,46 @@
      place (addListBtn affiche déjà son propre état « ✓ Ajoutée » désactivé). */
   .crrav-card.crrav-card-added{opacity:.6}
   .crrav-card.crrav-card-added .crrav-ignore{opacity:1}
+  /* (fix v3.49.0) Effet « wahou » — badge qui claque au centre + halo pulsé tout autour de
+     la carte, joué UNE fois à l'instant de l'action (voir discoverFlourish côté JS). Glow en
+     inset (jamais rogné par overflow:hidden sur .crrav-card) ; le passage à l'état grisé
+     final (.crrav-card-ignored/-added ci-dessus) est légèrement différé pour laisser le
+     temps au badge de se voir avant que la carte ne s'assagisse. */
+  .crrav-card.crrav-card-ignored,.crrav-card.crrav-card-added,
+  .crrav-lrow-discover.crrav-lrow-ignored,.crrav-lrow-discover.crrav-lrow-added{
+    transition:opacity .5s ease .35s}
+  .crrav-card.crrav-flourish-add,.crrav-lrow-discover.crrav-flourish-add{
+    animation:crrav-flourish-glow-add 1.1s ease both}
+  .crrav-card.crrav-flourish-ignore,.crrav-lrow-discover.crrav-flourish-ignore{
+    animation:crrav-flourish-glow-ignore 1.1s ease both}
+  @keyframes crrav-flourish-glow-add{
+    0%{box-shadow:inset 0 0 0 0 rgba(92,230,160,0)}
+    22%{box-shadow:inset 0 0 0 3px rgba(92,230,160,.9),inset 0 0 34px 4px rgba(92,230,160,.4)}
+    100%{box-shadow:inset 0 0 0 0 rgba(92,230,160,0)}}
+  @keyframes crrav-flourish-glow-ignore{
+    0%{box-shadow:inset 0 0 0 0 rgba(255,193,90,0)}
+    22%{box-shadow:inset 0 0 0 3px rgba(255,193,90,.9),inset 0 0 34px 4px rgba(255,193,90,.35)}
+    100%{box-shadow:inset 0 0 0 0 rgba(255,193,90,0)}}
+  .crrav-flourish-badge{position:absolute;top:50%;left:50%;z-index:5;
+    padding:8px 18px;border-radius:999px;font:800 15px/1 system-ui;white-space:nowrap;
+    pointer-events:none;box-shadow:0 8px 24px -6px rgba(0,0,0,.55);
+    animation:crrav-flourish-badge-pop 1.15s cubic-bezier(.34,1.56,.64,1) both}
+  .crrav-flourish-badge-sm{font-size:12px;padding:6px 13px}
+  .crrav-flourish-badge-add{background:linear-gradient(135deg,#7cf0b6,#2fbd7e);color:#08210f}
+  .crrav-flourish-badge-ignore{background:linear-gradient(135deg,#ffd98f,#e0a13f);color:#2a1c04}
+  @keyframes crrav-flourish-badge-pop{
+    0%{opacity:0;transform:translate(-50%,-50%) scale(.4) rotate(-6deg)}
+    18%{opacity:1;transform:translate(-50%,-50%) scale(1.14) rotate(2deg)}
+    30%{transform:translate(-50%,-50%) scale(1) rotate(0)}
+    72%{opacity:1;transform:translate(-50%,-50%) scale(1) rotate(0)}
+    100%{opacity:0;transform:translate(-50%,-50%) scale(.92) rotate(0)}}
+  @media(prefers-reduced-motion:reduce){
+    .crrav-card.crrav-flourish-add,.crrav-card.crrav-flourish-ignore,
+    .crrav-lrow-discover.crrav-flourish-add,.crrav-lrow-discover.crrav-flourish-ignore,
+    .crrav-flourish-badge{animation:none}
+    .crrav-card.crrav-card-ignored,.crrav-card.crrav-card-added,
+    .crrav-lrow-discover.crrav-lrow-ignored,.crrav-lrow-discover.crrav-lrow-added{transition:none}
+  }
   /* Petit téléphone : vignette et gaps resserrés, résumé réduit à 1 ligne pour ne pas
      faire déborder la ligne en hauteur ni pousser les boutons d'action hors champ. */
   @media(max-width:600px){
@@ -10505,6 +10714,12 @@
     background:var(--toast-iconbg,rgba(92,230,160,.22));
     box-shadow:0 0 0 1px var(--toast-edge,rgba(92,230,160,.45)) inset}
   .crrav-toast-text{flex:1 1 auto;min-width:0;overflow-wrap:break-word}
+  /* (fix v3.49.0) Bouton « Annuler » optionnel dans le toast (voir showToast/handleAddToList) —
+     même gabarit que les autres pilules d'action du script, contrasté sur le fond dépoli. */
+  .crrav-toast-undo{flex:0 0 auto;padding:5px 12px;border-radius:999px;
+    background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.22);
+    color:#fff;font:700 12px/1 system-ui;cursor:pointer;white-space:nowrap}
+  .crrav-toast-undo:hover,.crrav-toast-undo:active{background:rgba(255,255,255,.24)}
   #crrav-toast-fixed[data-tone="ok"]{
     --toast-edge:rgba(92,230,160,.45);--toast-glow:rgba(92,230,160,.45);--toast-iconbg:rgba(92,230,160,.22)}
   #crrav-toast-fixed[data-tone="warn"]{
@@ -11034,6 +11249,10 @@
 
   /* Marges anti-rognage : sur beaucoup de téléviseurs, les bords sont coupés. */
   .crrav-tv .crrav-content{padding:0 2.5%}
+  /* (fix v3.53.0) Transition de changement d'onglet — voir renderNow/lastRenderedTab. */
+  @keyframes crrav-tabswitch-in{0%{opacity:0;transform:translateY(7px)}100%{opacity:1;transform:none}}
+  .crrav-content.crrav-tabswitch{animation:crrav-tabswitch-in .3s cubic-bezier(.22,1,.36,1) both}
+  @media(prefers-reduced-motion:reduce){.crrav-content.crrav-tabswitch{animation:none}}
 
   /* Le FOCUS remplace le survol : c'est le seul repère de navigation à la télécommande.
      Il doit être impossible à manquer depuis le canapé. */
@@ -11168,10 +11387,27 @@
   // changement de réglage). Disparaît seul.
   let toastMsg = '';
   let toastTimer = null;
-  function showToast(msg) {
+  // (fix v3.49.0) Action « Annuler » optionnelle dans le toast — voir handleAddToList.
+  // Contrairement au bouton ↩ Annuler global (historique unifié, voir pushHistory), CETTE
+  // action annule un appel RÉSEAU précis (ajout à une Crunchylist) : elle doit rester
+  // disponible tant que le toast est affiché, puis disparaître avec lui — pas de sens à la
+  // garder après coup dans un historique général de navigation.
+  let toastUndo = null;      // fonction à appeler, ou null
+  let toastUndoLabel = '';
+  // `opts.undo` : fonction rappelée au clic sur le bouton « Annuler » du toast (optionnel).
+  // `opts.undoLabel` : libellé du bouton (par défaut « Annuler »).
+  function showToast(msg, opts) {
     toastMsg = msg;
+    toastUndo = (opts && opts.undo) || null;
+    toastUndoLabel = (opts && opts.undoLabel) || 'Annuler';
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => { toastMsg = ''; render(); }, 4000);
+    // (fix v3.50.0) La disparition du toast appelait render() — donc reconstruisait TOUT
+    // .crrav-content (toutes les cartes de la grille, refaites à neuf), alors que rien n'y
+    // a changé : seul le toast doit disparaître. Cette reconstruction inutile réactivait le
+    // même souci de stabilisation de content-visibility que la reconstruction initiale (voir
+    // renderNow), d'où « ça saute une seconde fois » une fois le toast parti. On appelle
+    // maintenant directement renderToastOverlay(), qui ne touche QUE le nœud du toast.
+    toastTimer = setTimeout(() => { toastMsg = ''; toastUndo = null; renderToastOverlay(); }, toastUndo ? 6000 : 4000);
   }
 
   // Tonalité déduite du glyphe en tête de message (voir showToast ci-dessus — tous les
@@ -15351,6 +15587,22 @@
         el.classList.add('bump');
       }
     }
+    // (fix v3.49.0) Bouton « Annuler » optionnel — posé/retiré au besoin plutôt que
+    // recréé à chaque passage, pour ne pas perdre le focus clavier dessus entre deux
+    // rendus rapprochés.
+    let undoBtn = el.querySelector('.crrav-toast-undo');
+    if (toastUndo) {
+      if (!undoBtn) {
+        undoBtn = document.createElement('button');
+        undoBtn.type = 'button';
+        undoBtn.className = 'crrav-toast-undo';
+        undoBtn.dataset.toastUndo = '1';
+        el.appendChild(undoBtn);
+      }
+      if (undoBtn.textContent !== toastUndoLabel) undoBtn.textContent = toastUndoLabel;
+    } else if (undoBtn) {
+      undoBtn.remove();
+    }
   }
 
   function renderNow() {
@@ -15370,9 +15622,20 @@
       if (!ae || !content.contains(ae) || typeof ae.selectionStart !== 'number') return null;
       return { cls: ae.className, start: ae.selectionStart, end: ae.selectionEnd };
     })();
-    // Le DOM est intégralement remplacé : sans ça, un rafraîchissement de fond pendant
-    // que l'utilisateur fait défiler une longue liste le renvoyait en haut de page.
-    const prevScroll = content.scrollTop;
+    // (fix v3.50.0) Le VRAI conteneur défilant est `root` (.crrav-overlay, overflow-y:auto,
+    // position:fixed) — PAS .crrav-content, qui n'a aucun overflow propre. `content.scrollTop`
+    // valait donc quasiment toujours 0 : la « restauration » ci-dessous ne restaurait rien
+    // de réel, elle laissait le navigateur se débrouiller seul. Ça fonctionnait à peu près
+    // tant que la hauteur totale ne bougeait pas d'un rendu à l'autre — mais content.innerHTML
+    // étant intégralement reconstruit (TOUTES les cartes recréées comme neuves), le mécanisme
+    // .crrav-card{content-visibility:auto} réévalue son placeholder de taille (320px, voir
+    // contain-intrinsic-size) avant de se stabiliser sur la vraie hauteur, ce qui pouvait
+    // décaler root.scrollTop entre-temps — perçu comme « la vue saute » (ignorer/ajouter une
+    // pépite depuis Découverte, ou même juste la disparition du toast qui reconstruit tout
+    // sans que rien n'ait vraiment changé dans la grille). On sauve/restaure maintenant
+    // l'élément qui défile RÉELLEMENT.
+    const scrollEl = root; // .crrav-overlay
+    const prevScroll = scrollEl.scrollTop;
     // La sheet Réglages a son PROPRE scroll (.crrav-sheetbody, voir plus bas dans ce
     // fichier) : sans le sauver/restaurer séparément, tout forceRender() pendant qu'elle
     // est ouverte (ex. clic sur un bouton de diagnostic) la remontait en haut — agaçant
@@ -15574,7 +15837,7 @@
       + settingsSheet + `<div class="crrav-modals">${listPickerSheet}${confirmModalHtml()}</div>`;
 
     // Restauration du défilement, juste après le remplacement du DOM.
-    if (prevScroll > 0 && content.scrollHeight > content.clientHeight) content.scrollTop = prevScroll;
+    if (prevScroll > 0 && scrollEl.scrollHeight > scrollEl.clientHeight) scrollEl.scrollTop = prevScroll;
     if (prevSheetScroll > 0) {
       const sheetEl = content.querySelector('.crrav-sheetbody');
       if (sheetEl) sheetEl.scrollTop = prevSheetScroll;
@@ -15593,8 +15856,8 @@
       const saved = (SESSION_NAV.scrollPos || {})[scrollRestorePending];
       if (!saved) {
         scrollRestorePending = null;
-      } else if (content.scrollHeight > content.clientHeight) {
-        content.scrollTop = saved;
+      } else if (scrollEl.scrollHeight > scrollEl.clientHeight) {
+        scrollEl.scrollTop = saved;
         scrollRestorePending = null;
       }
       // sinon : contenu pas encore assez grand (chargement en cours) — nouvelle tentative
@@ -15620,6 +15883,17 @@
     // data-countup dans les templates (list.length, totalRemaining, events.length, in7…) —
     // les stats formatées par fmtDuration ("12h 30") en sont volontairement exclues.
     animateCountUps(content);
+
+    // (fix v3.53.0) Transition de changement d'onglet — voir lastRenderedTab plus bas
+    // (déclaré près de countupPrevValues) pour l'explication du reflow forcé. Ne se déclenche
+    // que sur un VRAI changement de STATE.tab, jamais sur un rafraîchissement de fond du même
+    // onglet (qui appelle aussi renderNow() très régulièrement).
+    if (STATE.tab !== lastRenderedTab) {
+      content.classList.remove('crrav-tabswitch');
+      void content.offsetWidth;
+      content.classList.add('crrav-tabswitch');
+      lastRenderedTab = STATE.tab;
+    }
 
     // Liens vers l'appli Crunchyroll (intent://) : sur Chromium (Edge/Chrome), un scheme
     // externe n'est routé hors du conteneur PWA standalone vers l'OS QUE sur un vrai clic
@@ -15757,6 +16031,14 @@
   // valeur directement sans relancer l'anim ; si elle a changé, on anime à partir de
   // l'ancienne valeur réelle (pas de 0) jusqu'à la nouvelle.
   const countupPrevValues = new Map();
+  // (fix v3.53.0) Petite transition fondu+glissé quand on CHANGE d'onglet (Suivi ↔
+  // Découverte ↔ Calendrier…), posée sur .crrav-content lui-même — ce nœud n'est PAS
+  // recréé à chaque render (seul son innerHTML l'est), donc retirer/reposer la classe avec
+  // un reflow forcé entre les deux (voir renderNow) la rejoue à chaque fois nécessaire,
+  // exactement comme le « bump » du toast. Un simple rafraîchissement de fond SANS
+  // changement d'onglet ne doit surtout PAS la rejouer — d'où ce suivi de la dernière
+  // valeur, même principe que countupPrevValues juste au-dessus.
+  let lastRenderedTab = null;
   const PREFERS_REDUCED_MOTION = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   function animateCountUp(el, target, from, duration = 700) {
     if (PREFERS_REDUCED_MOTION() || from === target) { el.textContent = String(target); return; }
@@ -15783,6 +16065,129 @@
       if (prev === target) { el.textContent = String(target); return; }
       animateCountUp(el, target, prev ?? 0);
     });
+  }
+
+  // (fix v3.51.0) Patch DOM CIBLÉ pour ignorer/ajouter une pépite depuis Découverte, au lieu
+  // du forceRender() habituel qui reconstruit .crrav-content EN ENTIER (les ~30 cartes,
+  // recréées comme neuves à chaque fois). Deux torts à ça, en plus du gâchis de travail :
+  // (1) chaque carte hors-écran retrouve son placeholder content-visibility (320px) avant de
+  // se stabiliser sur sa vraie taille, ce qui peut décaler root.scrollTop entre-temps — la
+  // cause du « ça saute » déjà en partie réglée par la restauration du bon élément de scroll
+  // (v3.50.0), mais qu'il vaut mieux ne même plus déclencher ; (2) ça coupe court à toute
+  // animation CSS en cours sur les 29 AUTRES cartes (une carte identique recréée = nouveau
+  // nœud = ré-application de tout état transitoire). Ici, UNE seule carte est détruite et
+  // recréée (data-cardid, posé sur l'<article> par discoverCard/discoverListRow) ; les 29
+  // autres nœuds DOM ne sont jamais touchés. Repli automatique sur forceRender() si la carte
+  // n'est pas dans le DOM actuel (filtrée par une recherche/un genre) ou si quoi que ce soit
+  // d'inattendu se présente — jamais de plantage silencieux, juste un rendu plus coûteux.
+  function patchDiscoverCardDOM(content, seriesId) {
+    const sel = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(seriesId) : seriesId;
+    const node = content.querySelector(`[data-cardid="${sel}"]`);
+    if (!node) return false;   // pas affichée actuellement (filtre/recherche) : rien à patcher
+    const s = STATE.discover.series.find((x) => x.id === seriesId);
+    if (!s) return false;
+    const useList = STATE.filters.view === 'list';
+    const profile = activeSimilarProfile() || buildTasteProfile();
+    const html = useList ? discoverListRow(s, profile) : discoverCard(s, profile);
+    const tmp = document.createElement('div');
+    tmp.innerHTML = html.trim();
+    const newNode = tmp.firstElementChild;
+    if (!newNode) return false;
+    node.replaceWith(newNode);
+    return true;
+  }
+
+  // Idem pour les 3 chiffres d'en-tête (trouvées / ép. à voir / temps à voir) : ne mettre à
+  // jour QUE ces nœuds-là via le mécanisme data-countup existant (animateCountUps), plutôt
+  // que de reconstruire tout .crrav-statsrow. N'existe que sur l'onglet Découverte lui-même,
+  // hors recherche globale (autre mise en page — voir renderGlobalSearch).
+  function patchDiscoverStatsDOM(content) {
+    const statsRow = content.querySelector('.crrav-statsrow .crrav-stats');
+    if (!statsRow) return;
+    const active = visibleDiscover(true, true).filter((s) => !IGNORED.has(s.id) && !STATE.addedToList.has(s.id));
+    const statEls = statsRow.querySelectorAll('.crrav-stat');
+    const bFound = statEls[0] && statEls[0].querySelector('b');
+    if (bFound) bFound.setAttribute('data-countup', String(active.length));
+    const bEp = statEls[1] && statEls[1].querySelector('b');
+    if (bEp) bEp.setAttribute('data-countup', String(active.reduce((a, s) => a + (s.episodes || 0), 0)));
+    const bDur = statEls[2] && statEls[2].querySelector('b');
+    if (bDur) bDur.textContent = fmtDuration(active.reduce((a, s) => a + (s.secTotal || 0), 0));
+    animateCountUps(statsRow);
+  }
+
+  // Point d'entrée unique appelé par toggleIgnored/handleAddToList/handleUndoAddToList côté
+  // Découverte. Renvoie true si le patch ciblé a suffi (l'appelant n'a alors PAS besoin de
+  // forceRender()) ; false si un rendu complet reste nécessaire (repli sûr).
+  function patchDiscoverAction(seriesId) {
+    if (!root) return false;
+    const content = root.querySelector('.crrav-content');
+    if (!content) return false;
+    if (!patchDiscoverCardDOM(content, seriesId)) return false;
+    // Les stats d'en-tête n'existent que sur l'onglet Découverte hors recherche globale —
+    // la carte, elle, peut aussi apparaître dans les résultats de recherche globale
+    // (renderGlobalSearch réutilise discoverCard/discoverListRow), d'où ce patch séparé.
+    if (STATE.tab === 'decouverte' && !STATE.filters.globalQ.trim()) patchDiscoverStatsDOM(content);
+    return true;
+  }
+
+  // (fix v3.52.0) Même principe que patchDiscoverAction, mais pour ignorer une série depuis
+  // Reste à voir / Hors listes / Calendrier : contrairement à Découverte, la carte doit
+  // vraiment DISPARAÎTRE ici (visibleSeries()/visibleOrphelines() partitionnent strictement
+  // actives/ignorées — comportement voulu, avec son propre panneau « Ignorées » pour
+  // annuler). Mais « disparaître » ne veut pas dire reconstruire les 50 autres cartes de la
+  // liste : un simple node.remove() sur CETTE carte suffit et évite le même travail inutile
+  // (et le même risque de re-stabilisation de content-visibility) que dans Découverte.
+  function patchRemoveCardDOM(content, seriesId) {
+    const sel = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(seriesId) : seriesId;
+    const node = content.querySelector(`[data-cardid="${sel}"]`);
+    if (!node) return false;
+    const grid = node.parentElement;
+    // Dernière carte de sa grille : on laisse forceRender() gérer la bascule vers l'état
+    // « Rien à afficher » (message + mise en page dédiée), qu'un simple retrait de nœud ne
+    // sait pas produire correctement.
+    if (grid && grid.querySelectorAll('[data-cardid]').length <= 1) return false;
+    node.remove();
+    return true;
+  }
+
+  function patchSuiviStatsDOM(content) {
+    const statsRow = content.querySelector('.crrav-statsrow .crrav-stats');
+    if (!statsRow) return;
+    const list = visibleSeries();
+    const bCount = statsRow.querySelector('[data-countup-key="suivi-series"]');
+    if (bCount) bCount.setAttribute('data-countup', String(list.length));
+    const bRemain = statsRow.querySelector('[data-countup-key="suivi-remaining"]');
+    if (bRemain) bRemain.setAttribute('data-countup', String(list.reduce((a, s) => a + s.remaining, 0)));
+    animateCountUps(statsRow);
+  }
+
+  function patchOrphanStatsDOM(content) {
+    const statsRow = content.querySelector('.crrav-statsrow .crrav-stats');
+    if (!statsRow) return;
+    const list = visibleOrphelines();
+    const bCount = statsRow.querySelector('[data-countup-key="orph-series"]');
+    if (bCount) bCount.setAttribute('data-countup', String(list.length));
+    const bRemain = statsRow.querySelector('[data-countup-key="orph-remaining"]');
+    if (bRemain) bRemain.setAttribute('data-countup', String(list.reduce((a, s) => a + s.remaining, 0)));
+    animateCountUps(statsRow);
+  }
+
+  // Point d'entrée pour le handler [data-ignore] côté watchlist/orphan — voir le pendant
+  // Découverte (patchDiscoverAction). Repli sûr (false) sur forceRender() pour Calendrier
+  // (newpremieres) : ses stats de semaine (cal-events/cal-in7/cal-behind) dépendent de
+  // notions (jours restants, retard cumulé) trop spécifiques pour un patch ciblé fiable —
+  // et pour toute recherche globale active, dont la mise en page diffère (voir
+  // renderGlobalSearch, sections avec leur propre compteur "(N)" non patché ici).
+  function patchIgnoreRemovalDOM(seriesId, source) {
+    if (source !== 'watchlist' && source !== 'orphan') return false;
+    if (STATE.filters.globalQ.trim()) return false;
+    if (!root) return false;
+    const content = root.querySelector('.crrav-content');
+    if (!content) return false;
+    if (!patchRemoveCardDOM(content, seriesId)) return false;
+    if (source === 'watchlist') patchSuiviStatsDOM(content);
+    else patchOrphanStatsDOM(content);
+    return true;
   }
 
   const refresh = () => loadAll((m) => { progressMsg = m; render(); });
@@ -15845,17 +16250,33 @@
       // (SESSION_NAV, PAS localStorage), débattu (400 ms après la fin du défilement) pour
       // ne pas écrire à chaque pixel. Rien à faire pendant une recherche globale (panneau
       // transitoire, pas d'onglet).
-      const scrollContent = root.querySelector('.crrav-content');
+      // (fix v3.50.0) Écoutait 'scroll' sur .crrav-content, qui n'a jamais eu d'overflow
+      // propre et ne défile donc jamais lui-même — c'est root (.crrav-overlay,
+      // overflow-y:auto) qui défile réellement (voir aussi renderNow ci-dessus, même
+      // confusion corrigée). Cet événement ne se déclenchait donc jamais : la position de
+      // scroll mémorisée entre onglets/sessions n'était en pratique jamais mise à jour.
       let scrollSaveTimer = null;
-      scrollContent.addEventListener('scroll', () => {
+      root.addEventListener('scroll', () => {
         clearTimeout(scrollSaveTimer);
         scrollSaveTimer = setTimeout(() => {
           if (STATE.filters.globalQ.trim()) return;
-          SESSION_NAV.scrollPos[STATE.tab] = scrollContent.scrollTop;
+          SESSION_NAV.scrollPos[STATE.tab] = root.scrollTop;
           saveSessionNav(SESSION_NAV);
         }, 400);
       }, { passive: true });
       root.addEventListener('click', (e) => {
+        // (fix v3.49.0) Bouton « Annuler » du toast (voir showToast) — en premier dans la
+        // chaîne : le toast est un enfant direct de root, hors du flux normal du contenu.
+        const toastUndoBtn = e.target.closest('[data-toast-undo]');
+        if (toastUndoBtn) {
+          e.preventDefault();
+          const fn = toastUndo;
+          toastMsg = ''; toastUndo = null;
+          clearTimeout(toastTimer);
+          render();
+          if (fn) safeCall(fn, undefined, 'toast:undo');
+          return;
+        }
         // Lien vers l'appli Crunchyroll (voir crUrl) : dans certains contextes — surtout une
         // PWA installée (« mode application »), display:standalone — un simple <a href="intent://…">
         // laissé au comportement par défaut du navigateur peut être avalé silencieusement (le
@@ -15926,8 +16347,25 @@
           const t = ign.dataset.title || 'Série';
           toggleIgnored(ign.dataset.ignore, ign.dataset.title, ign.dataset.source,
             ign.dataset.poster, ign.dataset.synopsis);
+          // (fix v3.49.0) Effet « wahou » réservé à Découverte (voir discoverCard/
+          // discoverListRow) — un ignore depuis Reste à voir/Hors listes/Calendrier n'a pas
+          // cette animation, la carte y disparaît tout de suite (comportement inchangé).
+          // (fix v3.51.0/v3.52.0) Patch DOM ciblé partout où c'est possible — ne touche QUE
+          // cette carte (+ les stats concernées), au lieu de reconstruire toute la liste.
+          // Découverte la garde en place (patchDiscoverAction) ; Reste à voir/Hors listes la
+          // retirent vraiment mais sans toucher aux autres cartes (patchIgnoreRemovalDOM).
+          // Repli sûr sur forceRender() pour Calendrier, la recherche globale, ou si la
+          // carte n'est pour une raison ou une autre pas dans le DOM.
+          let patched = false;
+          if (ign.dataset.source === 'discover') {
+            if (!wasIgnored) discoverFlourish = { id: ign.dataset.ignore, type: 'ignore' };
+            patched = patchDiscoverAction(ign.dataset.ignore);
+          } else {
+            patched = patchIgnoreRemovalDOM(ign.dataset.ignore, ign.dataset.source);
+          }
           showToast(wasIgnored ? `↺ « ${t} » réaffichée` : `🙈 « ${t} » ignorée — plus jamais proposée`);
-          forceRender(); return;
+          if (!patched) forceRender();
+          return;
         }
         // (43) Puce de filtre par source dans le panneau « Séries ignorées » (voir
         // ignoredPanel) — indépendant de data-act pour ne pas alourdir cette longue chaîne.
