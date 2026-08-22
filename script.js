@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.39.0
+// @version      3.45.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -13,6 +13,8 @@
 // @grant        GM.xmlHttpRequest
 // @connect      anilist.co
 // @connect      graphql.anilist.co
+// @connect      www.crunchyroll.com
+// @connect      crunchyroll.com
 // @updateURL    https://raw.githubusercontent.com/GeoffreyOfficial/Crunchy/refs/heads/main/script.js
 // @downloadURL  https://raw.githubusercontent.com/GeoffreyOfficial/Crunchy/refs/heads/main/script.js
 // @supportURL   https://github.com/GeoffreyOfficial/Crunchy/issues
@@ -26,7 +28,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.39.0';
+  const SCRIPT_VERSION = '3.45.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -356,20 +358,30 @@
   }
 
   async function externalFetch(url, opts = {}) {
-    // (fix v3.0.0) PAS de délai court artificiel ici : l'appelant (anilistQuery) enveloppe
-    // déjà tout l'appel dans un withDeadline de 16 s — ajouter un second couperet plus court
-    // à cet étage couperait aussi des requêtes simplement LENTES (mobile en mauvaise
-    // réception) qui auraient fini par réussir, alors que le vrai bug visé (canal qui
-    // échoue tout de suite, cf. AniList bloqué sur iPhone) se résout déjà par un rejet
-    // rapide et naturel du canal cassé, sans avoir besoin d'un chrono dédié. Un canal qui
-    // resterait totalement muet (aucun callback, jamais) sans jamais rejeter reste couvert
-    // par le withDeadline de l'appelant, exactement comme avant ce correctif.
+    // (fix v3.0.0, complété v3.40.0) Le commentaire d'origine (v3.0.0) supposait que le
+    // withDeadline de 16 s de l'appelant (anilistQuery) suffisait à couvrir un canal
+    // totalement muet — FAUX en pratique : si le premier canal essayé (gm par défaut) ne
+    // rejette JAMAIS (aucun callback GM ne se déclenche, cas documenté juste ici « échoue ou
+    // reste muet pour anilist.co » sur Safari iOS), le `for` ci-dessous reste bloqué sur son
+    // premier `await` et n'atteint donc JAMAIS le `catch` qui tenterait le canal 'fetch' —
+    // le withDeadline de l'appelant abandonne alors TOUT l'appel (pas seulement le canal
+    // cassé), et comme externalChannelPreference n'a jamais pu se fixer sur 'fetch' (aucun
+    // succès), CHAQUE tentative suivante (jusqu'à 3, cf. anilistQuery) retente 'gm' en
+    // premier et rehang à nouveau : ~48 s perdus par appel, AniList ne fonctionne alors
+    // jamais sur cette plateforme. Chaque canal a donc maintenant son propre délai interne
+    // (7 s, pour rester sous les 16 s même si les deux canaux sont tentés), pour que la
+    // bascule vers 'fetch' puisse avoir lieu DANS le même appel plutôt que
+    // seulement à la tentative suivante.
     const order = externalChannelPreference === 'fetch' ? ['fetch', 'gm'] : ['gm', 'fetch'];
     let lastErr = null;
     for (const channel of order) {
       if (channel === 'gm' && !GM_XHR) continue;
       try {
-        const res = channel === 'gm' ? await gmFetch(url, opts) : await rawFetchChannel(url, opts);
+        const res = await withDeadline(
+          channel === 'gm' ? gmFetch(url, opts) : rawFetchChannel(url, opts),
+          7000,
+          `externalFetch:${channel}`
+        );
         externalChannelPreference = channel; // mémorisé : les prochains appels partent d'ici
         return res;
       } catch (e) {
@@ -379,6 +391,61 @@
       }
     }
     throw lastErr || new Error('externalFetch : aucun canal réseau disponible');
+  }
+
+  // (fix v3.40.0) Même bascule à double canal que externalFetch, mais pour crunchyroll.com
+  // lui-même. Constat terrain : sur Safari iOS (Tampermonkey/Userscripts), le fetch() émis
+  // depuis le contexte du gestionnaire de scripts vers crunchyroll.com peut soit échouer
+  // silencieusement soit rester PENDU indéfiniment (jamais de données, boucle infinie de
+  // reconnexion) — alors que GM_xmlhttpRequest (hors sandbox de la page, cookies du domaine
+  // envoyés nativement) passe très bien. Sur Firefox/Android/desktop c'est fetch() qui
+  // marche déjà très bien (ordre par défaut inchangé pour ces utilisateurs). Contrairement à
+  // externalFetch (qui compte sur le withDeadline de 16 s de l'appelant AniList), ICI chaque
+  // canal a son propre délai interne : un fetch() qui reste MUET sur Safari ne doit pas
+  // consommer tout le budget et empêcher d'essayer GM ensuite.
+  let crChannelPreference = null; // 'fetch' | 'gm' | null (pas encore déterminé)
+
+  async function crFetch(url, opts = {}) {
+    const order = crChannelPreference === 'gm' ? ['gm', 'fetch'] : ['fetch', 'gm'];
+    let lastErr = null;
+    for (const channel of order) {
+      if (channel === 'gm' && !GM_XHR) continue;
+      try {
+        const res = await withDeadline(
+          channel === 'gm' ? gmFetch(url, opts) : rawFetchChannel(url, opts),
+          12000,
+          `crFetch:${channel}`
+        );
+        crChannelPreference = channel; // mémorisé : les prochains appels partent d'ici
+        return res;
+      } catch (e) {
+        lastErr = e;
+        if (opts.signal && opts.signal.aborted) throw e;
+      }
+    }
+    throw lastErr || new Error('crFetch : aucun canal réseau disponible');
+  }
+
+  // (fix v3.41.0) Sonde de diagnostic — teste UN SEUL canal à la fois, sans bascule ni
+  // retentative, pour que le rapport affiché à l'écran (voir runFullDiagnostic) puisse dire
+  // précisément « fetch() marche / GM_xmlhttpRequest ne répond pas » plutôt qu'un simple
+  // succès/échec global qui masquerait lequel des deux est cassé sur cet appareil — utile
+  // en particulier pour diagnostiquer Safari iOS à distance, sans accès à la console.
+  async function testNetworkChannel(channel, url, opts) {
+    const t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    if (channel === 'gm' && !GM_XHR) return { ok: false, unavailable: true };
+    try {
+      const res = await withDeadline(
+        channel === 'gm' ? gmFetch(url, opts) : rawFetchChannel(url, opts),
+        6000,
+        `sonde:${channel}`
+      );
+      const ms = Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0);
+      return { ok: !!res.ok, status: res.status, ms };
+    } catch (e) {
+      const ms = Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0);
+      return { ok: false, ms, error: (e && e.message) || String(e), timedOut: /délai dépassé/.test((e && e.message) || '') };
+    }
   }
 
   // Garde-fou universel « horloge murale ». Certaines requêtes — surtout via
@@ -1178,6 +1245,38 @@
   let tokenExp = 0;            // timestamp d'expiration estimé (ms)
   let refreshing = null;      // promesse de renouvellement en cours (évite les doublons)
 
+  // (fix v3.43.0) Statistiques + historique de résilience de session, exposés dans le
+  // diagnostic à l'écran (voir runFullDiagnostic) : sur mobile, sans accès console, c'est
+  // le SEUL moyen pour Geoffrey de comprendre à distance ce qui s'est passé quand quelqu'un
+  // signale « ça ne marche pas » — combien de fois la session a été perdue, pourquoi, et
+  // combien de temps la reconnexion automatique a mis à chaque fois.
+  const TOKEN_STATS = {
+    sessionLostCount: 0,
+    lastSessionLostAt: 0,
+    lastSessionLostReason: null,
+    lastCookieHttpReached: null,  // true = le serveur a répondu (refus probable) ; false = injoignable (réseau) ; null = pas encore testé
+    recoveryStartedAt: 0,
+    recoveryTries: 0,
+    recoverySinceMs: 0,
+    lastRecoveredAt: 0,
+    lastRecoveryMs: 0,
+    lastRecoveryTries: 0,
+    recoveryLog: [],   // 10 derniers événements { at, event: 'lost'|'recovered', detail }
+  };
+  function pushRecoveryLog(event, detail) {
+    TOKEN_STATS.recoveryLog.push({ at: Date.now(), event, detail: detail || '' });
+    if (TOKEN_STATS.recoveryLog.length > 10) TOKEN_STATS.recoveryLog.shift();
+  }
+  // Format court pour les durées de reconnexion (quelques secondes à quelques minutes) —
+  // fmtDuration (déjà dans le script) est calibré pour des heures, pas adapté ici.
+  function fmtShortDuration(ms) {
+    if (!ms || ms < 0) return '0 s';
+    const s = Math.round(ms / 1000);
+    if (s < 60) return `${s} s`;
+    const m = Math.floor(s / 60), rs = s % 60;
+    return rs ? `${m} min ${rs} s` : `${m} min`;
+  }
+
   function readAuth(headers) {
     if (!headers) return null;
     return safeCall(() => {
@@ -1222,9 +1321,13 @@
   // est justement le cas au retour sur l'onglet mobile. On lit aussi expires_in pour
   // dater précisément le token.
   async function tokenFromCookie() {
+    let reached = false;
     for (const basic of ['Y3Jfd2ViOg==', 'bm9haWhkZXZtXzZpeWcwYThsMHE6']) {
       try {
-        const r = await RAW_FETCH('https://www.crunchyroll.com/auth/v1/token', {
+        // (fix v3.40.0) crFetch() bascule automatiquement sur GM_xmlhttpRequest si fetch()
+        // échoue ou reste muet (cas Safari iOS observé en boucle « Session expirée » sans
+        // jamais récupérer de données) — voir sa définition pour le détail des deux canaux.
+        const r = await crFetch('https://www.crunchyroll.com/auth/v1/token', {
           method: 'POST',
           credentials: 'include',
           headers: {
@@ -1233,16 +1336,22 @@
           },
           body: 'grant_type=etp_rt_cookie',
         });
+        reached = true;   // le serveur a répondu, quel que soit le statut — donc joignable
         if (!r.ok) continue;
         const j = await r.json();
         if (j.access_token) {
           const ttl = (j.expires_in ? j.expires_in : 300) * 1000;
           tokenExp = Date.now() + Math.max(30e3, ttl - 30e3);   // marge de 30 s
           LOG('token obtenu via /auth/v1/token (valide', Math.round(ttl / 1000), 's)');
+          TOKEN_STATS.lastCookieHttpReached = true;
           return `${j.token_type || 'Bearer'} ${j.access_token}`;
         }
       } catch (e) { safeCall.log(e, 'tokenFromCookie'); }
     }
+    // (fix v3.43.0) Distingue « le serveur a refusé » (probablement déconnecté côté site,
+    // se reconnecter manuellement sur crunchyroll.com aiderait) de « injoignable » (souci
+    // réseau, la reconnexion automatique doit suffire) — affiché dans la bannière/diagnostic.
+    TOKEN_STATS.lastCookieHttpReached = reached;
     return null;
   }
 
@@ -1328,8 +1437,10 @@
   async function pokeApp() {
     const before = sniffedToken;
     // Ces endpoints internes provoquent une requête authentifiée de l'app.
+    // (fix v3.40.0) crFetch() : si fetch() est muet/bloqué sur cette plateforme, on tente
+    // quand même via GM_xmlhttpRequest plutôt que de rester sans effet.
     safeCall(() => {
-      RAW_FETCH('https://www.crunchyroll.com/content/v2/discover/account_info', {
+      crFetch('https://www.crunchyroll.com/content/v2/discover/account_info', {
         credentials: 'include',
       }).catch(() => {});
     }, undefined, 'pokeApp');
@@ -1345,7 +1456,8 @@
   // Vérifie qu'un token fonctionne vraiment, plutôt que de le supposer valide.
   async function tokenWorks(t) {
     try {
-      const r = await RAW_FETCH('https://www.crunchyroll.com/accounts/v1/me', {
+      // (fix v3.40.0) crFetch() : voir tokenFromCookie plus haut pour le détail.
+      const r = await crFetch('https://www.crunchyroll.com/accounts/v1/me', {
         credentials: 'include',
         headers: { Authorization: t, Accept: 'application/json' },
       });
@@ -1432,14 +1544,60 @@
   // par startRecoveryLoop dès que la reconnexion réussit ou est définitivement abandonnée.
   let recoveryWaiters = [];
 
-  function markSessionLost() {
+  // (fix v3.44.0) Réveil événementiel de la boucle de reconnexion (voir startRecoveryLoop) :
+  // avant, elle sondait document.visibilityState toutes les 1,5 s pendant qu'elle patientait
+  // en arrière-plan — donc jusqu'à 1,5 s de retard perceptible entre le moment où on revient
+  // sur l'appli (ou où la connexion revient) et la vraie reprise de la tentative. Ici,
+  // visibilitychange/online (câblés dans boot()) appellent fireWake() pour réveiller la
+  // boucle IMMÉDIATEMENT ; le sondage à 1,5 s ne reste qu'un filet de secours si l'événement
+  // ne se déclenche pas (cas limite de certains navigateurs).
+  let wakeResolvers = [];
+  function waitForWake(ms) {
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = () => { if (done) return; done = true; const i = wakeResolvers.indexOf(finish); if (i >= 0) wakeResolvers.splice(i, 1); clearTimeout(timer); resolve(); };
+      const timer = setTimeout(finish, ms);
+      wakeResolvers.push(finish);
+    });
+  }
+  function fireWake() { wakeResolvers.splice(0).forEach((fn) => { try { fn(); } catch (_) { /* ignore */ } }); }
+
+  function markSessionLost(reason) {
     if (sessionLost) return;
     sessionLost = true;
+    TOKEN_STATS.sessionLostCount++;
+    TOKEN_STATS.lastSessionLostAt = Date.now();
+    TOKEN_STATS.lastSessionLostReason = reason || 'motif inconnu';
+    TOKEN_STATS.recoveryStartedAt = Date.now();
+    pushRecoveryLog('lost', reason || 'motif inconnu');
     STATE.reconnecting = true;   // bannière douce « reconnexion… » (pas l'erreur dure)
     STATE.error = null;
-    LOG('session perdue — reconnexion automatique lancée');
+    LOG('session perdue —', reason || '(motif inconnu)', '— reconnexion automatique lancée');
     safeCall(render, undefined, 'markSessionLost:render');
     startRecoveryLoop();
+  }
+
+  // (fix v3.44.0) Extrait de startRecoveryLoop pour être appelable AUSSI depuis les points de
+  // reprise ponctuels (retour au premier plan, restauration bfcache — voir boot()) : sans ça,
+  // une reconnexion réussie hors de la boucle (ex. juste au retour sur l'appli) mettait à
+  // jour le token en mémoire mais laissait la bannière « reconnexion en cours » affichée
+  // jusqu'au prochain passage de la boucle (elle-même en train de dormir) — gênant
+  // précisément dans le scénario « je quitte l'appli et je reviens dessus ».
+  function resolveSessionRecovered(tries) {
+    if (!sessionLost) return;
+    sessionLost = false; STATE.reconnecting = false; STATE.error = null;
+    const ms = Date.now() - (TOKEN_STATS.recoveryStartedAt || Date.now());
+    TOKEN_STATS.lastRecoveredAt = Date.now();
+    TOKEN_STATS.lastRecoveryMs = ms;
+    TOKEN_STATS.lastRecoveryTries = tries != null ? tries : (TOKEN_STATS.recoveryTries || 1);
+    TOKEN_STATS.recoveryTries = 0;
+    TOKEN_STATS.recoverySinceMs = 0;
+    pushRecoveryLog('recovered', `${TOKEN_STATS.lastRecoveryTries} tentative(s) en ${fmtShortDuration(ms)}`);
+    LOG('session rétablie automatiquement en', fmtShortDuration(ms));
+    safeCall(render, undefined, 'recovery:render');
+    if (root && root.style.display !== 'none') safeCall(refreshActive, undefined, 'recovery:refresh');
+    const waiters = recoveryWaiters.splice(0);
+    waiters.forEach((w) => { if (w.cleanup) w.cleanup(); if (w.timer) clearTimeout(w.timer); w.resolve(); });
   }
 
   // Met une action en attente de la reconnexion au lieu de la faire échouer tout de suite :
@@ -1448,7 +1606,14 @@
   // qui oblige à tout relancer à la main. `sa` (AbortController d'un scan, optionnel) permet
   // d'arrêter l'attente immédiatement si l'action est annulée (bouton Interrompre) pendant
   // qu'elle patiente.
-  function waitForRecovery(sa) {
+  // (fix v3.43.0) `timeoutMs` : la boucle de fond (startRecoveryLoop) retente désormais
+  // INDÉFINIMENT tant que l'onglet est visible et en ligne — plus de renoncement définitif
+  // après 20 tentatives (~90 s), qui obligeait trop vite à un rechargement manuel sur un
+  // réseau mobile capricieux. MAIS une action précise (ce scan, ce rafraîchissement) ne doit
+  // pas pour autant rester suspendue sans limite : passé ce délai, ELLE échoue proprement
+  // (erreur normale, bouton Réessayer déjà existant) — la reconnexion, elle, continue en
+  // tâche de fond, et le prochain essai de l'action réussira dès qu'elle aboutit.
+  function waitForRecovery(sa, timeoutMs = 90000) {
     return new Promise((resolve, reject) => {
       if (!sessionLost) { resolve(); return; }
       const entry = { resolve, reject };
@@ -1456,11 +1621,20 @@
         const onAbort = () => {
           const i = recoveryWaiters.indexOf(entry);
           if (i >= 0) recoveryWaiters.splice(i, 1);
+          if (entry.timer) clearTimeout(entry.timer);
           reject(new Error('interrompu pendant la reconnexion'));
         };
         if (sa.signal.aborted) { onAbort(); return; }
         sa.signal.addEventListener('abort', onAbort, { once: true });
         entry.cleanup = () => sa.signal.removeEventListener('abort', onAbort);
+      }
+      if (timeoutMs) {
+        entry.timer = setTimeout(() => {
+          const i = recoveryWaiters.indexOf(entry);
+          if (i >= 0) recoveryWaiters.splice(i, 1);
+          if (entry.cleanup) entry.cleanup();
+          reject(new Error('reconnexion toujours en cours — réessaie dans un instant'));
+        }, timeoutMs);
       }
       recoveryWaiters.push(entry);
     });
@@ -1469,36 +1643,42 @@
   // Boucle de reconnexion : réessaie de revalider le token jusqu'à ce que ça remarche, puis
   // relance ce qui était affiché ET toute action mise en pause par waitForRecovery. C'est ce
   // qui supprime le « je dois recharger la page » ET le « je dois relancer mon action ».
-  // Backoff plafonné, en pause tant que l'onglet est en arrière-plan, bascule en erreur
-  // dure (avec bouton recharger) seulement après épuisement des tentatives.
+  // (fix v3.43.0) Plus de plafond dur (avant : abandon après 20 tentatives, ~90 s, avec
+  // erreur dure imposant un rechargement manuel). Un réseau mobile — Safari iOS en
+  // particulier — peut mettre plusieurs minutes à redevenir joignable sans que la session
+  // Crunchyroll elle-même soit invalide : abandonner trop tôt causait des « morts » évitables.
+  // Ici, tant que l'onglet est visible ET que le navigateur signale une connexion, on
+  // continue d'essayer indéfiniment (recul plafonné à 20 s, donc coût réseau très faible) —
+  // en pause sinon, reprise automatique au retour au premier plan / de la connexion (voir
+  // les listeners visibilitychange et online plus bas dans boot()). Les ACTIONS individuelles
+  // en attente, elles, ont leur propre délai raisonnable (voir waitForRecovery) : ce n'est
+  // pas parce que la boucle de fond persiste que l'interface reste bloquée sans recours.
   async function startRecoveryLoop() {
     if (recovering) return;
     recovering = true;
     let tries = 0;
     try {
-      while (sessionLost && tries < 20) {
-        if (document.visibilityState !== 'visible') { await sleep(1500); continue; }
+      while (sessionLost) {
+        if (document.visibilityState !== 'visible'
+            || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
+          // (fix v3.44.0) waitForWake() : réveil immédiat sur visibilitychange/online au
+          // lieu d'un sondage à 1,5 s — voir sa définition plus haut.
+          await waitForWake(1500);
+          continue;
+        }
         tries++;
         let t = null;
         try { t = await revalidateToken(); } catch (_) {}
         if (t && await tokenWorks(t)) {
-          sessionLost = false; STATE.reconnecting = false; STATE.error = null;
-          LOG('session rétablie automatiquement après', tries, 'tentative(s)');
-          safeCall(render, undefined, 'recovery:render');
-          if (root && root.style.display !== 'none') safeCall(refreshActive, undefined, 'recovery:refresh');
-          const waiters = recoveryWaiters.splice(0);
-          waiters.forEach((w) => { if (w.cleanup) w.cleanup(); w.resolve(); });
+          resolveSessionRecovered(tries);
           return;
         }
-        await sleep(Math.min(1000 * tries, 5000));
-      }
-      if (sessionLost) {
-        STATE.reconnecting = false;
-        STATE.error = 'Session Crunchyroll perdue. Touche « Recharger la page » pour te reconnecter.';
-        safeCall(render, undefined, 'recovery:giveup');
-        const waiters = recoveryWaiters.splice(0);
-        const err = new Error('reconnexion impossible après plusieurs tentatives');
-        waiters.forEach((w) => { if (w.cleanup) w.cleanup(); w.reject(err); });
+        // Progression visible dans la bannière (tentative N, depuis Xs) et le diagnostic —
+        // sans ça, une reconnexion longue mais qui finit par aboutir ressemblait à un blocage.
+        TOKEN_STATS.recoveryTries = tries;
+        TOKEN_STATS.recoverySinceMs = Date.now() - (TOKEN_STATS.recoveryStartedAt || Date.now());
+        safeCall(render, undefined, 'recovery:progress');
+        await sleep(Math.min(1000 * tries, 20000));
       }
     } finally { recovering = false; }
   }
@@ -1507,7 +1687,7 @@
     if (!force && token && Date.now() < tokenExp) return token;
     const t = await refreshToken();
     if (t) return t;
-    markSessionLost();   // signal global + reconnexion auto : jamais d'échec muet
+    markSessionLost('aucun canal n\'a produit de jeton valide (cookie, jeton capté, stockage local, réveil de l\'appli — tous épuisés)');   // signal global + reconnexion auto : jamais d'échec muet
     await waitForRecovery(scanAbort);   // on patiente au lieu d'abandonner l'action en cours
     return ensureToken(force);
   }
@@ -1572,7 +1752,9 @@
       else { onAbort = () => { try { ctrl.abort(); } catch (_) { /* déjà fini */ } }; sa.signal.addEventListener('abort', onAbort); }
     }
     try {
-      res = await RAW_FETCH(url.toString(), {
+      // (fix v3.40.0) crFetch() : bascule GM_xmlhttpRequest si fetch() échoue/reste muet
+      // (Safari iOS) — c'est cette ligne qui charge réellement watchlist/séries/etc.
+      res = await crFetch(url.toString(), {
         credentials: 'include',
         headers: { Authorization: token, Accept: 'application/json' },
         signal: ctrl ? ctrl.signal : undefined,
@@ -1608,7 +1790,7 @@
         if (t) return api(path, params, attempt + 1);
       }
       if (sa && sa.signal.aborted) throw new Error(`401 (session) sur ${path}`);
-      markSessionLost();
+      markSessionLost(`401 persistant sur ${key} après renouvellement`);
       // On patiente jusqu'à la reconnexion au lieu d'abandonner CETTE requête : l'action qui
       // l'a déclenchée (scan Découverte, rafraîchissement…) reprend automatiquement dès que
       // la session est rétablie, sans qu'il faille la relancer à la main.
@@ -1654,7 +1836,8 @@
     const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
     const timer = ctrl ? setTimeout(() => ctrl.abort(), 20000) : null;
     try {
-      res = await RAW_FETCH(url.toString(), {
+      // (fix v3.40.0) crFetch() : même bascule que api() — voir plus haut.
+      res = await crFetch(url.toString(), {
         method,
         credentials: 'include',
         headers: {
@@ -1681,7 +1864,7 @@
         const t = await refreshToken();
         if (t) return apiWrite(path, body, attempt + 1, method);
       }
-      markSessionLost();
+      markSessionLost(`401 persistant sur écriture ${key}`);
       // Même logique que api() : on patiente jusqu'à la reconnexion plutôt que de faire
       // échouer l'écriture (ajout à une liste, note…) en cours.
       await waitForRecovery();
@@ -14022,6 +14205,92 @@
       addStep({ id: 'token', title: 'Session / jeton', status: 'err', note: e && (e.message || String(e)) });
     }
 
+    // 2bis. (fix v3.41.0) Connectivité réseau — teste CHAQUE canal séparément (fetch()
+    // direct vs GM_xmlhttpRequest), sur Crunchyroll ET AniList, sans bascule automatique
+    // ni retentative : c'est la seule façon de voir à l'écran, sur un téléphone sans accès
+    // à la console, LEQUEL des deux canaux est cassé sur cet appareil (typiquement Safari
+    // iOS où fetch() peut échouer ou rester muet). Le script bascule déjà tout seul sur le
+    // canal qui marche (crFetch/externalFetch) — cette étape sert uniquement à le montrer.
+    try {
+      const meUrl = 'https://www.crunchyroll.com/accounts/v1/me';
+      const meOpts = { credentials: 'include', headers: { Accept: 'application/json' } };
+      const aniOpts = {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ query: '{__typename}' }),
+      };
+      const [crF, crG, aniF, aniG] = await Promise.all([
+        testNetworkChannel('fetch', meUrl, meOpts),
+        testNetworkChannel('gm', meUrl, meOpts),
+        testNetworkChannel('fetch', ANILIST_URL, aniOpts),
+        testNetworkChannel('gm', ANILIST_URL, aniOpts),
+      ]);
+      const fmtTest = (t) => !t ? '⚠ non testé'
+        : t.unavailable ? '— indisponible sur ce gestionnaire de scripts'
+        : t.ok ? `✅ répond (${t.status}, ${t.ms} ms)`
+        : t.timedOut ? `⏱ muet / aucune réponse (${t.ms} ms)`
+        : `❌ ${t.error || 'échec'} (${t.ms} ms)`;
+      const crWorks = crF.ok || crG.ok;
+      const aniWorks = aniF.ok || aniG.ok;
+      const status = !crWorks ? 'err' : (!aniWorks || !crF.ok) ? 'warn' : 'ok';
+      let note;
+      if (!crWorks) {
+        note = 'Crunchyroll est injoignable par les DEUX canaux : aucune série ne peut se charger sur cet appareil. Vérifie la connexion réseau puis relance le diagnostic.';
+      } else if (!crF.ok && crG.ok) {
+        note = 'fetch() ne fonctionne pas ici, mais GM_xmlhttpRequest prend le relais automatiquement (c\'est normal sur certaines configurations Safari iOS) — les séries devraient tout de même se charger.';
+      } else if (!aniWorks) {
+        note = 'AniList est injoignable par les deux canaux : les infos complémentaires (planning, tags, notes moyennes) resteront absentes, mais Crunchyroll fonctionne normalement.';
+      }
+      addStep({
+        id: 'network', title: 'Connectivité réseau (fetch() vs GM_xmlhttpRequest)', status, note,
+        lines: [
+          ['GM_xmlhttpRequest disponible', GM_XHR ? 'oui' : 'non (repli sur fetch() uniquement)'],
+          ['Crunchyroll via fetch()', fmtTest(crF)],
+          ['Crunchyroll via GM_xmlhttpRequest', fmtTest(crG)],
+          ['Canal Crunchyroll actuellement retenu', crChannelPreference || '(pas encore déterminé)'],
+          ['AniList via fetch()', fmtTest(aniF)],
+          ['AniList via GM_xmlhttpRequest', fmtTest(aniG)],
+          ['Canal AniList actuellement retenu', externalChannelPreference || '(pas encore déterminé)'],
+        ],
+      });
+    } catch (e) {
+      addStep({ id: 'network', title: 'Connectivité réseau (fetch() vs GM_xmlhttpRequest)', status: 'err', note: e && (e.message || String(e)) });
+    }
+
+    // 2ter. (fix v3.43.0) Résilience de session — historique des pertes/reconnexions
+    // automatiques depuis le chargement de la page. Essentiel pour diagnostiquer À DISTANCE
+    // (Geoffrey n'a pas accès à la console de son ami) un token qui « se perd » : combien de
+    // fois, pourquoi, et combien de temps la reconnexion automatique a mis à chaque fois.
+    {
+      const logLines = TOKEN_STATS.recoveryLog.length
+        ? TOKEN_STATS.recoveryLog.slice().reverse().map((e) => {
+            const t = new Date(e.at).toLocaleTimeString('fr-FR');
+            const icon = e.event === 'recovered' ? '✅' : '🔴';
+            return [`${icon} ${t}`, `${e.event === 'recovered' ? 'reconnecté' : 'session perdue'} — ${e.detail}`];
+          })
+        : [['Historique', 'aucune perte de session depuis le chargement de la page']];
+      const online = (typeof navigator !== 'undefined' && 'onLine' in navigator) ? navigator.onLine : null;
+      addStep({
+        id: 'resilience', title: 'Résilience de session (récupération automatique)',
+        status: sessionLost ? 'warn' : (TOKEN_STATS.sessionLostCount ? 'ok' : 'ok'),
+        note: sessionLost
+          ? `Reconnexion en cours (tentative ${TOKEN_STATS.recoveryTries}, depuis ${fmtShortDuration(TOKEN_STATS.recoverySinceMs)}) — le script continue de réessayer tout seul en arrière-plan, sans limite, tant que l'onglet est ouvert et en ligne.`
+          : (TOKEN_STATS.sessionLostCount
+              ? `${TOKEN_STATS.sessionLostCount} perte(s) de session depuis le chargement, toutes récupérées automatiquement.`
+              : undefined),
+        lines: [
+          ['État actuel', sessionLost ? '🔄 reconnexion en cours' : '✅ connecté'],
+          ['Connexion réseau (navigateur)', online === null ? '⚠ indéterminé' : (online ? '✅ en ligne' : '❌ hors-ligne')],
+          ['Onglet visible', document.visibilityState === 'visible' ? 'oui' : 'non (arrière-plan)'],
+          ['Pertes de session (cette session du script)', String(TOKEN_STATS.sessionLostCount)],
+          ...(TOKEN_STATS.lastSessionLostReason ? [['Dernier motif de perte', TOKEN_STATS.lastSessionLostReason]] : []),
+          ...(TOKEN_STATS.lastRecoveredAt ? [['Dernière reconnexion réussie', `${new Date(TOKEN_STATS.lastRecoveredAt).toLocaleTimeString('fr-FR')} — ${TOKEN_STATS.lastRecoveryTries} tentative(s) en ${fmtShortDuration(TOKEN_STATS.lastRecoveryMs)}`]] : []),
+          ['— Historique (10 derniers événements) —', ''],
+          ...logLines,
+        ],
+      });
+    }
+
     // 3. Historique de visionnage — réutilise le diagnostic existant (mêmes requêtes).
     await runHistoryProbe();
     addStep({ id: 'history', title: 'Historique de visionnage',
@@ -14427,9 +14696,28 @@
   // (3) l'erreur de l'onglet actif, remontée en haut plutôt que noyée dans la console.
   function errorBanner() {
     if (STATE.reconnecting) {
+      // (fix v3.43.0) Progression visible (tentative N, depuis Xs) : la boucle de fond
+      // retente maintenant indéfiniment (plus de plafond dur, voir startRecoveryLoop), donc
+      // il est important que la bannière montre qu'elle avance plutôt que de sembler figée.
+      // Après quelques tentatives, un indice s'ajoute selon ce qu'on a observé la dernière
+      // fois qu'on a parlé au serveur : refus explicite (probable déconnexion côté site,
+      // se reconnecter sur crunchyroll.com aiderait) vs injoignable (souci réseau, la
+      // reconnexion automatique devrait suffire dès que la connexion revient).
+      const tries = TOKEN_STATS.recoveryTries || 0;
+      const progress = tries > 0
+        ? ` (tentative ${tries}${TOKEN_STATS.recoverySinceMs > 3000 ? ', depuis ' + fmtShortDuration(TOKEN_STATS.recoverySinceMs) : ''})`
+        : '';
+      let hint = '';
+      if (tries >= 5) {
+        if (TOKEN_STATS.lastCookieHttpReached === true) {
+          hint = `<p class="crrav-diagcard-note" style="margin:4px 0 0">Crunchyroll répond mais refuse la reconnexion — la session a peut-être expiré côté site. Un passage sur crunchyroll.com pour te reconnecter peut aider.</p>`;
+        } else if (TOKEN_STATS.lastCookieHttpReached === false) {
+          hint = `<p class="crrav-diagcard-note" style="margin:4px 0 0">Crunchyroll semble injoignable (réseau). La reconnexion continue toute seule dès que la connexion revient.</p>`;
+        }
+      }
       return `<div class="crrav-err" role="status" style="border-color:rgba(159,214,255,.45)">
-        <span>🔄 <b>Session expirée</b> — reconnexion automatique en cours…</span>
-        <button class="crrav-btn" data-act="reload">Recharger</button></div>`;
+        <span>🔄 <b>Session expirée</b> — reconnexion automatique en cours…${progress}</span>
+        <button class="crrav-btn" data-act="reload">Recharger</button>${hint}</div>`;
     }
     const err = STATE.tab === 'decouverte' ? STATE.discover.error
       : STATE.tab === 'orphelines' ? STATE.orphan.error
@@ -16428,13 +16716,22 @@
       if (document.visibilityState !== 'visible') return;
       const awayMs = hiddenAt ? Date.now() - hiddenAt : 0;
       hiddenAt = 0;
+      // (fix v3.44.0) Réveille IMMÉDIATEMENT la boucle de reconnexion si elle patientait en
+      // arrière-plan, au lieu de la laisser jusqu'à 1,5 s dans son sondage — c'est justement
+      // le scénario « je quitte l'appli et je reviens dessus » : on veut que la reprise soit
+      // instantanée, pas perceptiblement en retard.
+      fireWake();
       // Retour au premier plan. Les onglets mobiles gèlent en arrière-plan : au réveil,
       // l'estimation d'expiration n'est pas fiable et le token est souvent mort. Dès qu'on
       // s'est absenté un peu (ou qu'on approche de l'expiration estimée), on REVALIDE
       // ACTIVEMENT le token (test + renouvellement si mort) — c'est précisément ce qui
       // évite d'avoir à recharger la page à la main. Uniquement si le panneau a déjà servi.
       if (root && (awayMs > 30e3 || Date.now() >= tokenExp - 15e3)) {
-        safeCall(() => revalidateToken(), undefined, 'resume:revalidate');
+        // (fix v3.44.0) resolveSessionRecovered() ici aussi : si une reconnexion était en
+        // cours au moment où on a quitté l'appli, ce retour peut la faire aboutir tout de
+        // suite — sans ça, le token en mémoire était à jour mais la bannière « reconnexion
+        // en cours » restait affichée jusqu'au prochain passage de la boucle de fond.
+        safeCall(() => { revalidateToken().then((t) => { if (t) resolveSessionRecovered(); }); }, undefined, 'resume:revalidate');
       }
       if (!root || root.style.display === 'none' || STATE.tab !== 'suivi' || STATE.loading) return;
       if (STATE.lastSync && Date.now() - STATE.lastSync.getTime() > CFG.refreshMinutes * 60e3) refresh();
@@ -16442,7 +16739,23 @@
     // Restauration depuis le cache bfcache (navigation arrière/avant, fréquente sur mobile) :
     // pageshow.persisted est vrai et aucun visibilitychange n'est garanti.
     window.addEventListener('pageshow', (e) => {
-      if (e && e.persisted && root) safeCall(() => revalidateToken(), undefined, 'pageshow:revalidate');
+      fireWake();
+      if (e && e.persisted && root) {
+        safeCall(() => { revalidateToken().then((t) => { if (t) resolveSessionRecovered(); }); }, undefined, 'pageshow:revalidate');
+      }
+    });
+
+    // (fix v3.43.0, complété v3.44.0) Sur mobile, le passage Wi-Fi → 4G (ou une coupure
+    // ponctuelle) est fréquent. fireWake() réveille la boucle de reconnexion sans délai —
+    // avant, elle ne revoyait navigator.onLine que via son sondage à 1,5 s.
+    window.addEventListener('online', () => {
+      LOG('connexion réseau rétablie');
+      fireWake();
+      if (sessionLost) safeCall(() => startRecoveryLoop(), undefined, 'online:recover');
+      else safeCall(() => revalidateToken(), undefined, 'online:revalidate');
+    });
+    window.addEventListener('offline', () => {
+      LOG('connexion réseau perdue (hors-ligne) — la reconnexion automatique patiente');
     });
 
     // (17) Le token Crunchyroll expire en ~5 min. Jusqu'ici on ne le renouvelait
@@ -16493,9 +16806,22 @@
           'expire dans (s)': tokenExp ? Math.round((tokenExp - Date.now()) / 1000) : '—',
           'token capté de la page': sniffedToken ? 'oui' : 'non',
           'token actuel valide ?': token ? (await tokenWorks(token) ? '✅ oui' : '❌ non') : '—',
+          'canal réseau Crunchyroll': crChannelPreference || '(pas encore déterminé)',
+          'canal réseau AniList': externalChannelPreference || '(pas encore déterminé)',
+          'GM_xmlhttpRequest disponible ?': GM_XHR ? 'oui' : 'non',
+          'session actuellement perdue ?': sessionLost ? `oui (tentative ${TOKEN_STATS.recoveryTries})` : 'non',
+          'pertes de session (cette session)': TOKEN_STATS.sessionLostCount,
+          'dernier motif de perte': TOKEN_STATS.lastSessionLostReason || '—',
+          'en ligne (navigator.onLine) ?': (typeof navigator !== 'undefined' && 'onLine' in navigator) ? navigator.onLine : '—',
         };
         console.log('%c[reste-à-voir] état du token', 'color:#f47521;font-weight:bold');
         console.table(info);
+        if (TOKEN_STATS.recoveryLog.length) {
+          console.log('%c[reste-à-voir] historique des reconnexions', 'color:#f47521;font-weight:bold');
+          console.table(TOKEN_STATS.recoveryLog.map((e) => ({
+            heure: new Date(e.at).toLocaleTimeString('fr-FR'), événement: e.event, détail: e.detail,
+          })));
+        }
         LOG('test du renouvellement par cookie…');
         const c = await tokenFromCookie();
         console.log('  /auth/v1/token (cookie) :', c ? (await tokenWorks(c) ? '✅ fonctionne' : '⚠ renvoyé mais invalide') : '❌ refusé');
