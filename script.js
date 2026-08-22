@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.45.0
+// @version      3.48.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -28,7 +28,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.45.0';
+  const SCRIPT_VERSION = '3.48.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -7365,16 +7365,35 @@
     return [...set].sort((a, b) => a.localeCompare(b, 'fr'));
   }
 
-  function visibleDiscover() {
+  // (fix v3.47.0) `includeIgnored` : par défaut (false), comportement inchangé — utilisé
+  // par « Tout ignorer » (ignore-all-discover) qui a besoin du lot ACTIF (hors ignorées)
+  // pour son compte et son action en masse. renderDecouverte(), lui, appelle avec `true` :
+  // ignorer une pépite ne la retire PLUS de la grille tout de suite (voir plus bas) — elle
+  // reste à sa place, grisée, jusqu'à ce qu'on relance soi-même un dé. Avant, la retirer
+  // faisait « sauter » la grille et remonter d'autres cartes du même lot déjà chargées,
+  // donnant l'impression trompeuse que de nouvelles pépites étaient chargées automatiquement.
+  // (fix v3.47.0, complété v3.48.0) `includeIgnored`/`includeAdded` : par défaut (false),
+  // comportement inchangé — utilisé par « Tout ignorer » (ignore-all-discover) qui a besoin
+  // du lot ACTIF (hors ignorées ET hors déjà ajoutées) pour son compte et son action en
+  // masse. renderDecouverte(), lui, appelle avec (true, true) : ni ignorer ni ajouter à une
+  // liste ne retire plus la carte de la grille tout de suite — elle reste à sa place,
+  // marquée, jusqu'à ce qu'on relance soi-même un dé. Avant, la retirer faisait « sauter »
+  // la grille et remonter d'autres cartes du même lot déjà chargées, donnant l'impression
+  // trompeuse que de nouvelles pépites étaient chargées automatiquement.
+  function visibleDiscover(includeIgnored, includeAdded) {
     const { discoverQ, discoverSort, discoverCatsIn, discoverCatsInMode, discoverCatsEx } = STATE.filters;
 
     let list = STATE.discover.series;
 
-    // Filet : ignorer une pépite la fait disparaître tout de suite, sans relance.
-    list = list.filter((s) => !IGNORED.has(s.id));
-    // Idem pour un ajout à une liste : la série vient d'entrer dans une Crunchylist,
-    // elle n'a donc plus rien à faire dans Découverte (qui montre le hors-listes).
-    list = list.filter((s) => !STATE.addedToList.has(s.id));
+    if (!includeIgnored) {
+      // Filet : ignorer une pépite la fait disparaître tout de suite, sans relance.
+      list = list.filter((s) => !IGNORED.has(s.id));
+    }
+    if (!includeAdded) {
+      // Idem pour un ajout à une liste : la série vient d'entrer dans une Crunchylist,
+      // elle n'a donc plus rien à faire dans Découverte (qui montre le hors-listes).
+      list = list.filter((s) => !STATE.addedToList.has(s.id));
+    }
 
     // On garde d'abord, on exclut ensuite : « uniquement sport, mais pas ecchi » a un sens.
     // Deux modes pour le « garder » : 'any' (OR, filtre manuel — cocher plusieurs genres
@@ -8580,7 +8599,14 @@
     // et .crrav-fresh) : un même Set partagé, puisque c'est la même classe .crrav-card.
     const fresh = !cardsAnimatedOnce.has(s.id);
     if (fresh) cardsAnimatedOnce.add(s.id);
-    return `<article class="crrav-card${fresh ? ' crrav-fresh' : ''}${sig.lead ? ' crrav-sig crrav-sig-' + sig.lead : ''}${sig.legendary ? ' crrav-legendary' : sig.notable ? ' crrav-notable' : ''}">
+    // (fix v3.47.0/v3.48.0) Une pépite ignorée OU déjà ajoutée à une liste reste affichée
+    // (voir visibleDiscover), légèrement grisée. Le bouton ignorer reste actif dans les
+    // deux cas (un second appui la réaffiche) ; addListBtn gère déjà lui-même son état
+    // « ✓ Ajoutée » (désactivé), donc on le garde tel quel plutôt que de le masquer.
+    const ignored = IGNORED.has(s.id);
+    const added = STATE.addedToList.has(s.id);
+    const doneCls = ignored ? ' crrav-card-ignored' : added ? ' crrav-card-added' : '';
+    return `<article class="crrav-card${fresh ? ' crrav-fresh' : ''}${doneCls}${sig.lead ? ' crrav-sig crrav-sig-' + sig.lead : ''}${sig.legendary ? ' crrav-legendary' : sig.notable ? ' crrav-notable' : ''}">
       <div class="crrav-thumb">
         <a class="crrav-cover" href="${seriesUrl}">
           ${s.poster ? `<img loading="lazy" crossorigin="anonymous" src="${s.poster}" alt="" onerror="this.removeAttribute(&quot;crossorigin&quot;);this.src=this.src">` : ''}
@@ -8589,7 +8615,7 @@
         ${sig.legendary ? `<span class="crrav-legribbon" title="Score pépite élevé (voir Réglages → Découverte) : une pépite en or">✨ Légendaire</span>`
           : sig.notable ? `<span class="crrav-notaribbon" title="Score pépite au-dessus du seuil « notable » (voir Réglages → Découverte)">◆ Notable</span>` : ''}
         ${ignoreBtn(s, 'discover')}
-        ${addListBtn(s)}
+        ${ignored ? '' : addListBtn(s)}
         ${synopsis}
       </div>
       <div class="crrav-body">
@@ -8620,7 +8646,12 @@
     // ça libère une ligne pour le début du résumé, qui compte plus ici pour juger d'une
     // pépite jamais vue. Le bouton « i » reste là pour le lire en entier.
     const metaLine = cats.length ? `${info} · ${cats.join(', ')}` : info;
-    return `<article class="crrav-lrow crrav-lrow-discover${sig.lead ? ' crrav-sig crrav-sig-' + sig.lead : ''}${sig.legendary ? ' crrav-legendary' : sig.notable ? ' crrav-notable' : ''}">
+    // (fix v3.47.0/v3.48.0) .crrav-lrow-ignored/.crrav-lrow-added : la pépite reste à sa
+    // place (voir visibleDiscover) plutôt que de disparaître et faire sauter la liste.
+    const ignored = IGNORED.has(s.id);
+    const added = STATE.addedToList.has(s.id);
+    const doneCls = ignored ? ' crrav-lrow-ignored' : added ? ' crrav-lrow-added' : '';
+    return `<article class="crrav-lrow crrav-lrow-discover${doneCls}${sig.lead ? ' crrav-sig crrav-sig-' + sig.lead : ''}${sig.legendary ? ' crrav-legendary' : sig.notable ? ' crrav-notable' : ''}">
       <a class="crrav-lthumb" href="${seriesUrl}">
         ${s.poster ? `<img loading="lazy" crossorigin="anonymous" src="${s.poster}" alt="" onerror="this.removeAttribute(&quot;crossorigin&quot;);this.src=this.src">` : ''}
         ${sig.legendary ? `<span class="crrav-legribbon crrav-legribbon-sm" title="Score pépite élevé (voir Réglages → Découverte) : une pépite en or">✨</span>`
@@ -8640,7 +8671,7 @@
       </div>
       <div class="crrav-lactions">
         ${ignoreBtn(s, 'discover')}
-        ${addListBtn(s)}
+        ${ignored ? '' : addListBtn(s)}
       </div>
     </article>`;
   }
@@ -9656,6 +9687,16 @@
      couvrant toute la ligne et interceptant les clics n'importe où dessus. On le neutralise ici. */
   .crrav-lactions .crrav-addlist::before{content:none}
   .crrav-lrow-discover.crrav-lrow-ignored{opacity:.72}
+  .crrav-lrow-discover.crrav-lrow-added{opacity:.72}
+  /* (fix v3.47.0) Équivalent grille de .crrav-lrow-ignored ci-dessus : une pépite ignorée
+     reste affichée à sa place (voir visibleDiscover), grisée et sans le bouton d'ajout —
+     un simple coup d'œil suffit à voir ce qu'on a déjà écarté avant de relancer un dé. */
+  .crrav-card.crrav-card-ignored{opacity:.5}
+  .crrav-card.crrav-card-ignored .crrav-ignore{opacity:1}
+  /* (fix v3.48.0) Même traitement pour une pépite déjà ajoutée à une liste : reste à sa
+     place (addListBtn affiche déjà son propre état « ✓ Ajoutée » désactivé). */
+  .crrav-card.crrav-card-added{opacity:.6}
+  .crrav-card.crrav-card-added .crrav-ignore{opacity:1}
   /* Petit téléphone : vignette et gaps resserrés, résumé réduit à 1 ligne pour ne pas
      faire déborder la ligne en hauteur ni pousser les boutons d'action hors champ. */
   @media(max-width:600px){
@@ -12332,7 +12373,13 @@
   function renderDecouverte() {
     const D = STATE.discover;
     const f = STATE.filters;
-    const list = visibleDiscover();
+    // (fix v3.47.0/v3.48.0) includeIgnored=true, includeAdded=true : ni ignorer ni ajouter
+    // à une liste ne retire plus la carte de la grille tout de suite — voir visibleDiscover()
+    // et discoverCard()/discoverListRow() pour le détail. `active` (hors ignorées ET hors
+    // déjà ajoutées) sert aux stats et aux états vides, pour qu'ils restent fidèles à ce qui
+    // compte vraiment.
+    const list = visibleDiscover(true, true);
+    const active = list.filter((s) => !IGNORED.has(s.id) && !STATE.addedToList.has(s.id));
     const cats = discoverCategories();
     // Bandeau « Proches de X » : affiché UNIQUEMENT tant que le filtre genre correspond encore
     // à la série source. Dès que l'utilisateur touche aux chips, le contexte n'est plus fidèle,
@@ -12401,9 +12448,9 @@
         ${D.warning ? `<p class="crrav-warn">${escapeHtml(D.warning)}</p>` : ''}
         <div class="crrav-statsrow">
           <div class="crrav-stats">
-            <div class="crrav-stat"><b data-countup="${list.length}" data-countup-key="discover-series">${list.length}</b><small>trouvées</small></div>
-            <div class="crrav-stat hot"><b data-countup="${list.reduce((a, s) => a + (s.episodes || 0), 0)}" data-countup-key="discover-episodes">${list.reduce((a, s) => a + (s.episodes || 0), 0)}</b><small>ép. à voir</small></div>
-            <div class="crrav-stat"><b>${fmtDuration(list.reduce((a, s) => a + (s.secTotal || 0), 0))}</b><small>à voir</small></div>
+            <div class="crrav-stat"><b data-countup="${active.length}" data-countup-key="discover-series">${active.length}</b><small>trouvées</small></div>
+            <div class="crrav-stat hot"><b data-countup="${active.reduce((a, s) => a + (s.episodes || 0), 0)}" data-countup-key="discover-episodes">${active.reduce((a, s) => a + (s.episodes || 0), 0)}</b><small>ép. à voir</small></div>
+            <div class="crrav-stat"><b>${fmtDuration(active.reduce((a, s) => a + (s.secTotal || 0), 0))}</b><small>à voir</small></div>
           </div>
           <select class="crrav-select crrav-select-compact" data-act="sort" data-scope="discover">
             <optgroup label="Par pertinence">
@@ -14205,15 +14252,28 @@
       addStep({ id: 'token', title: 'Session / jeton', status: 'err', note: e && (e.message || String(e)) });
     }
 
-    // 2bis. (fix v3.41.0) Connectivité réseau — teste CHAQUE canal séparément (fetch()
-    // direct vs GM_xmlhttpRequest), sur Crunchyroll ET AniList, sans bascule automatique
-    // ni retentative : c'est la seule façon de voir à l'écran, sur un téléphone sans accès
-    // à la console, LEQUEL des deux canaux est cassé sur cet appareil (typiquement Safari
-    // iOS où fetch() peut échouer ou rester muet). Le script bascule déjà tout seul sur le
-    // canal qui marche (crFetch/externalFetch) — cette étape sert uniquement à le montrer.
+    // 2bis. (fix v3.41.0, corrigé v3.46.0) Connectivité réseau — teste CHAQUE canal
+    // séparément (fetch() direct vs GM_xmlhttpRequest), sur Crunchyroll ET AniList, sans
+    // bascule automatique ni retentative : c'est la seule façon de voir à l'écran, sur un
+    // téléphone sans accès à la console, LEQUEL des deux canaux est cassé sur cet appareil
+    // (typiquement Safari iOS où fetch() peut échouer ou rester muet). Le script bascule
+    // déjà tout seul sur le canal qui marche (crFetch/externalFetch) — cette étape sert
+    // uniquement à le montrer.
+    //
+    // (fix v3.46.0) FAUX NÉGATIF corrigé : ce test appelait /accounts/v1/me SANS l'en-tête
+    // Authorization (contrairement à tokenWorks()/api(), qui l'envoient toujours) — l'API
+    // répondait donc 401 sur les DEUX canaux à coup sûr, même quand tout fonctionne
+    // réellement (observé en usage normal). Un 401 ici ne prouve rien de cassé : le serveur
+    // A RÉPONDU, donc le canal réseau est bon — c'est juste l'appel de TEST qui n'était pas
+    // authentifié. On envoie maintenant le jeton en mémoire s'il y en a un (comme le vrai
+    // trafic), et on distingue clairement « injoignable » (aucune réponse, vrai problème)
+    // de « répond mais refuse » (serveur joint, juste pas authentifié pour CE test).
     try {
       const meUrl = 'https://www.crunchyroll.com/accounts/v1/me';
-      const meOpts = { credentials: 'include', headers: { Accept: 'application/json' } };
+      const meOpts = {
+        credentials: 'include',
+        headers: token ? { Authorization: token, Accept: 'application/json' } : { Accept: 'application/json' },
+      };
       const aniOpts = {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
@@ -14225,17 +14285,25 @@
         testNetworkChannel('fetch', ANILIST_URL, aniOpts),
         testNetworkChannel('gm', ANILIST_URL, aniOpts),
       ]);
+      // reachable() : le serveur a répondu (2xx OU 401/403/etc.) — donc le CANAL RÉSEAU
+      // fonctionne, que ce test précis soit authentifié ou non. Seuls un délai dépassé ou
+      // une exception réseau signalent un canal réellement cassé.
+      const reachable = (t) => !!t && (t.ok || t.status != null);
       const fmtTest = (t) => !t ? '⚠ non testé'
         : t.unavailable ? '— indisponible sur ce gestionnaire de scripts'
         : t.ok ? `✅ répond (${t.status}, ${t.ms} ms)`
         : t.timedOut ? `⏱ muet / aucune réponse (${t.ms} ms)`
+        : t.status != null ? `⚠ répond mais refuse (${t.status}, ${t.ms} ms)`
         : `❌ ${t.error || 'échec'} (${t.ms} ms)`;
-      const crWorks = crF.ok || crG.ok;
+      const crReachable = reachable(crF) || reachable(crG);
+      const crAuthOk = crF.ok || crG.ok;
       const aniWorks = aniF.ok || aniG.ok;
-      const status = !crWorks ? 'err' : (!aniWorks || !crF.ok) ? 'warn' : 'ok';
+      const status = !crReachable ? 'err' : (!aniWorks || !crAuthOk) ? 'warn' : 'ok';
       let note;
-      if (!crWorks) {
-        note = 'Crunchyroll est injoignable par les DEUX canaux : aucune série ne peut se charger sur cet appareil. Vérifie la connexion réseau puis relance le diagnostic.';
+      if (!crReachable) {
+        note = 'Crunchyroll est injoignable par les DEUX canaux (aucune réponse, ni 200 ni erreur HTTP) : aucune série ne peut se charger sur cet appareil. Vérifie la connexion réseau puis relance le diagnostic.';
+      } else if (!crAuthOk && !token) {
+        note = 'Crunchyroll répond (canal réseau OK), mais ce test n\'a pas pu s\'authentifier faute de jeton en mémoire au moment du diagnostic — voir l\'étape « Session / jeton » ci-dessus pour le vrai statut de connexion.';
       } else if (!crF.ok && crG.ok) {
         note = 'fetch() ne fonctionne pas ici, mais GM_xmlhttpRequest prend le relais automatiquement (c\'est normal sur certaines configurations Safari iOS) — les séries devraient tout de même se charger.';
       } else if (!aniWorks) {
@@ -14245,6 +14313,7 @@
         id: 'network', title: 'Connectivité réseau (fetch() vs GM_xmlhttpRequest)', status, note,
         lines: [
           ['GM_xmlhttpRequest disponible', GM_XHR ? 'oui' : 'non (repli sur fetch() uniquement)'],
+          ['Jeton envoyé pour ce test', token ? 'oui (jeton en mémoire)' : 'non (aucun jeton en mémoire pour l\'instant)'],
           ['Crunchyroll via fetch()', fmtTest(crF)],
           ['Crunchyroll via GM_xmlhttpRequest', fmtTest(crG)],
           ['Canal Crunchyroll actuellement retenu', crChannelPreference || '(pas encore déterminé)'],
