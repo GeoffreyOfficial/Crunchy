@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.72.0
+// @version      3.74.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -28,7 +28,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.72.0';
+  const SCRIPT_VERSION = '3.74.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -14455,17 +14455,33 @@
         d.airing = target.airing;
         d.total = target.total;
         d.settingOn = !!CFG.anilistSchedule;
+        // (fix) aniPickMatch départage deux fiches AniList au titre quasi identique (ex.
+        // plusieurs saisons d'une même franchise) via s.lastAired.air — rempli pour les
+        // séries suivies (buildSeriesEntry) mais ABSENT des fiches Découverte, qui n'ont
+        // que .maxAir (voir finalResults). Sans ce remaillage, le diagnostic perdait ce
+        // départage pour toute fiche testée depuis Découverte et pouvait ainsi accuser à
+        // tort le mauvais matching (alors que le VRAI calcul de Découverte, lui, construit
+        // bien ce lastAired — voir anilistEnrichWithFallback / sLike) : un faux négatif du
+        // diagnostic, pas forcément un bug du calcul réel.
+        const diagTarget = target.lastAired ? target
+          : { ...target, lastAired: target.maxAir ? { air: target.maxAir } : null };
         const o = cacheReadRaw('anilist:' + target.id);
-        d.cache = o ? { av: o.v && o.v.av, matched: o.v && o.v.matched,
-          planned: o.v && o.v.plannedTotal, ageMin: Math.round((Date.now() - o.ts) / 60000) } : null;
+        d.cache = o ? { av: o.v && o.v.av, matched: o.v && o.v.matched, aniId: o.v && o.v.aniId,
+          meanScore: o.v && o.v.meanScore, planned: o.v && o.v.plannedTotal, ageMin: Math.round((Date.now() - o.ts) / 60000) } : null;
+        // (diag) target EST l'objet réellement utilisé par la carte affichée (référence
+        // partagée avec STATE.series / STATE.discover.series, pas une copie) — comparer
+        // son aniScore actuel au meanScore du cache/test permet de distinguer un calcul
+        // qui n'a jamais tourné (les deux à null) d'un calcul fait mais pas répercuté à
+        // l'affichage (cache/test ont une valeur, target.aniScore reste null).
+        d.liveOnCard = { aniMatched: !!target.aniMatched, aniScore: target.aniScore ?? null };
         let media = null;
         try {
           const res = await anilistSearch(target.title);
           media = res.media; d.fetch = 'ok'; anilistClearCooldown(); d.terms = res.terms; d.perTerm = res.perTerm;
         } catch (e) { d.fetch = 'échec'; d.fetchError = (e && (e.message || String(e))) || 'inconnue'; d.fetchStatus = (e && e.httpStatus) || null; }
         if (media) {
-          let best = aniPickMatch(media, target);   // remplit __titleScore
-          let scoredAgainst = target;
+          let best = aniPickMatch(media, diagTarget);   // remplit __titleScore
+          let scoredAgainst = diagTarget;
           if (!best) {
             const enTitle = await getSeriesEnglishTitle(target.id);
             d.enTitle = enTitle || '(aucun titre anglais renvoyé par Crunchyroll)';
@@ -14475,7 +14491,7 @@
                 d.enTerms = res2.terms;
                 const seen = new Set(media.map((m) => m.id));
                 for (const m of res2.media) if (!seen.has(m.id)) { seen.add(m.id); media.push(m); }
-                scoredAgainst = { ...target, title: enTitle };
+                scoredAgainst = { ...diagTarget, title: enTitle };
                 best = aniPickMatch(media, scoredAgainst);
               } catch (e) { d.enFetchError = (e && (e.message || String(e))) || 'inconnue'; }
             }
@@ -14487,9 +14503,9 @@
             score: (m.__titleScore || 0).toFixed(2), chosen: !!(best && m.id === best.id),
           }));
           if (best) {
-            const sch = computeAniSchedule(best, target);
+            const sch = computeAniSchedule(best, diagTarget);
             d.match = aniPrimaryTitle(best);
-            d.matchedVia = scoredAgainst === target ? 'titre affiché' : 'titre anglais (repli CR)';
+            d.matchedVia = scoredAgainst === diagTarget ? 'titre affiché' : 'titre anglais (repli CR)';
             // (diag) id + meanScore de la fiche RÉELLEMENT choisie : permet de vérifier
             // directement, ex. via https://anilist.co/anime/<id>, que la bonne saison/fiche
             // a été retenue, et si le meanScore est vraiment absent côté AniList à l'instant
@@ -14601,7 +14617,9 @@
     techLines.push(['Vus/total CR', d.total]);
     techLines.push(['Réglage AniList', d.settingOn ? 'activé' : 'DÉSACTIVÉ ⚠']);
     if (d.match) techLines.push(['Épisodes datés AniList', d.schedNodes ?? 0]);
-    if (d.cache) techLines.push(['Cache AniList', `format av${d.cache.av ?? '?'} · ${d.cache.matched ? 'match' : 'no-match'} · ${d.cache.ageMin} min`]);
+    if (d.liveOnCard) techLines.push(['Sur la carte en ce moment', `matched=${d.liveOnCard.aniMatched} · aniScore=${d.liveOnCard.aniScore ?? 'null'}`]);
+    if (d.cache) techLines.push(['Cache AniList', `format av${d.cache.av ?? '?'} · ${d.cache.matched ? 'match' : 'no-match'}${
+      d.cache.matched ? ` (#${d.cache.aniId ?? '?'}, meanScore ${d.cache.meanScore ?? 'null'})` : ''} · ${d.cache.ageMin} min`]);
     const techBlock = `<details class="crrav-diagdetails"><summary>Détails techniques</summary>
       <div class="crrav-diag">${techLines.map(([k, v]) => line(k, v)).join('')}</div>
     </details>`;
