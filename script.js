@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.68.0
+// @version      3.69.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -28,7 +28,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.68.0';
+  const SCRIPT_VERSION = '3.69.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -4477,7 +4477,18 @@
   // plus long ici, c'est aussi moins de scans Découverte qui retéléchargent en boucle les
   // mêmes séries croisées plusieurs fois.
   function anilistTtlMs(v) {
-    return ((v && v.anilistStatus === 'RELEASING') ? 12 : 24 * 90) * 3600e3;
+    if (v && v.anilistStatus === 'RELEASING') return 12 * 3600e3;
+    // (fix) Fiche matchée mais SANS meanScore connu à l'époque du fetch : AniList
+    // n'affiche une note communautaire qu'à partir d'un certain nombre de votes, qui
+    // peut être atteint APRÈS coup — y compris pour une série déjà terminée. Avec le
+    // TTL « terminée » de 90 jours ci-dessous, un tel null pouvait rester figé en cache
+    // bien après qu'AniList affiche réellement une note (ex. Isekai Quartet : matché
+    // sans note au premier passage, 72% affiché sur AniList depuis, mais toujours absent
+    // sur la carte car le cache local n'avait aucune raison de se rafraîchir avant 90 j).
+    // TTL court dédié (7 j) pour ce cas précis seulement — matché+notée ou non-matché
+    // gardent leur 90 j habituel (rien à regagner à réinterroger plus souvent).
+    if (v && v.matched && v.meanScore == null) return 7 * 24 * 3600e3;
+    return 24 * 90 * 3600e3;
   }
   function readAnilistCached(seriesId) {
     const o = cacheReadRaw('anilist:' + seriesId);
@@ -14452,6 +14463,12 @@
             const sch = computeAniSchedule(best, target);
             d.match = aniPrimaryTitle(best);
             d.matchedVia = scoredAgainst === target ? 'titre affiché' : 'titre anglais (repli CR)';
+            // (diag) id + meanScore de la fiche RÉELLEMENT choisie : permet de vérifier
+            // directement, ex. via https://anilist.co/anime/<id>, que la bonne saison/fiche
+            // a été retenue, et si le meanScore est vraiment absent côté AniList à l'instant
+            // du test (plutôt que de le déduire indirectement depuis la carte Découverte).
+            d.aniId = best.id;
+            d.meanScore = Number.isFinite(best.meanScore) ? best.meanScore : null;
             d.planned = sch.plannedTotal;
             d.end = sch.seasonEndTs ? new Date(sch.seasonEndTs).toLocaleDateString('fr-FR') : null;
             d.approx = sch.plannedApprox;
@@ -14526,6 +14543,8 @@
     let matchBlock = '';
     if ('match' in d && d.match) {
       matchBlock = `<div class="crrav-diag" style="margin-top:8px">
+        ${line('Fiche AniList', d.aniId ? `#${d.aniId} (anilist.co/anime/${d.aniId})` : '?')}
+        ${line('Note communautaire (meanScore)', d.meanScore != null ? `${d.meanScore}% (soit ★ ${(d.meanScore / 20).toFixed(1)})` : 'absente côté AniList pour cette fiche')}
         ${line('Total prévu', d.planned ?? 'inconnu (episodes null + calendrier trop court)')}
         ${line('Fin de saison', d.end ? ((d.approx ? '~' : '') + d.end) : 'inconnue')}
         ${line('Prochain épisode', d.nextEp ?? '?')}
