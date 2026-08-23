@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.55.0
+// @version      3.60.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -28,7 +28,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.55.0';
+  const SCRIPT_VERSION = '3.60.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -167,6 +167,25 @@
     // autant ignorer complètement le volume (une série longue très suivie reste un signal
     // fort). 0.6 = mix penchant vers la complétion.
     discoverCompletionWeight: 0.6,
+    // (fix v3.59.0) Jusqu'ici, le profil de goût pesait CHAQUE série regardée par son seul
+    // nombre d'épisodes vus (+ complétion ci-dessus) — une série menée à terme mais notée
+    // 2★ comptait AUTANT qu'une série adorée notée 5★, tant que le nombre d'épisodes vus
+    // était comparable. Résultat : une série regardée par habitude/curiosité (mais pas
+    // vraiment aimée) pouvait tirer tes « pépites légendaires » vers un genre/tag qui ne te
+    // plaît pas tant que ça. Cette pondération multiplie le poids de CHAQUE série par sa
+    // note personnelle (myRating, 1-5★, quand connue) sur une courbe centrée en 3★ (neutre) :
+    // 5★ → ×(1+valeur), 1★ → ×(1-valeur), non notée → ×1 (inchangée, la plupart des séries
+    // ne sont jamais notées). 0 = comportement historique (note ignorée) ; 1 = poids maximal
+    // à la note (5★ compte 2×, 1★ quasi rien). 0.5 par défaut : sensible sans écraser le
+    // volume d'écoute pour les séries non notées.
+    discoverMyRatingWeight: 0.5,
+    // (fix v3.60.0) Sous-pondération des tags AniList « méta » (Male Protagonist, Ensemble
+    // Cast… voir DISCOVER_LOWSIGNAL_TAGS) dans le profil de goût ET le score des candidats.
+    // 1 = comportement historique (poids plein, comme un tag normal) ; 0 = complètement
+    // ignorés. 0.25 par défaut : ils comptent encore un peu (ne sont pas du bruit total),
+    // mais ne peuvent plus dominer le profil ni gonfler le cosinus de façon quasi uniforme
+    // sur tous les candidats d'un même genre large (isekai/shounen typiquement).
+    discoverLowSignalTagWeight: 0.25,
     discoverMaxSeasons: 4,     // 4 saisons ou moins accepté
     discoverExcludeCategories: ['romance', 'hentai'], // genres exclus par défaut de Découverte
                                // ET du Calendrier — bloc Nouveautés (slugs Crunchyroll en
@@ -753,6 +772,12 @@
       impact: 'discover', sub: 'discoverScoringTaste' },
     { key: 'discoverCompletionWeight', tuner: true, label: 'Poids de la complétion dans le profil', type: 'float', min: 0, max: 1, step: 0.05,
       help: 'Dans le calcul de ton PROFIL de goût (pas dans le score d’une série directement) : 0 = seul le nombre d’épisodes vus compte (comme avant), 1 = seul le taux de complétion compte (finir une série pèse plus que la survoler). Une série de 100 épisodes vue à 20 % vs une série de 12 épisodes terminée — ce curseur arbitre entre les deux. Il ne s’ajoute jamais au score : il change seulement à QUOI chaque candidate est comparée (le goût net = similarité avec ce profil).',
+      impact: 'discover', sub: 'discoverScoringTaste' },
+    { key: 'discoverMyRatingWeight', tuner: true, label: 'Poids de ta note perso dans le profil', type: 'float', min: 0, max: 1, step: 0.05,
+      help: 'Dans le calcul de ton PROFIL de goût : sans ce réglage, une série REGARDÉE compte pareil qu’elle t’ait plu ou non — seul le nombre d’épisodes vus (et la complétion ci-dessus) comptent. Ici, une série que tu as NOTÉE pèse en plus selon cette note (centrée sur 3★, neutre) : à 0.5 (par défaut), 5★ compte 1,5×, 1★ compte 0,5× — à 0, comportement historique (note ignorée) ; à 1, 5★ compte le double et 1★ presque rien. Les séries jamais notées ne sont pas concernées (poids ×1, inchangé). Vise à éviter qu’une série juste regardée par habitude, mais pas vraiment aimée, tire tes pépites légendaires vers un genre qui ne te plaît pas tant que ça.',
+      impact: 'discover', sub: 'discoverScoringTaste' },
+    { key: 'discoverLowSignalTagWeight', tuner: true, label: 'Poids des tags « méta » (Male Protagonist…)', type: 'float', min: 0, max: 1, step: 0.05,
+      help: 'Certains tags AniList (Male Protagonist, Ensemble Cast…) décrivent une caractéristique de casting plutôt qu’un vrai genre/thème — sur un profil orienté isekai/shounen, ils ressortent presque toujours en tête sans révéler un goût précis, et gonflent le cosinus de façon quasi uniforme sur tous les candidats du même genre large. 1 = comptent comme un tag normal (comportement historique) ; 0 = ignorés. 0.25 par défaut : ils comptent encore un peu, sans pouvoir dominer le profil.',
       impact: 'discover', sub: 'discoverScoringTaste' },
     { key: 'discoverWellRatedThresholdCr', tuner: true, label: 'Note requise 🏆 — Crunchyroll', type: 'float', min: 3, max: 5, step: 0.1,
       help: 'Note Crunchyroll (quand elle est connue) à partir de laquelle le badge 🏆 s’affiche et le bonus ci-dessous s’applique. Si la note AniList est aussi connue, elle doit ELLE AUSSI dépasser son propre seuil (ci-dessous) — les deux sont exigées.',
@@ -3773,12 +3798,27 @@
     cacheSet(ANILIST_COOLDOWN_KEY, { until: Date.now() + mins * 60000, status, strikes });
     if (DEBUG) LOG(`AniList ${status} → pause enrichissement ${mins} min (essai ${strikes}${retryAfterMs ? ', Retry-After respecté' : ''})`);
   }
+  // (fix v3.57.0) Coupe-circuit COURT et EN MÉMOIRE (pas persisté — se réinitialise à
+  // chaque rechargement, contrairement au coupe-circuit 403/429 ci-dessus qui lui DOIT
+  // survivre) pour un AniList simplement INJOIGNABLE (coupure réseau, DNS, panne — pas un
+  // refus explicite). Sans ça, anilistQuery() retentera sa séquence complète (jusqu'à 3
+  // tentatives, ~16 s chacune) à CHAQUE appel : avec l'étape « similaires des favoris » de
+  // Découverte (jusqu'à 8 requêtes) ou l'alternance CR/AniList, un AniList mort pouvait
+  // faire poireauter la Découverte plusieurs minutes avant de continuer sans lui. 45 s :
+  // assez pour ne pas marteler un AniList mort pendant le reste du scan EN COURS, assez
+  // court pour ne pas pénaliser un futur scan après un simple accroc réseau ponctuel.
+  let anilistTransportFailAt = 0;
+  const ANILIST_TRANSPORT_COOLDOWN_MS = 45000;
   function anilistCooldownRemainingMs() {
     const o = cacheReadRaw(ANILIST_COOLDOWN_KEY);
-    return (o && o.v && o.v.until) ? Math.max(0, o.v.until - Date.now()) : 0;
+    const hard = (o && o.v && o.v.until) ? Math.max(0, o.v.until - Date.now()) : 0;
+    const soft = anilistTransportFailAt
+      ? Math.max(0, (anilistTransportFailAt + ANILIST_TRANSPORT_COOLDOWN_MS) - Date.now()) : 0;
+    return Math.max(hard, soft);
   }
   function anilistClearCooldown() {
     try { localStorage.removeItem(LS + ANILIST_COOLDOWN_KEY); } catch (_) { /* ignore */ }
+    anilistTransportFailAt = 0;
   }
   // Témoin permanent du DERNIER appel AniList (résultat + motif + horodatage). Sert au bloc
   // d'état toujours affiché dans le diagnostic : sur mobile (sans console) c'est la seule
@@ -3865,6 +3905,11 @@
       let reason;
       if (transportErr) {
         reason = (transportErr.message || String(transportErr)) || 'échec réseau';
+        // (fix v3.57.0) AniList injoignable (pas un refus explicite) après épuisement des
+        // reprises : coupe-circuit COURT (voir anilistTransportFailAt) pour que le reste de
+        // CE scan (favoris, lots CR/AniList alternés) n'insiste pas en vain plusieurs fois
+        // de plus, chacune coûtant jusqu'à ~16 s pour rien.
+        anilistTransportFailAt = Date.now();
       } else {
         let bodyText = '';
         try { bodyText = await withDeadline(r.text(), 8000, 'AniList (lecture corps)'); } catch (_) { /* corps illisible ou trop lent */ }
@@ -4668,13 +4713,12 @@
   const DEFAULT_FILTERS = {
     q: '', status: 'all', sort: 'remaining',
     // Regroupement de « Reste à voir » par progression (sections En cours / Pas commencé /
-    // Terminé). suiviGroupOrder = ordre COMPLET des 3 sections (toujours les 3 clés).
-    // suiviGroupHidden = sections actuellement masquées, sans influence sur l'ordre : les
-    // décocher/recocher ne change pas leur place. suiviGroupCollapsed = sections visibles
-    // mais repliées (grille de cartes cachée). suiviGroupBy = interrupteur global.
+    // Terminé). suiviGroupOrder = ordre COMPLET des 3 sections (toujours les 3 clés) —
+    // modifiable directement depuis les flèches ↑/↓ sur chaque en-tête de section.
+    // suiviGroupCollapsed = sections repliées (grille de cartes cachée, en-tête visible).
+    // suiviGroupBy = interrupteur global (seul réglage encore présent dans le panneau Filtrer).
     suiviGroupBy: true,
     suiviGroupOrder: ['started', 'notstarted', 'done'],
-    suiviGroupHidden: [],
     suiviGroupCollapsed: [],
     // Scopes dont la liste de genres (puces garder/exclure) est DÉPLIÉE. Vide = tout replié
     // par défaut (la liste peut être longue).
@@ -4716,25 +4760,21 @@
     // regroupement par progression) : on rebascule une préférence mémorisée sur « Tout ».
     if (saved.status === 'todo' || saved.status === 'uptodate') saved.status = 'all';
     // Ordre des sections : avant cette version, suiviGroupOrder représentait à la fois
-    // l'ordre ET la visibilité (une clé absente = section masquée). Depuis, l'ordre est
-    // toujours complet (3 clés) et la visibilité vit séparément dans suiviGroupHidden —
-    // pour qu'un décochage ne déplace plus rien. Migration : les clés manquantes de
-    // l'ancien tableau deviennent les sections masquées, et l'ordre est complété avec
-    // elles à la fin (ordre par défaut) pour ne perdre aucune section.
+    // l'ordre ET la visibilité (une clé absente = section masquée) ; il y a ensuite eu une
+    // notion de visibilité séparée (suiviGroupHidden), désormais retirée à son tour (fix
+    // v3.58.0 — plus de masquage individuel, seul l'interrupteur global suiviGroupBy
+    // subsiste, le repli ▾/▸ suffit à « alléger » une section sans la masquer). Migration :
+    // ne garder que les clés valides, complétées avec celles manquantes en fin d'ordre —
+    // qu'elles viennent d'un ancien tableau tronqué (masquage) ou d'un format encore plus
+    // ancien, le résultat est le même : rien n'est perdu, tout redevient visible.
     if ('suiviGroupOrder' in saved) {
       const ok = ['started', 'notstarted', 'done'];
       const kept = Array.isArray(saved.suiviGroupOrder)
         ? saved.suiviGroupOrder.filter((k) => ok.includes(k)) : [];
       const missing = ok.filter((k) => !kept.includes(k));
       saved.suiviGroupOrder = [...kept, ...missing];
-      if (missing.length && !Array.isArray(saved.suiviGroupHidden)) {
-        saved.suiviGroupHidden = missing;
-      }
     }
-    if (Array.isArray(saved.suiviGroupHidden)) {
-      const ok = ['started', 'notstarted', 'done'];
-      saved.suiviGroupHidden = saved.suiviGroupHidden.filter((k) => ok.includes(k));
-    }
+    delete saved.suiviGroupHidden;
     // Explications d'onglet fermées : ne garder que des chaînes valides.
     if ('dismissedHints' in saved && !Array.isArray(saved.dismissedHints)) {
       delete saved.dismissedHints;
@@ -5959,6 +5999,135 @@
         return r;
       };
       let pendingPage = !D.similarTo ? fetchBrowsePage(start) : null;
+
+      // ─── (fix v3.56.0, parallélisé v3.57.0) Étape 1 : « similaires de tous les favoris » ──
+      // Nouveau bassin de seed, avant même la première page de popularité Crunchyroll :
+      // pour chaque série notée 5★, les VRAIES recommandations communautaires AniList
+      // (fetchAnilistSimilar — déjà utilisées pour le bonus 💞, mais seulement comme
+      // signal de score passif jusqu'ici) deviennent ici une source de candidats à part
+      // entière. Uniquement en Découverte NORMALE — pas 🎲 légendaire (son moteur de
+      // scan par score/curseur reste inchangé, déjà très optimisé pour brasser des
+      // centaines de pages) ni 🪄 similaire (qui a déjà sa propre logique de
+      // recommandations dédiée, ci-dessous, ciblée sur la SEULE série source). Plafonné
+      // à un nombre raisonnable de favoris par lancement pour ne pas déclencher une
+      // rafale de requêtes AniList d'un coup. `pendingPage` (page 1 Crunchyroll) est déjà
+      // parti en réseau juste au-dessus : ce bloc s'exécute PENDANT ce temps mort, sans
+      // le retarder. anilistCooldownRemainingMs() en tête de condition : si AniList vient
+      // de se montrer injoignable (voir le coupe-circuit transport court, anilistTransportFailAt),
+      // on ne tente même pas — c'est CE contrôle qui garantit qu'un AniList mort ne ralentit
+      // jamais Découverte, elle continue uniquement sur Crunchyroll.
+      if (!legendary && !D.similarTo && CFG.discoverAnilistEnabled
+          && anilistCooldownRemainingMs() <= 0 && matches.length < target) {
+        const favorites = STATE.series.filter((s) => s && s.favorite && s.title);
+        const FAV_SEED_MAX = 8;
+        const favBatch = favorites.slice(0, FAV_SEED_MAX);
+        if (favBatch.length) {
+          onProgress(stepLabel(3, 3, `Découverte : similaires de tes favoris…`));
+          // (fix v3.57.0) Une requête « recommandations » par favori, INDÉPENDANTES les
+          // unes des autres : les lancer en parallèle (même plafond CFG.concurrency que le
+          // reste du script) au lieu d'une par une réduit le temps mur d'un facteur proche
+          // du nombre de favoris traités, sans faire une seule requête réseau de plus.
+          const recsByFav = await pool(favBatch, async (fav) => {
+            if (D.cancelRequested || anilistCooldownRemainingMs() > 0) return [];
+            try { return await fetchAnilistSimilar({ title: fav.title }); }
+            catch (e) { safeCall.log(e, 'loadDiscover:favSeed'); return []; }
+          }, CFG.concurrency, undefined, () => D.cancelRequested || anilistCooldownRemainingMs() > 0);
+
+          for (const recs of recsByFav) {
+            if (D.cancelRequested || matches.length >= target) break;
+            for (const rm of recs) {
+              if (D.cancelRequested || matches.length >= target) break;
+              if (!rm || rm.id == null || IGNORED.has('ani:' + rm.id)) continue;
+              candidatesSeenTotal++;
+              const genresFr = translateAniGenres(rm.genres || []);
+              if (genresFr.length && categoriesRejectedByGenre(genresFr)) { REJ.genrePreBrowse++; continue; }
+              const title = aniPrimaryTitle(rm) || (rm.title && rm.title.native) || '';
+              if (!title) { REJ.noCrMatch++; continue; }
+              let cr;
+              try { cr = await resolveCrunchyrollForPremiere(rm); }
+              catch (e) { safeCall.log(e, 'loadDiscover:favSeed:resolve'); REJ.noCrMatch++; continue; }
+              if (!cr || !cr.id) { REJ.noCrMatch++; continue; }
+              if (excluded.has(cr.id)) { REJ[classifyKnownReason(cr.id)]++; continue; }
+              if (seenCandidate.has(cr.id)) { REJ.duplicate++; continue; }
+              seenCandidate.add(cr.id);
+              const aniResult = { matched: false, ...EMPTY_ANI, aniId: null, aniTitle: '', av: ANILIST_CACHE_VER };
+              Object.assign(aniResult, computeAniSchedule(rm, {}), { matched: true, aniId: rm.id, aniTitle: title });
+              cacheSet('anilist:' + cr.id, aniResult);
+              let panel;
+              try { panel = await getSeriesPanel(cr.id); } catch (e) { safeCall.log(e, 'loadDiscover:favSeed:panel'); REJ.noCrMatch++; continue; }
+              if (!panel) { REJ.noCrMatch++; continue; }
+              const evald = await evaluateDiscoverCandidate(panel, { accountId, REJ, D });
+              if (!evald) continue;
+              const crTitleNorm = aniNorm(evald.p.title);
+              if (crTitleNorm && seenTitlesNorm.has(crTitleNorm)) { REJ.duplicate++; continue; }
+              if (crTitleNorm) seenTitlesNorm.add(crTitleNorm);
+              matches.push({
+                id: evald.p.id, title: evald.p.title, slug: evald.p.slug_title, poster: posterOf(evald.p),
+                synopsis: evald.p.description || '',
+                rating: evald.rating, seasons: evald.seasons,
+                categories: evald.categories, tags: evald.tags, aniScore: evald.aniScore ?? null,
+                episodes: evald.episodes, secTotal: evald.secTotal, maxAir: evald.maxAir,
+                order: seenCandidate.size,
+              });
+            }
+          }
+        }
+        if (matches.length) publishFound();
+      }
+
+      // ─── (fix v3.56.0) Entrelacement popularité Crunchyroll / AniList ──────────────
+      // Avant : le bassin CR tournait à COMPLETION (toutes ses pages, jusqu'au quota ou
+      // épuisement) puis, seulement ensuite, un unique appel AniList venait compléter le
+      // manque — deux phases strictement séquentielles. Ici (Découverte normale
+      // uniquement) : une page Crunchyroll, puis un lot AniList, en alternance — voir
+      // l'appel à runAniBatch() dans la boucle ci-dessous. `aniCursor` persiste la
+      // position de pagination AniList ENTRE deux lots (voir le paramètre `cursor` de
+      // scanAnilistPopularity), pour que le lot suivant reprenne exactement où le
+      // précédent s'est arrêté plutôt que de repartir de la page 1 à chaque fois.
+      const aniProfile = D.similarTo
+        ? (simProfile || tasteProfile || buildTasteProfile())
+        : (tasteProfile || simProfile || buildTasteProfile());
+      const knownTitlesNorm = STATE.series.map((s) => aniNorm(s.title)).filter(Boolean);
+      const aniCursor = { page: 1, hasNext: true };
+      let aniExhausted = !CFG.discoverAnilistEnabled;
+      // Taille d'un lot AniList = taille d'une page Crunchyroll (même ordre de grandeur
+      // par round, alternance équilibrée) — « maximum » au sens du plafond par page de
+      // l'API AniList (50), pas une simple poignée symbolique.
+      const ANI_ROUND_SIZE = Math.min(50, Math.max(10, CFG.discoverPageSize || 50));
+      const runAniBatch = async () => {
+        if (aniExhausted || D.cancelRequested || matches.length >= target) return;
+        // (fix v3.57.0) Sans ce garde-fou explicite, un AniList devenu injoignable EN COURS
+        // de scan (coupe-circuit transport tout juste posé, voir anilistTransportFailAt) ne
+        // faisait JAMAIS passer aniExhausted à true : scanAnilistPopularity renvoie alors un
+        // tableau vide immédiatement (son propre garde-fou), mais SANS toucher aniCursor —
+        // le rattrapage post-boucle aurait alors rappelé runAniBatch() en boucle (no-op à
+        // chaque fois, certes bon marché, mais jusqu'à ce que la cible soit jugée
+        // inatteignable autrement) au lieu de constater l'épuisement et de continuer avec
+        // Crunchyroll seul.
+        if (anilistCooldownRemainingMs() > 0) { aniExhausted = true; return; }
+        const roundTarget = Math.min(ANI_ROUND_SIZE, target - matches.length);
+        if (roundTarget <= 0) return;
+        onProgress(stepLabel(3, 3, `Découverte : lot AniList (page ${aniCursor.page})…`));
+        const aniFound = await scanAnilistPopularity(
+          aniProfile, excluded, seenCandidate, seenTitlesNorm, knownTitlesNorm, roundTarget,
+          { accountId, REJ, D, classifyKnownReason }, () => {}, aniCursor,
+        );
+        candidatesSeenTotal += (aniFound.considered || 0);
+        for (const x of aniFound) {
+          if (matches.length >= target) break;
+          matches.push({
+            id: x.p.id, title: x.p.title, slug: x.p.slug_title, poster: posterOf(x.p),
+            synopsis: x.p.description || '',
+            rating: x.rating, seasons: x.seasons,
+            categories: x.categories, tags: x.tags, aniScore: x.aniScore ?? null,
+            episodes: x.episodes, secTotal: x.secTotal, maxAir: x.maxAir,
+            order: seenCandidate.size,
+          });
+        }
+        if (aniFound.length) publishFound();
+        if (!aniCursor.hasNext || anilistCooldownRemainingMs() > 0) aniExhausted = true;
+      };
+
       // (fix) Le curseur légendaire (`start`) reprend à une position ABSOLUE dans le
       // classement popularité (voir loadLegendaryCursor) — mais la variable `page` de
       // cette boucle repartait toujours de 0, donc l'affichage (D.scan.page ci-dessous,
@@ -6212,11 +6381,34 @@
 
         matches.push(...results.filter(Boolean));
         publishFound();            // (streaming) consolidation de la page dans D.series
+
+        // (fix v3.56.0) Alternance : un lot AniList juste après CETTE page Crunchyroll,
+        // avant de passer à la suivante — voir runAniBatch() ci-dessus. Non légendaire
+        // uniquement (voir sa définition) ; le mode similaire ne passe jamais ici (la
+        // boucle CR elle-même ne tourne pas dans ce mode, cf. `!D.similarTo` sur le `for`).
+        if (!legendary) await runAniBatch();
       }
 
-      // Second bassin AniList (voir scanAnilistPopularity), EN COMPLÉMENT du classement
-      // popularité Crunchyroll ci-dessus. Hors mode « similaire » : lancé uniquement si le
-      // bassin CR n'a pas suffi à atteindre le quota visé (ordre le plus économe en requêtes).
+      // (fix v3.56.0) Rattrapage : le classement Crunchyroll peut s'épuiser (ou atteindre
+      // son plafond de sécurité) avant que le quota ne soit atteint, alors qu'AniList a
+      // encore des lots à offrir (aniExhausted encore false) — on continue alors avec
+      // AniList SEUL jusqu'à quota atteint ou épuisement à son tour. Ne concerne que la
+      // Découverte normale (legendary/similarTo gardent leur bloc dédié ci-dessous).
+      while (!legendary && !D.similarTo && !D.cancelRequested && matches.length < target && !aniExhausted) {
+        await runAniBatch();
+      }
+      // (fix v3.56.0) Le bassin CR peut avoir posé stopReason='exhausted' (classement CR à
+      // sec) AVANT que le rattrapage AniList ci-dessus n'ait fini de combler le quota —
+      // sans cette correction, le rapport de fin de scan affichait à tort « classement
+      // épuisé » alors que la cible a en réalité bien été atteinte grâce à AniList.
+      if (!legendary && !D.similarTo && matches.length >= target) stopReason = 'target';
+
+      // Second bassin AniList (voir scanAnilistPopularity) — CAS RESTANTS uniquement,
+      // désormais : 🎲 légendaire (scan séquentiel classique, son moteur de curseur/score
+      // reste inchangé) et 🪄 similaire (recommandations systématiquement lancées en plus).
+      // (fix v3.56.0) La Découverte NORMALE, elle, a déjà entrelacé ses lots AniList AVEC
+      // le classement popularité Crunchyroll ci-dessus (voir runAniBatch) — rien à refaire
+      // ici pour ce cas, d'où l'ajout de `(legendary || D.similarTo)` à la condition.
       // (fix) En mode « similaire » (🪄) : TOUJOURS lancé en plus, même si le bassin CR a déjà
       // atteint le quota — le but n'est plus seulement d'atteindre un nombre de résultats mais
       // de ratisser large pour de vraies proximités de contenu ; se limiter au classement
@@ -6225,7 +6417,8 @@
       // tags de la source peut faire remonter. `seenCandidate` est le MÊME Set que celui déjà
       // rempli par le scan CR ci-dessus (jamais un second) : il couvre donc les deux sources
       // et empêche tout doublon d'affichage entre elles.
-      if (!D.cancelRequested && CFG.discoverAnilistEnabled && ((legendary ? legTotal(matches) : matches.length) < target || D.similarTo)) {
+      if (!D.cancelRequested && CFG.discoverAnilistEnabled && (legendary || D.similarTo)
+          && ((legendary ? legTotal(matches) : matches.length) < target || D.similarTo)) {
         // En mode similaire, le pool vient des recommandations AniList (voir
         // scanAnilistPopularity) ; le profil ne sert que de REPLI tag_in si la source n'a pas
         // de reco exploitable — on prend alors le profil de la SÉRIE SOURCE (simProfile), pas
@@ -6328,20 +6521,17 @@
         }
         return out;
       };
-      const found = D.similarTo
-        ? [...matches].sort((a, b) => tasteScore(b, simProfile) - tasteScore(a, simProfile)).slice(0, target)
-        : (legendary ? capLegendaryTarget(matches) : matches.slice(0, target));
-
-      // (fix requêtes) Enrichissement AniList DIFFÉRÉ, mode normal / similaire uniquement :
-      // on n'interroge AniList que pour les pépites RÉELLEMENT retenues et affichées (≤ target),
-      // en un seul passage groupé (tranches de 8), au lieu d'une requête par tranche de chaque
-      // page comme avant — ce qui saturait l'API (429) puis coupait toute note AniList. Le
-      // mode légendaire a déjà enrichi pendant le scan (il en a besoin pour filtrer par score),
-      // donc `anilistNeedsFetch` y renverra false et ce passage sera un quasi no-op. Les objets
-      // de `found` sont les MÊMES références que celles déjà publiées dans D.series (streaming) :
-      // les muter puis render() fait apparaître note + tags au fil de l'enrichissement.
-      if (!legendary && !D.cancelRequested && CFG.anilistSchedule) {
-        const need = found.filter((x) => x && x.id
+      // (fix v3.59.0) Enrichissement AniList par lots groupés (tranches de 8) — factorisé
+      // pour être appelé À DEUX MOMENTS en mode normal : une première fois sur TOUS les
+      // candidats AVANT le tri (juste en dessous), pour que le tri par goût s'appuie sur de
+      // vrais tags plutôt que sur le repli genre-seul plus grossier ; une seconde fois en
+      // filet de sécurité sur le lot final déjà affiché (no-op si déjà enrichi au premier
+      // passage, anilistNeedsFetch renverra false). `withRender` : true pour republier au
+      // fil de l'enrichissement (lot final, déjà affiché) ; false pour le passage pré-tri
+      // (rien à afficher encore d'utile, D.series reste vide/squelettes à ce stade).
+      const enrichCandidatesBatch = async (list, withRender) => {
+        if (!CFG.anilistSchedule) return;
+        const need = list.filter((x) => x && x.id
           && ((x.categories || []).length < 2 || !x.tags || !x.tags.length || x.aniScore == null)
           && anilistNeedsFetch(x.id));
         for (let i = 0; i < need.length; i += 8) {
@@ -6369,8 +6559,40 @@
               }
             }
           } catch (_) { /* best-effort : sans note AniList, la carte garde sa seule note CR */ }
-          render();   // note + tags apparaissent au fur et à mesure
+          if (withRender) render();   // note + tags apparaissent au fur et à mesure
         }
+      };
+
+      // (fix v3.59.0) Pré-enrichissement AVANT tri/troncature, mode normal uniquement (le
+      // mode légendaire enrichit déjà pendant le scan — il en a besoin pour filtrer par
+      // score ; le mode similaire tire déjà ses candidats directement d'AniList, avec tags
+      // natifs). Volontairement UN PEU PLUS LENT qu'avant (plus de candidats enrichis
+      // puisque `matches` peut dépasser `target`, en échange d'un tri qui reflète le vrai
+      // goût de chacun plutôt que le repli genre-seul, plus grossier, pour les non-enrichis.
+      if (!legendary && !D.similarTo && !D.cancelRequested) {
+        await enrichCandidatesBatch(matches, false);
+      }
+
+      // (fix v3.57.0) Découverte NORMALE : même logique que le mode similaire ci-dessus —
+      // trier par goût réel avant de tronquer à `target`, plutôt que de garder les
+      // candidats dans leur simple ORDRE DE DÉCOUVERTE (favoris → CR → AniList → CR → …).
+      // Sans ça, l'entrelacement CR/AniList changeait bien QUI entre dans le lot final,
+      // mais un candidat AniList pertinent trouvé au round 3 pouvait quand même se faire
+      // couper par un candidat CR médiocre trouvé au round 1, simplement parce qu'il était
+      // arrivé plus tôt. Le tri par tasteScore corrige ça : peu importe QUAND un candidat a
+      // été trouvé, seul son vrai score de goût décide s'il fait partie des `target` retenus.
+      const normalProfile = tasteProfile || buildTasteProfile();
+      const found = D.similarTo
+        ? [...matches].sort((a, b) => tasteScore(b, simProfile) - tasteScore(a, simProfile)).slice(0, target)
+        : (legendary ? capLegendaryTarget(matches)
+          : [...matches].sort((a, b) => tasteScore(b, normalProfile) - tasteScore(a, normalProfile)).slice(0, target));
+
+      // Filet de sécurité sur le lot final déjà affiché (mode normal / similaire) — quasi
+      // no-op désormais pour le mode normal (déjà enrichi ci-dessus), mais reste utile pour
+      // rattraper un candidat que le pré-enrichissement aurait manqué (cooldown AniList
+      // déclenché entre-temps, etc.) et pour le mode similaire (jamais pré-enrichi ici).
+      if (!legendary && !D.cancelRequested) {
+        await enrichCandidatesBatch(found, true);
       }
 
       found.forEach((s) => D.excludedIds.add(s.id));
@@ -6849,7 +7071,14 @@
   // ctx : { accountId, REJ, D, classifyKnownReason } (mêmes compteurs/état que le bassin CR,
   // voir evaluateDiscoverCandidate). Retourne un tableau de candidats INTERMÉDIAIRES, au
   // même format que ceux produits par le bassin CR (voir evaluateDiscoverCandidate).
-  async function scanAnilistPopularity(profile, exclude, seenCandidate, seenTitlesNorm, knownTitlesNorm, target, ctx, onProgress) {
+  // (fix v3.56.0) `cursor` (optionnel) : { page, hasNext } persisté par l'APPELANT entre
+  // deux invocations — c'est ce qui permet à loadDiscover d'appeler cette fonction en
+  // PETITS lots, en alternance avec les pages de popularité Crunchyroll (voir runAniBatch),
+  // au lieu d'épuiser tout le bassin tag_in AniList d'un coup en une seule invocation.
+  // Sans `cursor` (repli undefined), comportement inchangé : repart de la page 1 à chaque
+  // appel — c'est le cas du mode 🎲 légendaire et 🪄 similaire, qui continuent d'appeler
+  // cette fonction une seule fois, sans besoin de reprise entre plusieurs appels.
+  async function scanAnilistPopularity(profile, exclude, seenCandidate, seenTitlesNorm, knownTitlesNorm, target, ctx, onProgress, cursor) {
     const found = [];
     if (!CFG.discoverAnilistEnabled || target <= 0) return found;
     if (anilistCooldownRemainingMs() > 0) return found;   // coupe-circuit déjà en place : on n'insiste pas
@@ -6962,7 +7191,11 @@
     const maxPages = POPULAR_SCAN_SAFETY_CAP;
     const perPage = Math.min(50, Math.max(10, CFG.discoverPageSize || 50));
 
-    let page = 1, hasNext = true;
+    // (fix v3.56.0) Reprend depuis le curseur fourni par l'appelant s'il y en a un
+    // (voir la note sur le paramètre `cursor` plus haut) ; sinon repart de la page 1,
+    // comme avant.
+    let page = cursor ? (cursor.page || 1) : 1;
+    let hasNext = cursor ? (cursor.hasNext !== false) : true;
     while (hasNext && page <= maxPages && found.length < target) {
       if (D.cancelRequested || anilistCooldownRemainingMs() > 0) break;
       if (onProgress) onProgress(page, maxPages);
@@ -6980,6 +7213,7 @@
         await processMedia(m);
       }
     }
+    if (cursor) { cursor.page = page; cursor.hasNext = hasNext; }
     found.considered = considered;
     return found;
   }
@@ -8072,6 +8306,30 @@
   const tagKey = (name) => 'tag:' + name;
   const genreKey = (name) => 'genre:' + name;
 
+  // (fix v3.60.0) Tags AniList « méta » — décrivent une caractéristique DÉMOGRAPHIQUE/
+  // TECHNIQUE de la série (qui est le héros, comment le casting est composé…) plutôt qu'un
+  // vrai signal de genre/thème/contenu. Problème constaté : sur un profil orienté isekai/
+  // shounen, « Male Protagonist » ressort systématiquement TAG #1 (poids le plus élevé) —
+  // pas parce qu'il révèle un goût précis, mais parce qu'il est mécaniquement présent avec
+  // un rang élevé sur la quasi-totalité des séries de ce type, aimées ou non. Et comme il
+  // est TOUT AUSSI présent sur la quasi-totalité des candidats isekai/shounen de Découverte,
+  // il gonfle le cosinus de façon presque uniforme sur tout le monde sans aider à distinguer
+  // une vraie pépite d'un isekai générique — noyant les tags plus fins et plus spécifiques
+  // (qui, eux, ont individuellement moins de poids). Liste non exhaustive, ajustable :
+  // caractéristiques de casting/narration reconnues pour leur faible pouvoir discriminant
+  // (equivalent d'un « mot très fréquent » en recherche documentaire), pas des genres/thèmes.
+  const DISCOVER_LOWSIGNAL_TAGS = new Set([
+    'male protagonist', 'female protagonist', 'ensemble cast',
+    'primarily male cast', 'primarily female cast', 'primarily teen cast',
+    'primarily adult cast', 'primarily child cast', 'primarily animal cast',
+    'cgi', 'achronological order',
+  ].map((t) => t.toLowerCase()));
+  function tagLowSignalMult(name) {
+    return DISCOVER_LOWSIGNAL_TAGS.has(String(name || '').toLowerCase())
+      ? Math.max(0, Math.min(1, CFG.discoverLowSignalTagWeight ?? 0.25))
+      : 1;
+  }
+
   // Profil dérivé de tes séries commencées (Reste à voir). Pour CHAQUE série, priorité aux
   // tags AniList (voir mergeTagLists/s.tags) — beaucoup plus fins que les ~20 genres
   // génériques (300+ valeurs possibles, ex. « Isekai », « Time Skip », « Ensemble Cast »,
@@ -8089,8 +8347,9 @@
   // vide et seuls les signaux « note » (indépendants du goût) s'affichent.
   function buildTasteProfile(override) {
     // (live) `override` : aperçu EN DIRECT depuis le schéma des réglages (voir
-    // scoreFormulaSchema / wireScoreSchemaLive). Seul discoverCompletionWeight influe ici ;
-    // les autres réglages du score n'entrent pas dans le profil. Sans override → CFG réel.
+    // scoreFormulaSchema / wireScoreSchemaLive). Seuls discoverCompletionWeight et (fix
+    // v3.59.0) discoverMyRatingWeight influent ici ; les autres réglages du score n'entrent
+    // pas dans le profil. Sans override → CFG réel.
     const C = override ? { ...CFG, ...override } : CFG;
     const w = {};
     // Sous-profil GENRES SEULS, accumulé pour TOUTES tes séries (même celles enrichies en
@@ -8101,18 +8360,26 @@
     // par rapport à ta répartition de genres, base comparable, sans pénalité fantôme.
     const gw = {};
     const cw = Math.max(0, Math.min(1, C.discoverCompletionWeight ?? 0.6));
+    // (fix v3.59.0) Voir discoverMyRatingWeight (CFG) : sans note connue, ratingMult reste à
+    // 1 (comportement historique inchangé) — seules les séries EFFECTIVEMENT notées voient
+    // leur poids ajusté à la hausse (aimée) ou à la baisse (pas aimée malgré avoir été vue).
+    const rw = Math.max(0, Math.min(1, C.discoverMyRatingWeight ?? 0.5));
     for (const s of STATE.series || []) {
       if (!s || (s.seen || 0) <= 0) continue;
       const total = s.total || 0;
       const completion = total > 0 ? Math.min(1, s.seen / total) : 1;   // pas de total connu → pas de malus de complétion
-      const weight = Math.max(1, s.seen) * (1 - cw + cw * completion);
+      const ratingMult = s.myRating != null ? Math.max(0.1, 1 + rw * ((s.myRating - 3) / 2)) : 1;
+      const weight = ratingMult * Math.max(1, s.seen) * (1 - cw + cw * completion);
       const tags = s.tags && s.tags.length ? s.tags : null;
       if (tags) {
         for (const t of tags) {
           if (!t || !t.name) continue;
           const rank = Math.max(0, Math.min(100, t.rank ?? 50)) / 100;
           const key = tagKey(t.name);
-          w[key] = (w[key] || 0) + weight * rank;
+          // (fix v3.60.0) Tags « méta » (Male Protagonist, Ensemble Cast…) sous-pondérés —
+          // voir DISCOVER_LOWSIGNAL_TAGS/tagLowSignalMult : sans ça, ils dominent le profil
+          // sur un catalogue orienté isekai/shounen sans révéler un vrai goût précis.
+          w[key] = (w[key] || 0) + weight * rank * tagLowSignalMult(t.name);
         }
       } else {
         for (const c of s.categories || []) {
@@ -8151,7 +8418,10 @@
     if (tags) {
       for (const t of tags) {
         if (!t || !t.name) continue;
-        v[tagKey(t.name)] = Math.max(0, Math.min(100, t.rank ?? 50)) / 100;
+        // (fix v3.60.0) Même sous-pondération que côté profil (voir buildTasteProfile) —
+        // les deux côtés du cosinus doivent traiter ces tags de la même façon, sinon la
+        // similarité redevient incohérente.
+        v[tagKey(t.name)] = (Math.max(0, Math.min(100, t.rank ?? 50)) / 100) * tagLowSignalMult(t.name);
       }
     } else {
       for (const c of s.categories || []) v[genreKey(c)] = 1;
@@ -8323,6 +8593,12 @@
       CFG.discoverWellRatedThresholdCr, CFG.discoverWellRatedThresholdAni, CFG.discoverWellRatedBonus,
       CFG.discoverSuperRatedThresholdCr, CFG.discoverSuperRatedThresholdAni, CFG.discoverSuperRatedBonus,
       CFG.discoverLegendaryScore, CFG.discoverNotableScore,
+      // (fix v3.59.0) discoverMyRatingWeight/discoverCompletionWeight changent le PROFIL lui-
+      // même (buildTasteProfile), pas juste un seuil — sans eux ici, changer l'un ou l'autre
+      // ne recalculait pas forcément profile.top (le trio de tête peut rester identique même
+      // si les poids sous-jacents ont bougé), laissant des verdicts pépite mis en cache sous
+      // l'ANCIENNE pondération alors que le réglage venait de changer.
+      CFG.discoverMyRatingWeight, CFG.discoverCompletionWeight, CFG.discoverLowSignalTagWeight,
       profile ? profile.size : 0, profile ? (profile.top || []).join(',') : '',
     ].join('|');
     let h = 0;
@@ -8387,7 +8663,17 @@
     const superShown = r1(superBonusVal);
     const favRecShown = r1(favRecBonusVal);
     const scoreShown = tasteShown + prefShown + wellShown + superShown + favRecShown;
-    const legendary = scoreShown >= CFG.discoverLegendaryScore;
+    // (fix v3.59.0) Une candidate SANS tags AniList (repli genre-seul, voir tasteScore/
+    // tagless) est comparée à ton profil dans un espace bien plus grossier — une poignée de
+    // genres larges (Action, Fantastique…) au lieu de centaines de tags fins. Un cosinus
+    // élevé y est plus facile à obtenir par coïncidence (2-3 genres communs suffisent) que
+    // dans l'espace des tags, où correspondre vraiment demande d'aligner des dizaines de
+    // signaux fins. Sans ce plafond, une candidate jamais enrichie pouvait donc décrocher
+    // « légendaire » sur un signal en réalité moins fiable qu'une candidate enrichie au
+    // score pourtant plus bas. Plafonnée à « notable » au mieux — jamais légendaire tant
+    // que son vrai alignement de tags n'a pas pu être vérifié.
+    const tagless = !(s.tags && s.tags.length);
+    const legendary = scoreShown >= CFG.discoverLegendaryScore && !tagless;
     const notable = !legendary && scoreShown >= CFG.discoverNotableScore;
     // Décomposition chiffrée AFFICHÉE (termes arrondis, somme = scoreShown) pour l'affichage
     // détaillé optionnel (voir scoreDetailHtml / CFG.discoverShowScoreDetail).
@@ -9100,9 +9386,9 @@
   .crrav-select optgroup option{color:#f2f2f4;font-weight:400}
   .crrav-chips{display:flex;gap:6px;flex-wrap:wrap;width:100%}
   /* Toggles rapides (Favoris / Finissable / Masquer saison en cours…) sur une seule
-     ligne plutôt que de repasser à la ligne — mêmes principes que .crrav-groupchips :
-     puces resserrées, défilement horizontal en dernier recours sur les tout petits
-     écrans plutôt qu'un retour à la ligne qui mange de la hauteur. */
+     ligne plutôt que de repasser à la ligne : puces resserrées, défilement horizontal
+     en dernier recours sur les tout petits écrans plutôt qu'un retour à la ligne qui
+     mange de la hauteur. */
   .crrav-chips-quick{flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;
     scrollbar-width:none}
   .crrav-chips-quick::-webkit-scrollbar{display:none}
@@ -9126,29 +9412,31 @@
     text-transform:uppercase;letter-spacing:.06em}
   /* Sections « Reste à voir » regroupées par progression. */
   .crrav-group{margin:0 0 20px}
-  .crrav-group-h{display:flex;align-items:center;gap:9px;margin:0 0 11px;padding:6px 2px;
-    font:800 15px/1.2 system-ui;color:#e8e8ee;background:none;border:0;width:100%;
+  /* (fix v3.58.0) .crrav-group-hrow porte maintenant la marge basse et aligne l'en-tête
+     (extensible) avec les flèches ↑/↓ (largeur fixe) — avant, .crrav-group-h seul occupait
+     toute la largeur ; il partage maintenant la ligne avec .crrav-group-move. */
+  .crrav-group-hrow{display:flex;align-items:center;gap:6px;margin:0 0 11px}
+  .crrav-group-collapsed .crrav-group-hrow{margin-bottom:0}
+  .crrav-group-h{display:flex;align-items:center;gap:9px;margin:0;padding:6px 2px;
+    font:800 15px/1.2 system-ui;color:#e8e8ee;background:none;border:0;flex:1 1 auto;min-width:0;
     text-align:left;cursor:pointer;border-radius:8px}
   .crrav-group-h:hover{background:rgba(255,255,255,.05)}
   .crrav-group-h:focus-visible{outline:2px solid #fff;outline-offset:2px}
   .crrav-group-h::before{content:"";width:4px;height:16px;border-radius:2px;background:#f47521;flex:0 0 auto}
-  .crrav-group-collapsed .crrav-group-h{margin-bottom:0}
   .crrav-group-n{font:700 11px/1 system-ui;color:#b9b9c2;background:rgba(255,255,255,.07);
     border:1px solid rgba(255,255,255,.09);border-radius:999px;padding:3px 8px}
-  /* Config des sections (choix + ordre). Légende + puces sur deux lignes séparées
-     (voir groupingControls) : la légende reste en texte plein, les puces défilent
-     horizontalement sans jamais repasser sur 2 lignes (gain de hauteur sur téléphone). */
-  .crrav-groupcfg{margin-top:5px;display:flex;flex-direction:column;gap:6px;width:100%}
-  .crrav-groupchips{display:flex;align-items:center;gap:5px;flex-wrap:nowrap;
-    overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:1px;scrollbar-width:none}
-  .crrav-groupchips::-webkit-scrollbar{display:none}
-  .crrav-groupchip{display:inline-flex;align-items:center;gap:3px;flex:0 0 auto}
-  .crrav-groupchip .crrav-chip-toggle{opacity:.5;padding:5px 10px;font-size:11.5px;white-space:nowrap}
-  .crrav-groupchip.on .crrav-chip-toggle{opacity:1;border-style:solid;
-    box-shadow:inset 0 0 0 1px rgba(244,117,33,.35)}
-  .crrav-groupup{cursor:pointer;border:1px solid rgba(255,255,255,.14);flex:0 0 auto;
+  /* (fix v3.58.0) Temps restant cumulé de la section — même gabarit que .crrav-group-n,
+     accent orange pour rester lisible à côté du compteur gris neutre. */
+  .crrav-group-time{font:700 11px/1 system-ui;color:#ffb877;background:rgba(244,117,33,.12);
+    border:1px solid rgba(244,117,33,.25);border-radius:999px;padding:3px 8px}
+  /* (fix v3.58.0) Flèches ↑/↓ directement sur l'en-tête — déplacées depuis le panneau
+     Filtrer (voir groupingControls, désormais réduit au seul interrupteur on/off). */
+  .crrav-group-move{display:flex;gap:4px;flex:0 0 auto}
+  .crrav-groupmove{cursor:pointer;border:1px solid rgba(255,255,255,.14);flex:0 0 auto;
     background:rgba(255,255,255,.05);color:#d8d8e0;border-radius:7px;
-    font:800 10px/1 system-ui;padding:5px 6px}
+    font:800 12px/1 system-ui;padding:6px 9px;min-width:32px;min-height:32px}
+  .crrav-groupmove:hover:not(:disabled){background:rgba(255,255,255,.1);color:#fff}
+  .crrav-groupmove:disabled{opacity:.3;cursor:default}
   /* Liste de genres repliable (bouton d'en-tête + chevron). */
   .crrav-genretoggle{display:inline-flex;align-items:center;gap:7px;border-style:dashed}
   .crrav-genretoggle .crrav-genrechev{font-size:10px;opacity:.75;transition:transform .18s}
@@ -11138,7 +11426,6 @@
     .crrav-stat small{font-size:9.5px}
     .crrav-select-compact{max-width:92px;font-size:10.5px;padding:6px 20px 6px 7px}
     .crrav-chips-quick .crrav-chip{padding:5px 9px;font-size:11px}
-    .crrav-groupchip .crrav-chip-toggle{padding:4px 8px;font-size:10.5px}
   }
 
   /* ═══════════════════════════════════════════════════════════════════════════
@@ -12428,54 +12715,29 @@
     done:       { label: 'Terminé',      test: (s) => s.remaining === 0 },
   };
   const SUIVI_GROUPS_ALL = ['started', 'notstarted', 'done'];
-  // Ordre COMPLET des sections (toujours les 3 clés, quelle que soit leur visibilité).
-  // Masquer une section (voir suiviGroupHidden) ne retire RIEN de cet ordre : sa place est
-  // préservée pour qu'elle réapparaisse au même endroit une fois réaffichée, plutôt que
-  // d'être renvoyée en bout de liste. Seul le bouton « ↑ » (monter) modifie cet ordre.
+  // Ordre COMPLET des sections (toujours les 3 clés). Modifiable via les flèches ↑/↓ posées
+  // directement sur chaque en-tête de section (voir renderSuivi et les handlers
+  // group-up/group-down) — une section sans série n'est simplement pas rendue, mais garde
+  // sa place dans cet ordre pour réapparaître au même endroit dès qu'elle en contient à
+  // nouveau, plutôt que d'être renvoyée en bout de liste.
   function suiviGroupOrder(f) {
     const saved = Array.isArray(f.suiviGroupOrder) ? f.suiviGroupOrder.filter((k) => SUIVI_GROUPS[k]) : [];
     const missing = SUIVI_GROUPS_ALL.filter((k) => !saved.includes(k));
     return [...saved, ...missing];
   }
-  // Sections actuellement masquées (cochées « off » dans les contrôles) — indépendant de
-  // l'ordre : décocher une section ne fait que l'ajouter ici, sans toucher suiviGroupOrder.
-  function suiviGroupHidden(f) {
-    return Array.isArray(f.suiviGroupHidden) ? f.suiviGroupHidden.filter((k) => SUIVI_GROUPS[k]) : [];
-  }
-  // Sections à afficher, dans l'ordre — ce que renderSuivi utilise réellement pour générer
-  // les <section>.
-  function suiviVisibleGroupOrder(f) {
-    const hidden = suiviGroupHidden(f);
-    return suiviGroupOrder(f).filter((k) => !hidden.includes(k));
-  }
   // Sections actuellement repliées (visibles mais dont la grille de cartes est cachée).
   function suiviGroupCollapsed(f) {
     return Array.isArray(f.suiviGroupCollapsed) ? f.suiviGroupCollapsed.filter((k) => SUIVI_GROUPS[k]) : [];
   }
-  // Contrôles : interrupteur du regroupement + choix des sections affichées et de leur ordre.
+  // (fix v3.58.0) Contrôles simplifiés au STRICT interrupteur on/off — le réordonnancement
+  // (↑/↓) vit maintenant directement sur l'en-tête de chaque section dans la liste elle-même
+  // (voir renderSuivi), plus pratique d'accès que dans le panneau Filtrer, et le masquage
+  // individuel par section a été retiré (redondant avec le repli ▾/▸, déjà disponible d'un
+  // clic sur l'en-tête).
   function groupingControls(f) {
-    const order = suiviGroupOrder(f);
-    const hidden = suiviGroupHidden(f);
-    // Légende sur sa propre ligne (déjà compacte) ; les puces de sections sur la leur,
-    // en rang serré et sans retour à la ligne (voir .crrav-groupchips) — un swipe
-    // horizontal reste possible sur les tout petits écrans plutôt que de repasser sur
-    // 2 lignes, ce qui mangeait de la hauteur précieuse sur téléphone.
-    const cfg = f.suiviGroupBy ? `<div class="crrav-groupcfg">
-        <span class="crrav-catlegend">Sections — clic&nbsp;: afficher/masquer · ↑&nbsp;: monter</span>
-        <div class="crrav-groupchips">
-        ${order.map((k, pos) => {
-          const on = !hidden.includes(k);
-          return `<span class="crrav-groupchip${on ? ' on' : ''}">${
-            pos > 0 ? `<button class="crrav-groupup" data-act="group-up" data-g="${k}" title="Monter cette section">↑</button>` : ''
-          }<button class="crrav-chip crrav-chip-toggle" data-act="group-toggle" data-g="${k}" aria-pressed="${on}"
-            >${SUIVI_GROUPS[k].label}</button></span>`;
-        }).join('')}
-        </div>
-      </div>` : '';
     return `<div class="crrav-chipgroup crrav-chipgroup-toggle">
         <div class="crrav-chips crrav-chips-toggle"><button class="crrav-chip crrav-chip-toggle" data-toggle="suiviGroupBy" aria-pressed="${!!f.suiviGroupBy}"
           title="Regrouper la liste par progression (En cours / Pas commencé / Terminé)">⊞ Grouper par progression</button></div>
-        ${cfg}
       </div>`;
   }
 
@@ -12528,20 +12790,39 @@
     } else if (!list.length) {
       body = `<div class="crrav-msg"><h3>Rien à afficher</h3>
         <p>Aucune série ne correspond à ce filtre.</p></div>`;
-    } else if (f.suiviGroupBy && suiviVisibleGroupOrder(f).length) {
+    } else if (f.suiviGroupBy && suiviGroupOrder(f).length) {
       // Sections par progression, dans l'ordre choisi ; une section vide est masquée.
       // Chaque section peut être repliée indépendamment (clic sur son en-tête) — son
       // compteur reste visible replié, seule la grille de cartes est cachée.
+      // (fix v3.58.0) Temps restant par section (fmtDuration du secLeft cumulé de ses
+      // séries) affiché à côté du compteur — pratique pour juger d'un coup d'œil la
+      // section qui demande le plus de temps, pas juste celle qui a le plus de séries.
+      // Flèches ↑/↓ directement sur l'en-tête (déplacées depuis le panneau Filtrer, voir
+      // groupingControls) : pos/désactivation calculées sur suiviGroupOrder EN ENTIER
+      // (toujours 3 clés), pas seulement les sections actuellement non vides — cohérent
+      // avec la logique des handlers group-up/group-down (même tableau complet).
       const gridCls = STATE.filters.view === 'list' ? ' crrav-list' : '';
       const collapsed = suiviGroupCollapsed(f);
-      const secs = suiviVisibleGroupOrder(f).map((k) => {
+      const order = suiviGroupOrder(f);
+      const secs = order.map((k) => {
         const g = SUIVI_GROUPS[k];
         const items = list.filter(g.test);
         if (!items.length) return '';
         const isCollapsed = collapsed.includes(k);
+        const pos = order.indexOf(k);
+        const secLeftGroup = items.reduce((a, s) => a + s.secLeft, 0);
         return `<section class="crrav-group${isCollapsed ? ' crrav-group-collapsed' : ''}">
-          <button type="button" class="crrav-group-h" data-act="group-collapse" data-g="${k}"
-            aria-expanded="${!isCollapsed}">${isCollapsed ? '▸' : '▾'} ${g.label}<span class="crrav-group-n">${items.length}</span></button>
+          <div class="crrav-group-hrow">
+            <button type="button" class="crrav-group-h" data-act="group-collapse" data-g="${k}"
+              aria-expanded="${!isCollapsed}">${isCollapsed ? '▸' : '▾'} ${g.label}<span class="crrav-group-n">${items.length}</span>${
+                secLeftGroup ? `<span class="crrav-group-time">${fmtDuration(secLeftGroup)}</span>` : ''}</button>
+            <span class="crrav-group-move">
+              <button type="button" class="crrav-groupmove" data-act="group-up" data-g="${k}"${pos === 0 ? ' disabled' : ''}
+                title="Monter cette section" aria-label="Monter « ${g.label} »">↑</button>
+              <button type="button" class="crrav-groupmove" data-act="group-down" data-g="${k}"${pos === order.length - 1 ? ' disabled' : ''}
+                title="Descendre cette section" aria-label="Descendre « ${g.label} »">↓</button>
+            </span>
+          </div>
           ${isCollapsed ? '' : `<div class="crrav-grid${gridCls}">${items.map((s, i) => card(s, i, 'watchlist')).join('')}</div>`}
         </section>`;
       }).join('');
@@ -12893,6 +13174,7 @@
   function scoreTunerHtml(cfg, extraHtml) {
     const TUNER_KEYS = [
       'discoverTasteWeight', 'discoverTasteNeutralCos', 'discoverGoodTasteThreshold', 'discoverCompletionWeight',
+      'discoverMyRatingWeight',
       'discoverPrefGenreBonus', 'discoverFavRecBonus', 'discoverMinRatingCr', 'discoverMinRatingAni',
       'discoverWellRatedThresholdCr', 'discoverWellRatedThresholdAni', 'discoverWellRatedBonus',
       'discoverSuperRatedThresholdCr', 'discoverSuperRatedThresholdAni', 'discoverSuperRatedBonus',
@@ -13477,6 +13759,7 @@
         ['discoverTasteNeutralCos', 'Point neutre du cosinus', 0.05, 0.95, 0.05, 'Ressemblance à partir de laquelle une série est considérée « ni pour ni contre tes goûts ». Sert de référence zéro pour le calcul.'],
         ['discoverGoodTasteThreshold', 'Seuil du badge 💚 « dans tes goûts »', -1, 1, 0.05, 'Purement visuel : à partir de quel goût net le badge 💚 s’affiche sur une carte. N’influence pas le score.'],
         ['discoverCompletionWeight', 'Poids de la complétion dans le profil', 0, 1, 0.05, 'Ton profil de goût mélange volume regardé et taux de complétion de chaque série. Plus haut = les séries terminées comptent plus que celles juste commencées.'],
+        ['discoverMyRatingWeight', 'Poids de ta note perso dans le profil', 0, 1, 0.05, 'Une série que tu as NOTÉE pèse en plus selon cette note (centrée sur 3★) : plus haut = une série aimée (5★) compte nettement plus, une série pas aimée (1★) compte nettement moins — même si tu l’as beaucoup regardée. Les séries jamais notées ne changent pas.'],
       ],
       'crst-grpPref': [
         ['discoverPrefGenreBonus', 'Bonus « genre préféré » 🎯', 0, 2, 0.1, 'Ajouté quand la série touche un genre que ton profil identifie comme favori.'],
@@ -16627,20 +16910,22 @@
           if (gi >= 0) arr.splice(gi, 1); else arr.push(scg);
           saveFilters(); render(); return;
         }
-        if (act.dataset.act === 'group-toggle') {
-          // (masquer/réafficher SANS toucher à l'ordre — voir suiviGroupOrder/suiviGroupHidden :
-          // décocher une section ne fait que l'ajouter ici, elle retrouve sa place au reclic).
-          const hidden = suiviGroupHidden(STATE.filters).slice();
-          const gi = hidden.indexOf(act.dataset.g);
-          if (gi >= 0) hidden.splice(gi, 1); else hidden.push(act.dataset.g);
-          STATE.filters.suiviGroupOrder = suiviGroupOrder(STATE.filters);   // fige l'ordre complet
-          STATE.filters.suiviGroupHidden = hidden;
-          saveFilters(); render(); return;
-        }
         if (act.dataset.act === 'group-up') {
           const o = suiviGroupOrder(STATE.filters).slice();
           const gi = o.indexOf(act.dataset.g);
           if (gi > 0) { [o[gi - 1], o[gi]] = [o[gi], o[gi - 1]]; STATE.filters.suiviGroupOrder = o; saveFilters(); render(); }
+          return;
+        }
+        // (fix v3.58.0) Pendant du group-up ci-dessus, pour la flèche ↓ sur l'en-tête de
+        // section (voir renderSuivi) — jusqu'ici seul « monter » existait (pertinent quand
+        // le déplacement se pilotait depuis une liste fixe dans le panneau Filtrer ; devenu
+        // insuffisant une fois les flèches posées directement sur chaque section : sans ↓,
+        // descendre la DERNIÈRE section demandait de faire ↑ sur toutes les autres à la
+        // place, peu intuitif).
+        if (act.dataset.act === 'group-down') {
+          const o = suiviGroupOrder(STATE.filters).slice();
+          const gi = o.indexOf(act.dataset.g);
+          if (gi >= 0 && gi < o.length - 1) { [o[gi], o[gi + 1]] = [o[gi + 1], o[gi]]; STATE.filters.suiviGroupOrder = o; saveFilters(); render(); }
           return;
         }
         if (act.dataset.act === 'group-collapse') {
