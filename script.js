@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.80.0
+// @version      3.80.4
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -28,7 +28,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.80.0';
+  const SCRIPT_VERSION = '3.80.4';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -2018,7 +2018,7 @@
     if (!patchDiscoverAction(seriesId)) forceRender();
     try {
       await addToCustomList(listId, seriesId, INTERACTIVE_RECOVERY_TIMEOUT_MS);
-      STATE.addedToList.add(seriesId);
+      STATE.addedToList.set(seriesId, listId);   // (fix v3.80.4) mémorise la liste cible
       // (fix v3.49.0) Effet « wahou » — voir discoverCard/discoverListRow et le CSS
       // .crrav-flourish-add : joué une seule fois, à l'instant précis de l'ajout.
       discoverFlourish = { id: seriesId, type: 'add' };
@@ -5084,7 +5084,11 @@
     myLists: { items: [], loading: false, error: null },
     // Ids ajoutés depuis Découverte dans CETTE session : masqués de la liste sans
     // attendre un rechargement complet (voir mAddedThisSession dans render()).
-    addedToList: new Set(),
+    // (fix v3.80.4) Map (id → listId), pas Set : il faut retenir DANS quelle liste chaque
+    // série a été ajoutée pour pouvoir proposer un retrait direct depuis sa carte (bouton ✓,
+    // voir addListBtn) — avant, seul le bouton « Annuler » du toast juste après l'ajout le
+    // permettait ; une fois le toast disparu, l'ajout devenait irréversible depuis la carte.
+    addedToList: new Map(),
     // id de série en cours d'ajout (désactive son bouton le temps de la requête) et,
     // si un choix de liste est demandé (CFG.askListEachTime), la fiche en attente de choix.
     addingId: null,
@@ -8180,9 +8184,15 @@
       aria-label="${ign ? 'Réafficher' : 'Ignorer'}">${ign ? '↺' : '⊘'}</button>`;
   }
 
-  // Bouton « + » (Découverte uniquement) : ajoute la série à une Crunchylist. Trois
+  // Bouton « + » (Découverte uniquement) : ajoute la série à une Crunchylist. Quatre
   // états visuels : normal (+), en cours (busy, ⋯), ajoutée cette session (done, ✓).
   // data-title porte le titre pour le sélecteur de liste (CFG.askListEachTime).
+  // (fix v3.80.4) L'état « done » n'est plus désactivé : avant, une fois l'ajout fait, seul
+  // le bouton « Annuler » du toast (éphémère, voir handleAddToList) permettait de revenir en
+  // arrière — passé ce délai, l'ajout devenait irréversible depuis la carte elle-même
+  // (contrairement au bouton ⊘ ignorer, qui bascule dans les deux sens à volonté). ✓ ouvre
+  // maintenant la même confirmation que 🗑 (data-removelist) avant de retirer, puisque
+  // c'est un appel réseau réel côté Crunchyroll.
   function addListBtn(s) {
     const added = STATE.addedToList.has(s.id);
     const busy = STATE.addingId === s.id;
@@ -8195,14 +8205,21 @@
     // seul dès que sessionLost change, sans câblage supplémentaire.
     const waiting = busy && sessionLost;
     const cls = added ? 'done' : waiting ? 'busy waiting-session' : busy ? 'busy' : '';
-    const label = added ? 'Ajoutée à ta liste'
+    const label = added ? 'Ajoutée à ta liste — touche pour retirer'
       : waiting ? 'Session Crunchyroll perdue — reconnexion en cours…'
       : busy ? 'Ajout en cours…' : 'Ajouter à ma liste';
-    const icon = added ? '✓' : waiting ? '⚠' : busy ? '⋯' : '+';
-    return `<button class="crrav-addlist${cls ? ` ${cls}` : ''}" data-addlist="${s.id}"
+    const icon = added ? '' : waiting ? '⚠' : busy ? '⋯' : '+';
+    // (fix v3.80.4) added : icône vide ici — le ✓/✕ est fourni par CSS (::after,
+    // .crrav-addlist.done) pour pouvoir basculer visuellement au survol/focus vers ✕,
+    // signe qu'un clic RETIRE désormais (sans quoi ✓ fixe ressemblait à un simple badge
+    // d'état, pas à un bouton actif).
+    // added : ni data-addlist (on ne veut pas relancer un ajout) ni disabled (clic actif) —
+    // data-undoaddlist porte le retrait, câblé plus bas comme data-removelist.
+    return `<button class="crrav-addlist${cls ? ` ${cls}` : ''}"
+      ${added ? `data-undoaddlist="${s.id}"` : `data-addlist="${s.id}"`}
       data-title="${escapeHtml(s.title)}"
       title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}"
-      ${added || busy ? 'disabled' : ''}>${icon}</button>`;
+      ${busy ? 'disabled' : ''}>${icon}</button>`;
   }
 
   // Bouton « 🗑 » (Reste à voir uniquement) : l'INVERSE de addListBtn — retire la série de
@@ -10240,7 +10257,20 @@
   .crrav-addlist::before{content:'';position:absolute;inset:-6px;border-radius:50%}
   .crrav-addlist:focus-visible{opacity:1}
   .crrav-addlist:hover{background:#f47521;color:#12120f;border-color:#f47521}
-  .crrav-addlist.done{opacity:1;background:#5ce6a0;color:#12120f;border-color:#5ce6a0;pointer-events:none}
+  /* (fix v3.80.4) Retiré pointer-events:none : ✓ redevient cliquable pour retirer l'ajout
+     (voir addListBtn/data-undoaddlist) — même esprit que .crrav-ignore.on, qui bascule déjà
+     dans les deux sens. Le survol passe à la teinte danger (même rouge que .crrav-ignore:hover)
+     pour signaler qu'un second clic RETIRE, contrairement à l'ajout initial. */
+  .crrav-addlist.done{opacity:1;background:#5ce6a0;color:#12120f;border-color:#5ce6a0;cursor:pointer}
+  .crrav-addlist.done:hover{background:#e0574a;color:#fff;border-color:#e0574a}
+  /* (fix v3.80.4) icône fournie ici plutôt qu'en texte du bouton (voir addListBtn, icon='')
+     pour pouvoir la faire basculer ✓ → ✕ au survol/focus : un ✓ figé ressemble à un badge
+     d'état inerte, alors que ce bouton est bien cliquable (retire l'ajout). ✕ ne s'affiche
+     qu'au moment où le geste devient réellement disponible (survol souris / focus clavier) ;
+     au tap tactile pur (pas de survol), le ✓ reste visible mais le bouton répond quand même —
+     aria-label porte déjà « touche pour retirer » pour ce cas. */
+  .crrav-addlist.done::after{content:'✓'}
+  .crrav-addlist.done:hover::after,.crrav-addlist.done:focus-visible::after{content:'✕'}
   .crrav-addlist.busy{opacity:1;pointer-events:none}
   /* (fix v3.77.0) État « reconnexion » — voir addListBtn/removeListBtn : même ambre que la
      tonalité warn des toasts (#crrav-toast-fixed[data-tone="warn"]), pour que « ça n'a pas
@@ -16273,14 +16303,24 @@
     // fermée) passent par la reconstruction complète plus bas.
     const existingSheet = content.querySelector('.crrav-settingssheet');
     if (STATE.settingsOpen && existingSheet && sheetOpenInDom) {
-      if (FORCE_RENDER) { FORCE_RENDER = false; patchSettingsSheetInPlace(existingSheet); }
-      // (48) La modale de confirmation (fermeture sans enregistrer, etc.) et le sélecteur
-      // de liste vivent en dehors de .crrav-settingssheet (sibling .crrav-modals) : ce
-      // chemin court-circuite le rebuild complet de .crrav-content ci-dessous, donc sans
-      // ce patch explicite un STATE.confirmModal posé pendant que la sheet reste ouverte
-      // ne s'affichait JAMAIS (le clic sur ✕ semblait ne rien faire).
+      // (fix v3.80.4) Modale de confirmation mise à jour EN PREMIER, avant le patch du
+      // corps de la sheet : avec l'ordre précédent, si buildSettingsSheetBodyHtml()
+      // (appelé par patchSettingsSheetInPlace juste en dessous) levait une exception —
+      // notamment possible juste après « Fermer sans enregistrer », le brouillon et
+      // STATE.confirmModal changeant tous deux au même instant — toute la fonction
+      // s'arrêtait net AVANT d'atteindre la ligne qui injecte confirmModalHtml() dans
+      // .crrav-modals. Résultat observé : le clic sur ✕ semblait figer le panneau
+      // (aucune fermeture, la fonction ayant planté en cours de route) tout en assombrissant
+      // le fond (le style de base de la sheet, pas la modale — celle-ci n'existait jamais
+      // dans le DOM), sans jamais montrer la boîte « Fermer sans enregistrer » elle-même.
+      // patchSettingsSheetInPlace est en plus protégé par safeCall : une erreur y est
+      // désormais journalisée sans jamais empêcher la modale de rester joignable.
       const modalsEl = content.querySelector('.crrav-modals');
       if (modalsEl) modalsEl.innerHTML = listPickerHtml() + confirmModalHtml();
+      if (FORCE_RENDER) {
+        FORCE_RENDER = false;
+        safeCall(() => patchSettingsSheetInPlace(existingSheet), undefined, 'patchSettingsSheetInPlace');
+      }
       return;
     }
     FORCE_RENDER = false;
@@ -17065,6 +17105,29 @@
           forceRender();
           return;
         }
+        // (fix v3.80.4) Retrait direct depuis la carte Découverte, une fois l'ajout fait
+        // (bouton ✓, voir addListBtn) — pendant du 🗑 de Reste à voir (data-removelist),
+        // avec la même confirmation puisque c'est une vraie suppression côté Crunchyroll,
+        // pas juste un marquage local comme ignorer. listId retenu dans STATE.addedToList
+        // (voir handleAddToList) : on retire exactement de LÀ où on a ajouté.
+        const undoAddBtn = e.target.closest('[data-undoaddlist]');
+        if (undoAddBtn) {
+          e.preventDefault();
+          const seriesId = undoAddBtn.dataset.undoaddlist;
+          const title = undoAddBtn.dataset.title || 'cette série';
+          const listId = STATE.addedToList.get(seriesId);
+          if (!listId) { forceRender(); return; }   // état incohérent (ex. ajout d'une session précédente) : rien à faire
+          const listTitle = (STATE.myLists.items.find((l) => l.id === listId) || {}).title || 'cette liste';
+          STATE.confirmModal = {
+            title: 'Retirer de la liste ?',
+            message: `<p>Retirer <b>${escapeHtml(title)}</b> de <b>${escapeHtml(listTitle)}</b> ?</p>`,
+            confirmLabel: 'Retirer',
+            danger: true,
+            onConfirm: () => handleUndoAddToList(seriesId, listId, title),
+          };
+          forceRender();
+          return;
+        }
         if (e.target.closest('[data-picklist-cancel]')) {
           e.preventDefault();
           STATE.listPicker = null;
@@ -17292,7 +17355,15 @@
           saveFilters(); render(); return;
         }
         if (act.dataset.act === 'ignore-all-discover') {
-          const toIgnore = visibleDiscover();   // exactement la « page actuelle » affichée
+          // (fix v3.80.4) visibleDiscover() sans argument équivaut à (false, false) : ça
+          // excluait aussi les pépites déjà AJOUTÉES à une liste, alors qu'elles restent
+          // affichées dans la grille (renderDecouverte, lui, utilise (true, true)). Le lot
+          // ignoré en masse était donc plus petit que ce qui était réellement visible à
+          // l'écran — impossible d'ignorer une pépite déjà ajoutée via ce bouton, alors que
+          // le ⊘ individuel sur sa carte le permettait très bien. includeAdded:true corrige
+          // l'incohérence ; includeIgnored reste false (inutile de réignorer une pépite déjà
+          // ignorée, elle n'apparaît de toute façon déjà plus dans le lot actif).
+          const toIgnore = visibleDiscover(false, true);   // exactement la « page actuelle » affichée
           const n = toIgnore.length;
           if (!n) return;
           STATE.confirmModal = {
