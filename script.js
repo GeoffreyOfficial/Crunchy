@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.69.0
+// @version      3.70.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -28,7 +28,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.69.0';
+  const SCRIPT_VERSION = '3.70.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -14394,18 +14394,23 @@
     </div>`;
   }
 
-  // Liste déroulante des séries en diffusion, pour choisir laquelle diagnostiquer —
-  // plutôt que de toujours tester la même par défaut (Tsugai).
+  // Liste déroulante des séries suivies, pour choisir laquelle diagnostiquer — plutôt que
+  // de toujours tester la même par défaut (Tsugai). (fix) Plus limitée aux séries EN
+  // DIFFUSION : une série terminée (ex. Isekai Quartet 3) peut tout aussi bien avoir besoin
+  // d'être diagnostiquée (mauvaise fiche AniList matchée, meanScore manquant…) — le test
+  // n'a aucune raison de se limiter au sous-ensemble « en diffusion ». Les séries en
+  // diffusion restent triées en premier (cas d'usage le plus fréquent), le reste suit par
+  // ordre alphabétique.
   function anilistDiagSeriesSelect() {
-    const airing = (STATE.series || []).filter((s) => s.airing)
-      .sort((a, b) => a.title.localeCompare(b.title, 'fr'));
-    if (!airing.length) return '';
-    if (!STATE.anilistDiagTargetId || !airing.some((s) => s.id === STATE.anilistDiagTargetId)) {
-      STATE.anilistDiagTargetId = airing[0].id;
+    const all = (STATE.series || []).slice()
+      .sort((a, b) => (b.airing - a.airing) || a.title.localeCompare(b.title, 'fr'));
+    if (!all.length) return '';
+    if (!STATE.anilistDiagTargetId || !all.some((s) => s.id === STATE.anilistDiagTargetId)) {
+      STATE.anilistDiagTargetId = all[0].id;
     }
-    const opts = airing.map((s) =>
+    const opts = all.map((s) =>
       `<option value="${escapeHtml(s.id)}"${s.id === STATE.anilistDiagTargetId ? ' selected' : ''}>${
-        escapeHtml(s.title)}</option>`).join('');
+        escapeHtml(s.title)}${s.airing ? ' (en diffusion)' : ''}</option>`).join('');
     return `<select class="crrav-select" data-act="diag-select-series" style="margin:6px 0">${opts}</select>`;
   }
 
