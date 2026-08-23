@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.60.0
+// @version      3.65.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -28,7 +28,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.60.0';
+  const SCRIPT_VERSION = '3.65.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -5099,18 +5099,19 @@
     const T = timer();
     resetCounters();                                       // compteurs par chargement
     try {
-      onProgress(stepLabel(1, 4, 'Lecture de ton profil…'));
+      onProgress(stepLabel(1, 3, 'Lecture de ton profil…'));
       const accountId = await getAccountId();
       LOG('accountId =', accountId);
       T.lap('profil');
 
-      onProgress(stepLabel(2, 4, 'Récupération de ta watchlist…'));
-      const wl = await getWatchlist(accountId);
-      T.lap('watchlist');
-
-      onProgress(stepLabel(3, 4, 'Récupération de tes listes…'));
-      const cl = await getCustomLists(accountId);
-      T.lap('listes');
+      // (fix v3.65.0) Watchlist et Crunchylists sont deux appels INDÉPENDANTS (chacun n'a
+      // besoin que de accountId, aucun ne dépend du résultat de l'autre) — jusqu'ici lancés
+      // l'un après l'autre, donc en attente de la SOMME des deux temps. En parallèle,
+      // l'attente tombe au temps du plus long des deux. Étapes renumérotées 1→3 (au lieu de
+      // 1→4) puisque ce qui était les étapes 2 et 3 n'en fait plus qu'une.
+      onProgress(stepLabel(2, 3, 'Récupération de ta watchlist et de tes listes…'));
+      const [wl, cl] = await Promise.all([getWatchlist(accountId), getCustomLists(accountId)]);
+      T.lap('watchlist+listes');
 
       STATE.raw = wl.concat(cl);
       LOG('total à analyser :', STATE.raw.length, `(watchlist ${wl.length} + listes ${cl.length})`);
@@ -5183,7 +5184,7 @@
         // Affichage progressif : la grille se remplit sous les yeux — sauf si un
         // instantané est déjà à l'écran, auquel cas on remplace tout à la fin.
         if (!hadSnapshot && !sessionLost) STATE.series = markNew([...fresh]);
-        onProgress(stepLabel(4, 4, `Analyse des épisodes… ${Math.min(i + CHUNK, seriesRefs.length)}/${seriesRefs.length}`));
+        onProgress(stepLabel(3, 3, `Analyse des épisodes… ${Math.min(i + CHUNK, seriesRefs.length)}/${seriesRefs.length}`));
         render();
       }
 
@@ -5827,13 +5828,37 @@
       // consommeraient le quota de pépites pour être jetées ensuite à l'affichage.
       const ignoredIds = new Set(IGNORED.keys());
 
+      // (fix v3.65.0) Membres de listes et historique de visionnage sont deux appels
+      // INDÉPENDANTS (chacun n'a besoin que de accountId, aucun ne dépend du résultat de
+      // l'autre) — lancés désormais EN PARALLÈLE au lieu de l'un après l'autre. Chaque
+      // fonction garde sa propre gestion d'erreur EN INTERNE (l'une reste silencieuse en
+      // best-effort, l'autre pose un avertissement visible) : Promise.all porte donc sur
+      // deux promesses qui ne rejettent jamais elles-mêmes, pas sur les appels bruts.
+      onProgress(stepLabel(2, 3, 'Listes et historique de visionnage…'));
+      const listMemberIdsPromise = (async () => {
+        try { return await getListMemberIds(accountId); }
+        catch (_) { return new Set(); /* best-effort */ }
+      })();
+      const watchedIdsPromise = (async () => {
+        try {
+          const w = await getWatchedSeriesIds(accountId, (p) => onProgress(stepLabel(2, 3, historyScanLabel(p))), force);
+          if (!w.size) {
+            D.warning = "Historique de visionnage vide ou indisponible : seules les séries de tes " +
+              "listes sont exclues de Découverte, pas celles juste commencées ailleurs. " +
+              "Regarde la console pour le détail.";
+          }
+          return w;
+        } catch (e) {
+          console.warn('[reste-à-voir] historique indisponible, on continue sans', e);
+          D.warning = "Impossible de lire ton historique de visionnage (" + (e.message || e) + "). " +
+            "Découverte n'exclut que les séries de tes listes.";
+          return new Set();
+        }
+      })();
       // Membres ACTUELS de tes listes (watchlist + Crunchylists), relus à chaud : une
       // série que tu viens d'ajouter à une liste ne doit plus apparaître ici. STATE.series
       // n'est PAS rechargé par une simple relance de Découverte, d'où cette lecture ciblée.
-      let listMemberIds = new Set();
-      try {
-        listMemberIds = await getListMemberIds(accountId);
-      } catch (_) { /* best-effort */ }
+      const [listMemberIds, watchedIds] = await Promise.all([listMemberIdsPromise, watchedIdsPromise]);
 
       // Si une de ces séries n'est pas encore dans « Reste à voir » (STATE.series), c'est
       // un ajout tout frais : on relance « Reste à voir » en tâche de fond pour qu'elle y
@@ -5842,21 +5867,6 @@
       const currentIds = new Set(STATE.series.map((s) => s.id));
       const hasNewMember = [...listMemberIds].some((id) => !currentIds.has(id));
       if (hasNewMember && !STATE.loading) idle(() => { if (!STATE.loading) refresh(); });
-
-      onProgress(stepLabel(2, 3, 'Historique de visionnage…'));
-      let watchedIds = new Set();
-      try {
-        watchedIds = await getWatchedSeriesIds(accountId, (p) => onProgress(stepLabel(2, 3, historyScanLabel(p))), force);
-        if (!watchedIds.size) {
-          D.warning = "Historique de visionnage vide ou indisponible : seules les séries de tes " +
-            "listes sont exclues de Découverte, pas celles juste commencées ailleurs. " +
-            "Regarde la console pour le détail.";
-        }
-      } catch (e) {
-        console.warn('[reste-à-voir] historique indisponible, on continue sans', e);
-        D.warning = "Impossible de lire ton historique de visionnage (" + (e.message || e) + "). " +
-          "Découverte n'exclut que les séries de tes listes.";
-      }
 
       // (fix) Ordre de priorité pour attribuer UNE seule raison à un id présent dans
       // plusieurs bassins à la fois (ex. dans la watchlist ET vue dans l'historique) :
@@ -6033,46 +6043,66 @@
             catch (e) { safeCall.log(e, 'loadDiscover:favSeed'); return []; }
           }, CFG.concurrency, undefined, () => D.cancelRequested || anilistCooldownRemainingMs() > 0);
 
-          for (const recs of recsByFav) {
-            if (D.cancelRequested || matches.length >= target) break;
-            for (const rm of recs) {
-              if (D.cancelRequested || matches.length >= target) break;
-              if (!rm || rm.id == null || IGNORED.has('ani:' + rm.id)) continue;
-              candidatesSeenTotal++;
-              const genresFr = translateAniGenres(rm.genres || []);
-              if (genresFr.length && categoriesRejectedByGenre(genresFr)) { REJ.genrePreBrowse++; continue; }
-              const title = aniPrimaryTitle(rm) || (rm.title && rm.title.native) || '';
-              if (!title) { REJ.noCrMatch++; continue; }
-              let cr;
-              try { cr = await resolveCrunchyrollForPremiere(rm); }
-              catch (e) { safeCall.log(e, 'loadDiscover:favSeed:resolve'); REJ.noCrMatch++; continue; }
-              if (!cr || !cr.id) { REJ.noCrMatch++; continue; }
-              if (excluded.has(cr.id)) { REJ[classifyKnownReason(cr.id)]++; continue; }
-              if (seenCandidate.has(cr.id)) { REJ.duplicate++; continue; }
-              seenCandidate.add(cr.id);
-              const aniResult = { matched: false, ...EMPTY_ANI, aniId: null, aniTitle: '', av: ANILIST_CACHE_VER };
-              Object.assign(aniResult, computeAniSchedule(rm, {}), { matched: true, aniId: rm.id, aniTitle: title });
-              cacheSet('anilist:' + cr.id, aniResult);
-              let panel;
-              try { panel = await getSeriesPanel(cr.id); } catch (e) { safeCall.log(e, 'loadDiscover:favSeed:panel'); REJ.noCrMatch++; continue; }
-              if (!panel) { REJ.noCrMatch++; continue; }
-              const evald = await evaluateDiscoverCandidate(panel, { accountId, REJ, D });
-              if (!evald) continue;
-              const crTitleNorm = aniNorm(evald.p.title);
-              if (crTitleNorm && seenTitlesNorm.has(crTitleNorm)) { REJ.duplicate++; continue; }
-              if (crTitleNorm) seenTitlesNorm.add(crTitleNorm);
-              matches.push({
-                id: evald.p.id, title: evald.p.title, slug: evald.p.slug_title, poster: posterOf(evald.p),
-                synopsis: evald.p.description || '',
-                rating: evald.rating, seasons: evald.seasons,
-                categories: evald.categories, tags: evald.tags, aniScore: evald.aniScore ?? null,
-                episodes: evald.episodes, secTotal: evald.secTotal, maxAir: evald.maxAir,
-                order: seenCandidate.size,
-              });
-            }
-          }
+          // (fix v3.61.0) BUG signalé : ce traitement se faisait UNE recommandation à la
+          // fois (boucle for imbriquée), chacune coûtant 2-3 allers-retours réseau
+          // (résolution Crunchyroll — qui peut elle-même tenter plusieurs variantes de
+          // titre — puis fiche complète, puis évaluation). Avec jusqu'à 8 favoris × ~25
+          // recommandations chacun, ça pouvait représenter jusqu'à ~200 candidats traités
+          // strictement l'un après l'autre : plusieurs minutes, perçues comme un blocage
+          // figé à « Étape 3/3 » (la barre affichait un pourcentage/ETA statique tout ce
+          // temps, sans aucune mise à jour intermédiaire — aggravant encore l'impression de
+          // plantage). Traités en parallèle maintenant (pool, même plafond CFG.concurrency
+          // que le reste du scan), avec une progression qui avance réellement à chaque
+          // candidat terminé plutôt qu'un message figé du début à la fin.
+          const allRecs = recsByFav.flat().filter((rm) => rm && rm.id != null && !IGNORED.has('ani:' + rm.id));
+          let favProcessed = 0;
+          await pool(allRecs, async (rm) => {
+            if (D.cancelRequested || matches.length >= target) return;
+            candidatesSeenTotal++;
+            const genresFr = translateAniGenres(rm.genres || []);
+            if (genresFr.length && categoriesRejectedByGenre(genresFr)) { REJ.genrePreBrowse++; return; }
+            const title = aniPrimaryTitle(rm) || (rm.title && rm.title.native) || '';
+            if (!title) { REJ.noCrMatch++; return; }
+            let cr;
+            try { cr = await resolveCrunchyrollForPremiere(rm); }
+            catch (e) { safeCall.log(e, 'loadDiscover:favSeed:resolve'); REJ.noCrMatch++; return; }
+            if (!cr || !cr.id) { REJ.noCrMatch++; return; }
+            if (excluded.has(cr.id)) { REJ[classifyKnownReason(cr.id)]++; return; }
+            if (seenCandidate.has(cr.id)) { REJ.duplicate++; return; }
+            seenCandidate.add(cr.id);
+            const aniResult = { matched: false, ...EMPTY_ANI, aniId: null, aniTitle: '', av: ANILIST_CACHE_VER };
+            Object.assign(aniResult, computeAniSchedule(rm, {}), { matched: true, aniId: rm.id, aniTitle: title });
+            cacheSet('anilist:' + cr.id, aniResult);
+            let panel;
+            try { panel = await getSeriesPanel(cr.id); } catch (e) { safeCall.log(e, 'loadDiscover:favSeed:panel'); REJ.noCrMatch++; return; }
+            if (!panel) { REJ.noCrMatch++; return; }
+            const evald = await evaluateDiscoverCandidate(panel, { accountId, REJ, D });
+            if (!evald) return;
+            const crTitleNorm = aniNorm(evald.p.title);
+            if (crTitleNorm && seenTitlesNorm.has(crTitleNorm)) { REJ.duplicate++; return; }
+            if (crTitleNorm) seenTitlesNorm.add(crTitleNorm);
+            matches.push({
+              id: evald.p.id, title: evald.p.title, slug: evald.p.slug_title, poster: posterOf(evald.p),
+              synopsis: evald.p.description || '',
+              rating: evald.rating, seasons: evald.seasons,
+              categories: evald.categories, tags: evald.tags, aniScore: evald.aniScore ?? null,
+              episodes: evald.episodes, secTotal: evald.secTotal, maxAir: evald.maxAir,
+              order: seenCandidate.size,
+            });
+            // (fix v3.62.0) Publie CHAQUE pépite dès qu'elle est retenue, comme les autres
+            // sources de Découverte (pages Crunchyroll, lots AniList) — avant, rien
+            // n'apparaissait avant la fin de TOUT le lot de favoris (jusqu'à ~200
+            // candidats traités en parallèle), même si des pépites étaient trouvées dès
+            // les premières secondes. Le pool tourne en parallèle (plusieurs candidats
+            // résolus en même temps) : ces publications peuvent se chevaucher, exactement
+            // comme le fait déjà runAniBatch pour son propre lot — sans souci, render()
+            // encaisse déjà des appels rapprochés ailleurs dans le scan.
+            publishFound();
+          }, CFG.concurrency, (done) => {
+            favProcessed = done;
+            onProgress(stepLabel(3, 3, `Découverte : similaires de tes favoris… (${favProcessed}/${allRecs.length})`));
+          }, () => D.cancelRequested || matches.length >= target);
         }
-        if (matches.length) publishFound();
       }
 
       // ─── (fix v3.56.0) Entrelacement popularité Crunchyroll / AniList ──────────────
@@ -6437,18 +6467,13 @@
         // remonter des candidats qui remplaceront avantageusement les moins pertinents du
         // bassin CR au tri final (voir matches.slice(0, target) plus bas).
         const aniTarget = D.similarTo ? target : (target - (legendary ? legTotal(matches) : matches.length));
-        const aniFound = await scanAnilistPopularity(
-          aniProfile, excluded, seenCandidate, seenTitlesNorm, knownTitlesNorm, aniTarget,
-          { accountId, REJ, D, classifyKnownReason },
-          (page, maxP) => onProgress(stepLabel(3, 3, `AniList ${page}/${maxP}`)),
-        );
-        // (fix) Sans ça, candidatesSeenTotal restait à 0 en mode similaire (la boucle de scan
-        // popularité CR, seule à l'incrémenter jusqu'ici, ne tourne jamais dans ce mode) — le
-        // rapport de fin de scan affichait alors « 0 candidat examiné » à côté de « 5 retenus ».
-        candidatesSeenTotal += (aniFound.considered || 0);
-        if (aniFound.similarRecTotal != null) similarRecTotal = aniFound.similarRecTotal;
-        for (const x of aniFound) {
-          if (!D.similarTo && (legendary ? legTotal(matches) : matches.length) >= target) break;
+        // (fix v3.63.0) Traitement d'UNE pépite retenue — extrait en fonction nommée pour
+        // être passé en `onFound` à scanAnilistPopularity et déclenché IMMÉDIATEMENT à
+        // chaque candidate acceptée (recommandations 🪄 traitées en parallèle depuis cette
+        // version, voir scanAnilistPopularity), au lieu d'attendre que TOUT le lot soit
+        // revenu avant de commencer à afficher quoi que ce soit.
+        const handleAniFound = (x) => {
+          if (!D.similarTo && (legendary ? legTotal(matches) : matches.length) >= target) return;
           const candidate = {
             id: x.p.id, title: x.p.title, slug: x.p.slug_title, poster: posterOf(x.p),
             synopsis: x.p.description || '',
@@ -6469,12 +6494,26 @@
             if (CFG.discoverScoreCacheHours > 0) {
               cacheSet('nugget:' + candidate.id, { legendary: sig.legendary, notable: sig.notable, score: sig.score, fp: scoreFp });
             }
-            if (!legendaryAccepts(sig)) { REJ.legendaryScore++; continue; }
+            if (!legendaryAccepts(sig)) { REJ.legendaryScore++; return; }
             candidate.legendary = sig.legendary;
           }
           matches.push(candidate);
           publishFound();          // (streaming) pépite du second bassin AniList affichée aussitôt
-        }
+        };
+        const aniFound = await scanAnilistPopularity(
+          aniProfile, excluded, seenCandidate, seenTitlesNorm, knownTitlesNorm, aniTarget,
+          { accountId, REJ, D, classifyKnownReason },
+          (page, maxP) => onProgress(stepLabel(3, 3, `AniList ${page}/${maxP}`)),
+          undefined, handleAniFound,
+        );
+        // (fix) Sans ça, candidatesSeenTotal restait à 0 en mode similaire (la boucle de scan
+        // popularité CR, seule à l'incrémenter jusqu'ici, ne tourne jamais dans ce mode) — le
+        // rapport de fin de scan affichait alors « 0 candidat examiné » à côté de « 5 retenus ».
+        candidatesSeenTotal += (aniFound.considered || 0);
+        if (aniFound.similarRecTotal != null) similarRecTotal = aniFound.similarRecTotal;
+        // (fix v3.63.0) Plus de boucle ici : chaque pépite de `aniFound` a déjà été traitée
+        // et publiée EN DIRECT via handleAniFound (onFound) au moment où elle a été trouvée —
+        // la retraiter ici ferait doublon (candidate poussée deux fois dans `matches`).
       }
 
       // Si la boucle n'a pas été coupée en cours (cancel/exhausted), c'est soit la cible
@@ -7078,7 +7117,12 @@
   // Sans `cursor` (repli undefined), comportement inchangé : repart de la page 1 à chaque
   // appel — c'est le cas du mode 🎲 légendaire et 🪄 similaire, qui continuent d'appeler
   // cette fonction une seule fois, sans besoin de reprise entre plusieurs appels.
-  async function scanAnilistPopularity(profile, exclude, seenCandidate, seenTitlesNorm, knownTitlesNorm, target, ctx, onProgress, cursor) {
+  // (fix v3.63.0) `onFound` (optionnel) : rappelé IMMÉDIATEMENT dès qu'une candidate est
+  // retenue dans `found` (voir processMedia ci-dessous) — c'est ce qui permet à l'appelant
+  // de publier/afficher chaque pépite au fil de l'eau, plutôt que d'attendre que TOUTE la
+  // fonction se résolve (jusqu'à 25 recommandations traitées en mode 🪄 similaire) avant de
+  // voir quoi que ce soit apparaître.
+  async function scanAnilistPopularity(profile, exclude, seenCandidate, seenTitlesNorm, knownTitlesNorm, target, ctx, onProgress, cursor, onFound) {
     const found = [];
     if (!CFG.discoverAnilistEnabled || target <= 0) return found;
     if (anilistCooldownRemainingMs() > 0) return found;   // coupe-circuit déjà en place : on n'insiste pas
@@ -7147,6 +7191,7 @@
       if (crTitleNorm && seenTitlesNorm.has(crTitleNorm)) { REJ.duplicate++; return; }
       if (crTitleNorm) seenTitlesNorm.add(crTitleNorm);
       found.push(evald);
+      if (onFound) onFound(evald);   // (fix v3.63.0) diffusion immédiate — voir plus haut
     };
 
     // ── Mode SIMILAIRE 🪄 : pool = recommandations AniList curées de la série source ──
@@ -7158,15 +7203,16 @@
       const recMedia = await fetchAnilistSimilar(D.similarTo);
       if (recMedia && recMedia.length) {
         found.similarRecTotal = recMedia.length;   // (fix) pour le rapport : « X recos AniList »
-        // (fix) onProgress(1,1) une seule fois avant la boucle figeait la barre sur
-        // « AniList 1/1 » pendant tout le traitement des recommandations (résolution CR +
-        // fiche + évaluation par série, potentiellement long) — on avance maintenant le
-        // compteur À CHAQUE recommandation traitée, comme pour la pagination tag_in plus bas.
-        for (let i = 0; i < recMedia.length; i++) {
-          if (D.cancelRequested || anilistCooldownRemainingMs() > 0 || found.length >= target) break;
-          if (onProgress) onProgress(i + 1, recMedia.length);
-          await processMedia(recMedia[i]);
-        }
+        // (fix v3.63.0) Traitées en PARALLÈLE (pool, même plafond CFG.concurrency que le
+        // reste du scan) au lieu d'une par une — chaque recommandation coûte 2-3 allers-
+        // retours réseau (résolution Crunchyroll, fiche complète, évaluation), jusqu'à 25
+        // recommandations : traitées séquentiellement, ça pouvait prendre 10-30 s pendant
+        // lesquelles RIEN ne s'affichait (même symptôme que le bug des favoris, corrigé en
+        // v3.61.0/v3.62.0 — même fix ici). onFound (voir processMedia) publie chaque
+        // pépite dès qu'elle est retenue, pas seulement une fois tout le lot terminé.
+        await pool(recMedia, async (m) => { await processMedia(m); }, CFG.concurrency,
+          (done) => { if (onProgress) onProgress(done, recMedia.length); },
+          () => D.cancelRequested || anilistCooldownRemainingMs() > 0 || found.length >= target);
         found.considered = considered;
         // (fix) Avant : `if (found.length) return found;` — s'arrêtait dès la PREMIÈRE
         // trouvaille, même à 6/30. AniList ne fournit qu'un nombre FIXE de recommandations
@@ -7208,10 +7254,16 @@
       hasNext = !!(pageData && pageData.pageInfo && pageData.pageInfo.hasNextPage);
       page++;
       if (!media.length) continue;
-      for (const m of media) {
-        if (D.cancelRequested || found.length >= target) break;
-        await processMedia(m);
-      }
+      // (fix v3.64.0) Traitement d'une page en PARALLÈLE (pool, même plafond CFG.concurrency
+      // que le reste du scan) au lieu d'un candidat à la fois — jusqu'à 50 candidats par
+      // page, chacun coûtant 2-3 allers-retours réseau (résolution Crunchyroll, fiche
+      // complète, évaluation) : traités séquentiellement, une seule page pouvait prendre
+      // 15-40 s. Cette boucle est partagée par le mode normal (lots entrelacés, voir
+      // runAniBatch), le mode légendaire (second bassin AniList) et le mode similaire en
+      // repli tag_in — le fix profite aux trois d'un coup. onFound (voir processMedia) fait
+      // toujours son travail de diffusion immédiate, candidat par candidat, y compris ici.
+      await pool(media, async (m) => { await processMedia(m); }, CFG.concurrency, undefined,
+        () => D.cancelRequested || found.length >= target);
     }
     if (cursor) { cursor.page = page; cursor.hasNext = hasNext; }
     found.considered = considered;
