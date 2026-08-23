@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.65.0
+// @version      3.66.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -28,7 +28,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.65.0';
+  const SCRIPT_VERSION = '3.66.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -5344,6 +5344,7 @@
       legendaryScore: `Score « pépite » sous le seuil légendaire (${CFG.discoverLegendaryScore})`,
       noCrMatch: 'Aucune fiche Crunchyroll identifiable (pas licenciée, ou correspondance pas assez sûre)',
       duplicate: 'Doublon rencontré pendant ce même scan (recommandations qui se recoupent)',
+      wrongFormat: 'Contenu hors format série (clip musical, film…) écarté',
     };
     const rows = Object.entries(rej)
       .filter(([k, n]) => n > 0 && (legendary || k !== 'legendaryScore'))
@@ -5394,6 +5395,7 @@
         : `Beaucoup de candidats passent les filtres mais restent sous le score légendaire (${CFG.discoverLegendaryScore}). Baisse « Score minimum — légendaire » ou monte « Poids du goût dans le score final » dans Réglages → Découverte.`,
       noCrMatch: "Beaucoup de recommandations/tags AniList n'ont pas de fiche Crunchyroll identifiable (série pas licenciée chez CR, ou correspondance pas assez fiable pour être proposée). Rien à régler ici — c'est une limite du catalogue Crunchyroll, pas de tes filtres.",
       duplicate: "Beaucoup de candidats se recoupent entre plusieurs recommandations AniList pendant ce même scan. Rien à régler — ce sont juste des doublons évités, pas des candidats perdus.",
+      wrongFormat: "Du contenu hors format série (clip musical, film…) glissé dans des recommandations AniList a été écarté. Rien à régler — c'est un filet de sécurité, pas un de tes filtres.",
     };
     const mainAdvice = topReason ? ADVICE[topReason] : (isSimilar
       ? "Élargis un des filtres ci-dessous, ou réessaie avec une autre série proche comme point de départ : le nombre de vraies recommandations AniList pour un titre donné est limité."
@@ -5425,6 +5427,7 @@
       legendaryScore: `« Score minimum — légendaire » à BAISSER (actuellement ${CFG.discoverLegendaryScore}) — ou « Poids du goût dans le score final » à monter (Réglages → Découverte)`,
       noCrMatch: 'aucun réglage — limite du catalogue Crunchyroll (série non licenciée ou correspondance pas assez fiable)',
       duplicate: 'aucun réglage — doublons évités entre recommandations, pas des candidats perdus',
+      wrongFormat: 'aucun réglage — filet de sécurité contre le contenu hors format série',
     };
     const stopTxt = STOP[stopReason] || '';
 
@@ -5773,6 +5776,9 @@
       // (candidatesSeenTotal - somme des rejets - trouvés ne tombait pas juste).
       noCrMatch: 0,         // reco/tag AniList sans fiche Crunchyroll identifiable (pas licenciée, ou correspondance pas assez sûre)
       duplicate: 0,         // déjà rencontrée PENDANT ce même scan (doublon entre recos AniList, ou avec le bassin CR)
+      // (fix v3.66.0) Contenu AniList hors format série (MUSIC, MOVIE…) glissé dans les
+      // recommandations d'un favori ou dans une reco AniList directe — voir processMedia.
+      wrongFormat: 0,
     };
     let candidatesSeenTotal = 0;
     let pagesScanned = 0;
@@ -7149,6 +7155,20 @@
       if (!m || m.id == null) return;
       if (IGNORED.has('ani:' + m.id)) return;
       considered++;
+      // (fix v3.66.0) BUG signalé : « Sony Music AnimeSongs ONLINE 2022 » (un contenu
+      // musical, pas une série) est ressorti « légendaire » en Découverte. Cause : le repli
+      // tag_in filtre déjà côté requête AniList (formatIn: ANILIST_DISCOVER_FORMATS, voir
+      // plus bas — exclut MUSIC/MOVIE/SPECIAL nativement), mais le pool « recommandations »
+      // (🪄 similaire ET l'étape « similaires de tes favoris », toutes deux via
+      // fetchAnilistSimilar/ANILIST_SIMILAR_QUERY) n'a JAMAIS eu ce filtre — AniList
+      // recommande parfois un contenu musical à côté d'une vraie série (OST, concert lié à
+      // la franchise), et rien ici ne le rejetait par FORMAT ; seul le genre était vérifié,
+      // et un tel contenu peut très bien porter des genres/tags qui n'ont aucun rapport
+      // (comme ici Drame/Fantastique/Mystère) puisqu'ils ne décrivent pas vraiment le
+      // contenu. Même filtre que Calendrier (voir loadNewPremieres, format MOVIE/MUSIC déjà
+      // exclu là-bas) et que le repli tag_in : ANILIST_DISCOVER_FORMATS fait référence,
+      // appliqué maintenant à TOUTE fiche AniList quel que soit son chemin d'arrivée.
+      if (m.format && !ANILIST_DISCOVER_FORMATS.includes(m.format)) { REJ.wrongFormat++; return; }
       const genresFr = translateAniGenres(m.genres || []);
       if (genresFr.length && categoriesRejectedByGenre(genresFr)) { REJ.genrePreBrowse++; return; }
       const title = aniPrimaryTitle(m) || (m.title && m.title.native) || '';
