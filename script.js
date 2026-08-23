@@ -4329,8 +4329,20 @@
       const releasing = m.status === 'RELEASING';
       const yearMatch = !!(m.startDate && m.startDate.year && crYear
         && Math.abs(m.startDate.year - crYear) <= 1);
+      // (fix) Bonus léger si le total d'épisodes annoncé par cette fiche colle à celui de la
+      // série CR — départage entre plusieurs fiches AniList au titre quasi identique (une
+      // série découpée en plusieurs « cours » sur AniList — ex. « X » et « X: Sous-titre-hen »
+      // — alors que Crunchyroll regroupe tout sous UNE seule fiche). Sans ça, la fiche qui
+      // matche le mieux en titre pouvait n'être qu'un fragment de la série entière, avec des
+      // tags/genres qui ne représentent pas fidèlement ce que tu as vu. N'agit que si les deux
+      // totaux sont connus ; sinon (l'un des deux absent) aucun effet, comportement inchangé.
+      const crEp = Number.isFinite(s.episodes) && s.episodes > 0 ? s.episodes : null;
+      const mEp = Number.isFinite(m.episodes) && m.episodes > 0 ? m.episodes : null;
+      const epBonus = (crEp && mEp)
+        ? (mEp === crEp ? 0.08 : (Math.abs(mEp - crEp) <= 1 ? 0.04 : 0))
+        : 0;
       m.__titleScore = titleScore; m.__releasing = releasing; m.__yearMatch = yearMatch;
-      const composite = titleScore + (releasing && s.airing ? 0.15 : 0) + (yearMatch ? 0.1 : 0);
+      const composite = titleScore + (releasing && s.airing ? 0.15 : 0) + (yearMatch ? 0.1 : 0) + epBonus;
       if (composite > bestComposite) { bestComposite = composite; best = m; }
     }
     if (!best) return null;
@@ -6076,9 +6088,17 @@
             if (excluded.has(cr.id)) { REJ[classifyKnownReason(cr.id)]++; return; }
             if (seenCandidate.has(cr.id)) { REJ.duplicate++; return; }
             seenCandidate.add(cr.id);
-            const aniResult = { matched: false, ...EMPTY_ANI, aniId: null, aniTitle: '', av: ANILIST_CACHE_VER };
-            Object.assign(aniResult, computeAniSchedule(rm, {}), { matched: true, aniId: rm.id, aniTitle: title });
-            cacheSet('anilist:' + cr.id, aniResult);
+            // (fix) confidence !== 'confirmed' (score de titre CR ≤ ~0.82, jusqu'à 0.45 pour
+            // 'probable') : le lien vers CETTE fiche CR n'est pas assez sûr pour lui coller les
+            // tags/note de `rm` sans vérification — une candidate ainsi affublée de tags qui ne
+            // sont peut-être pas les siens pouvait décrocher « Légendaire » sur des données pas
+            // vraiment à elle. On n'écrit le cache AniList que pour un lien confirmé ; sinon la
+            // candidate reste tagless (repli genres CR seuls, plafonnée à « notable » au mieux).
+            if (cr.confidence === 'confirmed') {
+              const aniResult = { matched: false, ...EMPTY_ANI, aniId: null, aniTitle: '', av: ANILIST_CACHE_VER };
+              Object.assign(aniResult, computeAniSchedule(rm, {}), { matched: true, aniId: rm.id, aniTitle: title });
+              cacheSet('anilist:' + cr.id, aniResult);
+            }
             let panel;
             try { panel = await getSeriesPanel(cr.id); } catch (e) { safeCall.log(e, 'loadDiscover:favSeed:panel'); REJ.noCrMatch++; return; }
             if (!panel) { REJ.noCrMatch++; return; }
@@ -6300,7 +6320,7 @@
                 for (const x of needAni) {
                   const r = map.get(x.p.id);
                   const sLike = { id: x.p.id, title: x.p.title, airing: isAiring(x.maxAir),
-                    lastAired: x.maxAir ? { air: x.maxAir } : null };
+                    lastAired: x.maxAir ? { air: x.maxAir } : null, episodes: x.episodes || null };
                   const best = r ? aniPickMatch(r.media, sLike) : null;
                   const result = { matched: false, ...EMPTY_ANI, aniId: null, aniTitle: '', av: ANILIST_CACHE_VER };
                   if (best) Object.assign(result, computeAniSchedule(best, sLike),
@@ -6587,7 +6607,7 @@
             for (const x of slice) {
               const r = map.get(x.id);
               const sLike = { id: x.id, title: x.title, airing: isAiring(x.maxAir),
-                lastAired: x.maxAir ? { air: x.maxAir } : null };
+                lastAired: x.maxAir ? { air: x.maxAir } : null, episodes: x.episodes || null };
               const best = r ? aniPickMatch(r.media, sLike) : null;
               const result = { matched: false, ...EMPTY_ANI, aniId: null, aniTitle: '', av: ANILIST_CACHE_VER };
               if (best) Object.assign(result, computeAniSchedule(best, sLike),
