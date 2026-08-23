@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.74.0
+// @version      3.75.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -28,7 +28,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.74.0';
+  const SCRIPT_VERSION = '3.75.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -16377,16 +16377,10 @@
     // (#6) Après l'affichage, en tâche de fond : n'impacte jamais le temps de rendu.
     idle(() => scheduleHueExtraction());
 
-    // (24) Le DOM est entièrement reconstruit à chaque render : on réenregistre les
-    // listeners toggle pour que l'ouverture/fermeture manuelle (mode compact) soit
-    // mémorisée et survive au prochain render plutôt que de revenir à l'état par défaut.
-    content.querySelectorAll('.crrav-accordion[data-acc]').forEach((el) => {
-      el.addEventListener('toggle', () => {
-        if (suppressAccToggle) return;
-        const id = el.dataset.acc;
-        if (el.open) statsAccordionOpen.add(id); else statsAccordionOpen.delete(id);
-      });
-    });
+    // (24→fix) L'écoute du toggle est désormais déléguée une bonne fois pour toutes sur
+    // `root` (voir open()) : plus besoin de réenregistrer un listener sur chaque nœud
+    // <details> régénéré ici. Voir la note sur `root.addEventListener('toggle', ...)`
+    // pour le bug que ça corrige (accordéon qui se refermait tout seul).
 
     // Chronologie par année (voir buildStats) : si elle déborde (beaucoup d'années
     // différentes), on démarre le défilement horizontal sur les années les plus
@@ -16721,6 +16715,30 @@
       // overflow-y:auto) qui défile réellement (voir aussi renderNow ci-dessus, même
       // confusion corrigée). Cet événement ne se déclenchait donc jamais : la position de
       // scroll mémorisée entre onglets/sessions n'était en pratique jamais mise à jour.
+      // (fix) Bug « diagnostic individuel impossible à ouvrir » : l'accordéon « Tests
+      // individuels » (set-diag-detail) mémorise son état ouvert/fermé via
+      // statsAccordionOpen, mis à jour par l'événement natif 'toggle' du <details>. Ce
+      // listener était jusqu'ici réattaché À CHAQUE RENDU COMPLET (renderNow), sur les
+      // nœuds <details> fraîchement créés. Problème : quand la sheet Réglages est déjà
+      // ouverte, un forceRender() (ex. chaque étape du diagnostic complet, changement de
+      // série sélectionnée, clic sur un bouton de test) passe par patchSettingsSheetInPlace(),
+      // qui régénère .crrav-sheetbody.innerHTML SANS repasser par ce câblage — les nouveaux
+      // <details> qu'il crée n'avaient donc AUCUN listener 'toggle'. Résultat : ouvrir
+      // « Tests individuels » ne mettait jamais à jour statsAccordionOpen, et le tout
+      // prochain rendu (buildSettingsSheetBodyHtml relit statsAccordionOpen) le recréait
+      // fermé — d'où l'accordéon qui se « refermait tout seul » en boucle pendant le
+      // diagnostic complet, ou dès qu'on sélectionnait une série / lançait un test ciblé.
+      // Fix : un SEUL listener, posé une fois sur `root` (jamais détruit) en phase de
+      // capture — le seul moyen de "déléguer" un événement 'toggle', qui ne bouillonne
+      // (bubble) pas mais traverse bien la phase de capture. Il attrape donc TOUJOURS le
+      // toggle, quel que soit le chemin de rendu qui a créé le <details>.
+      root.addEventListener('toggle', (e) => {
+        if (suppressAccToggle) return;
+        const el = e.target;
+        if (!el || !el.matches || !el.matches('.crrav-accordion[data-acc]')) return;
+        const id = el.dataset.acc;
+        if (el.open) statsAccordionOpen.add(id); else statsAccordionOpen.delete(id);
+      }, true);
       let scrollSaveTimer = null;
       root.addEventListener('scroll', () => {
         clearTimeout(scrollSaveTimer);
