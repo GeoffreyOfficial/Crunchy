@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.75.0
+// @version      3.76.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -28,7 +28,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.75.0';
+  const SCRIPT_VERSION = '3.76.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -3744,7 +3744,10 @@
   const EMPTY_ANI = { matched: false, plannedTotal: null, seasonEndTs: null, plannedApprox: false, anilistStatus: null, nextEpTs: null, nextEpNum: null, genres: [], tags: [], studio: null, meanScore: null, popularity: null, duration: null, season: null, seasonYear: null, source: null, format: null };
   // Version du FORMAT du cache AniList : à incrémenter quand la logique de calcul change,
   // pour re-questionner AniList sans vider tout le reste du cache (pas de rescan complet).
-  const ANILIST_CACHE_VER = 9;   // 4 : ajout du repli titre anglais CR (voir enrichAnilistSchedule)
+  const ANILIST_CACHE_VER = 10;   // 4 : ajout du repli titre anglais CR (voir enrichAnilistSchedule)
+  // 10 : aniPickMatch corrigé (bonus « dernière saison ») pour les franchises multi-
+  // saisons regroupées sous une seule fiche CR (ex. Isekai Quartet) — les anciens matchs,
+  // potentiellement figés sur la saison 1 sans note, doivent être réévalués.
                                   // 5 : ajout des genres AniList (voir translateAniGenres)
                                   // 6 : ajout des tags AniList pondérés par rank (voir tasteScore)
                                   // 7 : ajout studio/note/popularité/durée/saison/source/format
@@ -4221,7 +4224,12 @@
         const r = map.get(it.id);
         const t = titleOf(it);
         const sLike = { id: it.id, title: t, airing: isAiring(it.ref.maxAir),
-          lastAired: it.ref.maxAir ? { air: it.ref.maxAir } : null, episodes: it.ref.episodes || null };
+          lastAired: it.ref.maxAir ? { air: it.ref.maxAir } : null, episodes: it.ref.episodes || null,
+          // (fix) Nombre de saisons CR — voir aniPickMatch, seasonBonus : disponible
+          // gratuitement (déjà affiché sur la carte « N saisons »), contrairement à
+          // lastAired/episodes qui ne reflètent pas la bonne saison pour ces franchises
+          // multi-saisons regroupées sous une seule fiche CR.
+          seasons: Number.isFinite(it.ref.seasons) ? it.ref.seasons : null };
         const best = r ? aniPickMatch(r.media, sLike) : null;
         const result = { matched: false, ...EMPTY_ANI, aniId: null, aniTitle: '', av: ANILIST_CACHE_VER };
         if (best) Object.assign(result, computeAniSchedule(best, sLike),
@@ -4286,6 +4294,23 @@
   function aniPrimaryTitle(m) {
     const t = m.title || {};
     return t.english || t.romaji || t.native || '';
+  }
+
+  // (fix) Détecte un indicateur de saison/partie en fin de titre AniList (« Isekai
+  // Quartet 3 », « Attack on Titan 2nd Season », « Re:Zero Season 2 ») : renvoie le
+  // numéro (>=1), ou null si le titre ne se termine pas par un tel indicateur. Limité à
+  // 1-2 chiffres pour ne jamais confondre avec une ANNÉE en fin de titre (4 chiffres,
+  // ex. « Fullmetal Alchemist 2003 ») — voir aniPickMatch, seasonBonus.
+  function aniSequelNumber(title) {
+    if (!title) return null;
+    const t = String(title).trim();
+    let m = t.match(/(?:^|\s)(\d{1,2})(?:st|nd|rd|th)?\s*season\s*$/i);
+    if (m) return parseInt(m[1], 10);
+    m = t.match(/season\s*(\d{1,2})\s*$/i);
+    if (m) return parseInt(m[1], 10);
+    m = t.match(/(?:^|\s)(\d{1,2})\s*$/);
+    if (m) return parseInt(m[1], 10);
+    return null;
   }
 
   // AniList expose ses genres en anglais (liste fermée d'une vingtaine de valeurs), alors
@@ -4377,16 +4402,21 @@
     }
     const crNorm = aniNorm(s.title || '');
     const crYear = (s.lastAired && s.lastAired.air) ? new Date(s.lastAired.air).getFullYear() : null;
+    // (fix) Nombre de saisons CR (voir panelSeasons — gratuit, déjà affiché sur la carte
+    // « 3 saisons ») : sert à départager les franchises multi-saisons regroupées sous UNE
+    // SEULE fiche Crunchyroll (ex. Isekai Quartet 1/2/3), voir seasonBonus ci-dessous.
+    const crSeasonCount = Number.isFinite(s.seasons) && s.seasons > 1 ? s.seasons : null;
     let best = null, bestComposite = -1;
     for (const m of media) {
       if (!m) continue;
       let titleScore = 0;
+      let matchedTitleStr = '';
       for (const t of aniTitleStrings(m)) {
         const nt = aniNorm(t);
         let sc = aniDice(s.title, t);
         if (nt && nt === crNorm) sc = 1;
         else if (nt && crNorm && (nt.includes(crNorm) || crNorm.includes(nt))) sc = Math.max(sc, 0.9);
-        if (sc > titleScore) titleScore = sc;
+        if (sc > titleScore) { titleScore = sc; matchedTitleStr = t; }
       }
       const releasing = m.status === 'RELEASING';
       const yearMatch = !!(m.startDate && m.startDate.year && crYear
@@ -4403,8 +4433,28 @@
       const epBonus = (crEp && mEp)
         ? (mEp === crEp ? 0.08 : (Math.abs(mEp - crEp) <= 1 ? 0.04 : 0))
         : 0;
+      // (fix) Bonus « dernière saison » pour les franchises multi-saisons regroupées sous
+      // UNE SEULE fiche Crunchyroll (ex. Isekai Quartet 1/2/3 sous un seul « Isekai
+      // Quartet » de 3 saisons). Sans lui, le score de titre pur favorise TOUJOURS la
+      // fiche AniList de la saison 1 (son titre est un match EXACT du titre CR, contre un
+      // match partiel ~0.9 pour « X 2 »/« X 3 ») — même quand CR indique clairement
+      // plusieurs saisons. Résultat observé : Isekai Quartet, en Découverte, s'appariait
+      // à la fiche saison 1 (#4548, sans note communautaire connue) au lieu de la fiche
+      // saison 3 (#194447, 74%) — carte « Légendaire » sans note affichée.
+      // Ne se déclenche QUE si aucun signal de date n'est disponible (crYear null) : en
+      // mode suivi (Reste à voir), s.lastAired reflète le DERNIER épisode réellement vu,
+      // qui départage déjà correctement via yearMatch — ce bonus n'a donc jamais
+      // l'occasion de contredire cette disambiguation plus fiable, uniquement de combler
+      // son absence en Découverte (où l'énumération d'épisodes est différée pour la perf).
+      let seasonBonus = 0;
+      if (crYear == null && crSeasonCount) {
+        const seq = aniSequelNumber(matchedTitleStr || aniPrimaryTitle(m));
+        if (seq != null) {
+          seasonBonus = seq === crSeasonCount ? 0.25 : (seq < crSeasonCount ? 0.05 : 0.1);
+        }
+      }
       m.__titleScore = titleScore; m.__releasing = releasing; m.__yearMatch = yearMatch;
-      const composite = titleScore + (releasing && s.airing ? 0.15 : 0) + (yearMatch ? 0.1 : 0) + epBonus;
+      const composite = titleScore + (releasing && s.airing ? 0.15 : 0) + (yearMatch ? 0.1 : 0) + epBonus + seasonBonus;
       if (composite > bestComposite) { bestComposite = composite; best = m; }
     }
     if (!best) return null;
@@ -4412,6 +4462,7 @@
       || (best.__titleScore >= 0.6 && (best.__yearMatch || (best.__releasing && s.airing)));
     return ok ? best : null;
   }
+
 
   // À partir d'une fiche AniList, calcule le total prévu et la date de diffusion du
   // DERNIER épisode (= saison complète). Priorité : date exacte du calendrier AniList,
