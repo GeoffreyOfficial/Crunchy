@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.76.0
+// @version      3.77.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -28,7 +28,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.76.0';
+  const SCRIPT_VERSION = '3.77.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -6186,6 +6186,25 @@
             try { return await fetchAnilistSimilar({ title: fav.title }); }
             catch (e) { safeCall.log(e, 'loadDiscover:favSeed'); return []; }
           }, CFG.concurrency, undefined, () => D.cancelRequested || anilistCooldownRemainingMs() > 0);
+
+          // (fix v3.77.0) BUG signalé : cette étape interroge déjà, pour chaque favori,
+          // les mêmes recommandations AniList que celles attendues par le cache
+          // `favrecs:<id>` (qui alimente le bonus/badge 💞 via favRecSet), mais sans
+          // jamais les y écrire — elle faisait sa propre requête « à côté » du cache.
+          // Le badge 💞 restait donc invisible sur les pépites de CETTE étape tant que
+          // prefetchFavRecs() (lancé en fond APRÈS tout le scan, ligne ~6813) n'avait
+          // pas fini son propre passage, alors même que les données étaient déjà là.
+          // On écrit maintenant chaque résultat dans `favrecs:<fav.id>` au fil de l'eau
+          // (même format léger que prefetchFavRecs : uniquement les id) et on invalide
+          // le Set mémoïsé pour que le badge 💞 soit correct dès CE scan — et pour que
+          // prefetchFavRecs(), lancé plus tard, saute ces favoris déjà à jour (il ne
+          // retraite que les entrées absentes/périmées du cache).
+          favBatch.forEach((fav, i) => {
+            const recs = recsByFav[i];
+            if (!Array.isArray(recs)) return; // cooldown/erreur : on ne fige pas le cache sur un résultat vide
+            try { cacheSet('favrecs:' + fav.id, recs.map((r) => ({ id: r.id }))); } catch (_) { /* quota plein */ }
+          });
+          _favRecSet = null; _favRecSetKey = null;
 
           // (fix v3.61.0) BUG signalé : ce traitement se faisait UNE recommandation à la
           // fois (boucle for imbriquée), chacune coûtant 2-3 allers-retours réseau
