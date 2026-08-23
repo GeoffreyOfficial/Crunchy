@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.77.0
+// @version      3.80.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -28,7 +28,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.77.0';
+  const SCRIPT_VERSION = '3.80.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -1470,8 +1470,13 @@
       }).catch(() => {});
     }, undefined, 'pokeApp');
     // Laisse aussi l'app respirer : un simple changement de visibilité la fait souvent
-    // renouveler son token.
-    for (let i = 0; i < 40; i++) {
+    // renouveler son token. (fix v3.80.0) Plafond ramené de 8 s (40×200ms) à 3 s (15×200ms) —
+    // signalé : la reconnexion « prend trop de temps à être détectée ». En pratique, une
+    // capture qui doit arriver arrive dans la première seconde ou deux ; au-delà, elle
+    // n'arrive quasi jamais, et l'étape 5 (dernier recours) ou le prochain passage de la
+    // boucle de reconnexion prend de toute façon le relais — ce plafond n'existait que pour
+    // ne pas abandonner trop vite, pas parce que 8 s étaient nécessaires.
+    for (let i = 0; i < 15; i++) {
       await sleep(200);
       if (sniffedToken && sniffedToken !== before) return sniffedToken;
     }
@@ -1495,8 +1500,20 @@
   function refreshToken() {
     if (refreshing) return refreshing;
     refreshing = (async () => {
+      // (fix v3.80.0) Les canaux 1 (cookie) et 3 (stockage interne de l'app) sont
+      // INDÉPENDANTS — rien dans l'un ne dépend du résultat de l'autre — mais tournaient en
+      // série (l'un après l'autre), chacun coûtant 1 à 3 s d'aller-retour réseau. Signalé :
+      // « la perte de session prend trop de temps à être détectée ». Lancés ici EN PARALLÈLE
+      // (Promise.all), le temps total de cette paire tombe au plus lent des deux au lieu de
+      // leur somme. L'ORDRE DE PRÉFÉRENCE pour choisir lequel garder ne change pas (cookie >
+      // jeton capté > stockage > réveil de l'app > dernier recours) — seule la façon de les
+      // OBTENIR devient concurrente.
+      const [fromCookie, stored] = await Promise.all([
+        tokenFromCookie(),
+        (async () => tokenFromLocalStorage() || await tokenFromIndexedDB())(),
+      ]);
+
       // 1. le cookie : actif, ne dépend pas de la page — mais souvent refusé sur mobile
-      const fromCookie = await tokenFromCookie();
       if (fromCookie && await tokenWorks(fromCookie)) { token = fromCookie; return token; }
 
       // 2. un token fraîchement capté de la page, s'il est arrivé entre-temps
@@ -1504,8 +1521,8 @@
         token = sniffedToken; tokenExp = Date.now() + 4 * 60e3; return token;
       }
 
-      // 3. (#3) le stockage interne de l'app : le canal le plus fiable sur mobile
-      const stored = tokenFromLocalStorage() || await tokenFromIndexedDB();
+      // 3. (#3) le stockage interne de l'app : le canal le plus fiable sur mobile — déjà
+      // récupéré en parallèle avec le cookie ci-dessus, plus besoin de le refaire ici.
       if (stored && await tokenWorks(stored)) {
         token = stored; tokenExp = Date.now() + 4 * 60e3; return token;
       }
@@ -1708,13 +1725,20 @@
     } finally { recovering = false; }
   }
 
-  async function ensureToken(force) {
+  // (fix v3.78.0) `waitTimeoutMs` — même logique que apiWrite ci-dessous : quand le token est
+  // absent/expiré et qu'AUCUN canal ne parvient à en produire un nouveau, cette fonction est
+  // celle qui attend la reconnexion (via waitForRecovery). C'est en fait LE point d'entrée le
+  // plus courant du problème signalé : un token déjà perdu AVANT le clic (pas seulement perdu
+  // en cours de requête) passe systématiquement par ici, EN PREMIER, avant même que la requête
+  // parte — sans ce paramètre, une action interactive attendait donc les 90 s par défaut ici,
+  // peu importe le waitTimeoutMs plus court passé à apiWrite/apiCall plus bas.
+  async function ensureToken(force, waitTimeoutMs) {
     if (!force && token && Date.now() < tokenExp) return token;
     const t = await refreshToken();
     if (t) return t;
     markSessionLost('aucun canal n\'a produit de jeton valide (cookie, jeton capté, stockage local, réveil de l\'appli — tous épuisés)');   // signal global + reconnexion auto : jamais d'échec muet
-    await waitForRecovery(scanAbort);   // on patiente au lieu d'abandonner l'action en cours
-    return ensureToken(force);
+    await waitForRecovery(scanAbort, waitTimeoutMs);   // on patiente au lieu d'abandonner l'action en cours
+    return ensureToken(force, waitTimeoutMs);
   }
 
   // Regroupe les URL variables sous un nom stable, pour agréger les temps.
@@ -1853,8 +1877,18 @@
   // DELETE (retrait d'une liste, voir removeFromCustomList/removeFromWatchlist) : mêmes
   // retries/401/429, seul le verbe HTTP change. 204 (pas de corps) et 200/201 (corps JSON)
   // sont tous deux traités comme un succès.
-  async function apiWrite(path, body, attempt = 0, method = 'POST') {
-    await ensureToken();
+  // (fix v3.77.0) `waitTimeoutMs` : combien de temps CETTE écriture patiente si le token est
+  // perdu en cours de route (401), avant d'abandonner PROPREMENT plutôt que de laisser
+  // l'appelant en suspens. Avant, toute écriture (scan de fond comme clic bouton) utilisait
+  // le même délai que waitForRecovery (90 s) — invisible pour un scan de fond, mais un bouton
+  // « + » resté figé sur « Ajout en cours… » pendant jusqu'à 90 s, sans rien qui distingue
+  // « ça travaille » de « la session est perdue et on espère la retrouver », a fait croire à
+  // un ajout réussi qui ne l'était pas (voir handleAddToList : REC_TIMEOUT_MS, plus court,
+  // et addListBtn qui affiche un état « reconnexion » dès que sessionLost passe à true).
+  // undefined ⇒ comportement historique (délai par défaut de waitForRecovery, 90 s) : les
+  // appels de fond (scan Découverte, prefetch, etc.) ne changent pas de comportement.
+  async function apiWrite(path, body, attempt = 0, method = 'POST', waitTimeoutMs) {
+    await ensureToken(false, waitTimeoutMs);
     const url = new URL(path, 'https://www.crunchyroll.com');
     const key = endpointKey(path);
     let res;
@@ -1877,7 +1911,7 @@
       if (attempt < 2) {
         LOG(`écriture ${key} échouée (${e.name === 'AbortError' ? 'timeout' : e.message}) — nouvel essai ${attempt + 1}`);
         await sleep(500 * (attempt + 1));
-        return apiWrite(path, body, attempt + 1, method);
+        return apiWrite(path, body, attempt + 1, method, waitTimeoutMs);
       }
       throw e;
     } finally {
@@ -1887,16 +1921,19 @@
       if (attempt < 2) {
         token = null; tokenExp = 0;
         const t = await refreshToken();
-        if (t) return apiWrite(path, body, attempt + 1, method);
+        if (t) return apiWrite(path, body, attempt + 1, method, waitTimeoutMs);
       }
       markSessionLost(`401 persistant sur écriture ${key}`);
       // Même logique que api() : on patiente jusqu'à la reconnexion plutôt que de faire
-      // échouer l'écriture (ajout à une liste, note…) en cours.
-      await waitForRecovery();
-      return apiWrite(path, body, 0, method);
+      // échouer l'écriture (ajout à une liste, note…) en cours. (fix v3.77.0) sauf que ce
+      // délai est désormais configurable par l'appelant (voir waitTimeoutMs ci-dessus) —
+      // au-delà, waitForRecovery rejette et cette écriture échoue proprement, plutôt que de
+      // rester en attente jusqu'à 90 s pour une action que l'utilisateur regarde en direct.
+      await waitForRecovery(undefined, waitTimeoutMs);
+      return apiWrite(path, body, 0, method, waitTimeoutMs);
     }
     if (res.status === 429) {
-      if (attempt < 3) { await sleep(800 * Math.pow(2, attempt)); return apiWrite(path, body, attempt + 1, method); }
+      if (attempt < 3) { await sleep(800 * Math.pow(2, attempt)); return apiWrite(path, body, attempt + 1, method, waitTimeoutMs); }
       throw new Error(`429 (limite atteinte) sur ${path}`);
     }
     if (!res.ok) {
@@ -1916,10 +1953,10 @@
   // par rétro-ingénierie communautaire du client web Crunchyroll — POST content_id sur
   // /content/v2/{accountId}/custom-lists/{listId}). 409 traité comme un succès silencieux :
   // la série est déjà dans la liste, l'effet recherché par l'utilisateur est déjà atteint.
-  async function addToCustomList(listId, seriesId) {
+  async function addToCustomList(listId, seriesId, waitTimeoutMs) {
     const accountId = await getAccountId();
     try {
-      await apiWrite(`/content/v2/${accountId}/custom-lists/${listId}`, { content_id: seriesId });
+      await apiWrite(`/content/v2/${accountId}/custom-lists/${listId}`, { content_id: seriesId }, 0, 'POST', waitTimeoutMs);
       return true;
     } catch (e) {
       if (e && e.status === 409) return true;
@@ -1930,10 +1967,10 @@
   // Retire une série d'UNE Crunchylist précise (DELETE /custom-lists/{listId}/{seriesId},
   // endpoint symétrique de l'ajout ci-dessus — même origine communautaire). 404 traité
   // comme un succès silencieux : déjà absente de cette liste, l'effet recherché est déjà là.
-  async function removeFromCustomList(listId, seriesId) {
+  async function removeFromCustomList(listId, seriesId, waitTimeoutMs) {
     const accountId = await getAccountId();
     try {
-      await apiWrite(`/content/v2/${accountId}/custom-lists/${listId}/${seriesId}`, null, 0, 'DELETE');
+      await apiWrite(`/content/v2/${accountId}/custom-lists/${listId}/${seriesId}`, null, 0, 'DELETE', waitTimeoutMs);
       return true;
     } catch (e) {
       if (e && e.status === 404) return true;
@@ -1943,16 +1980,29 @@
 
   // Retire une série de la watchlist (« Reste à voir » côté Crunchyroll — DISTINCTE des
   // Crunchylists, voir getListMemberIds). DELETE /watchlist/{seriesId}, même tolérance 404.
-  async function removeFromWatchlist(seriesId) {
+  async function removeFromWatchlist(seriesId, waitTimeoutMs) {
     const accountId = await getAccountId();
     try {
-      await apiWrite(`/content/v2/${accountId}/watchlist/${seriesId}`, null, 0, 'DELETE');
+      await apiWrite(`/content/v2/${accountId}/watchlist/${seriesId}`, null, 0, 'DELETE', waitTimeoutMs);
       return true;
     } catch (e) {
       if (e && e.status === 404) return true;
       throw e;
     }
   }
+
+  // (fix v3.77.0) Délai de reconnexion pour une action déclenchée par un clic direct
+  // (ajout/annulation/retrait) — signalé : un token perdu en cours de clic laissait le
+  // bouton sur « … en cours » jusqu'à 90 s (délai de fond, pensé pour un scan invisible),
+  // sans que rien ne distingue « ça travaille » de « la session est perdue, on espère la
+  // retrouver » — au bout des 90 s, un message générique (« réessaie dans un instant »)
+  // faisait passer ça pour un pépin ponctuel plutôt que pour un ajout qui n'a PAS eu lieu.
+  // Ici : 10 s suffisent à absorber un aller-retour de renouvellement de token normal ; au-
+  // delà, on préfère un échec net et explicite (voir les catch ci-dessous) à une attente qui
+  // ne dit pas ce qu'elle attend. La reconnexion de fond, elle, continue sans limite en
+  // parallèle (startRecoveryLoop) : un nouveau clic juste après retentera et aboutira dès
+  // qu'elle a réussi.
+  const INTERACTIVE_RECOVERY_TIMEOUT_MS = 10000;
 
   // Orchestre un ajout depuis un bouton de Découverte : état visuel busy → done/erreur,
   // disparition de la carte (via STATE.addedToList, lu par visibleDiscover), et toast.
@@ -1967,7 +2017,7 @@
     // la carte n'est pas dans le DOM actuel pour une raison ou une autre.
     if (!patchDiscoverAction(seriesId)) forceRender();
     try {
-      await addToCustomList(listId, seriesId);
+      await addToCustomList(listId, seriesId, INTERACTIVE_RECOVERY_TIMEOUT_MS);
       STATE.addedToList.add(seriesId);
       // (fix v3.49.0) Effet « wahou » — voir discoverCard/discoverListRow et le CSS
       // .crrav-flourish-add : joué une seule fois, à l'instant précis de l'ajout.
@@ -1981,7 +2031,14 @@
         { undo: () => handleUndoAddToList(seriesId, listId, title) });
     } catch (e) {
       console.warn('[reste-à-voir] ajout à la liste échoué', e);
-      showToast('✗ Ajout impossible — réessaie dans un instant');
+      // (fix v3.77.0) Message distinct si l'échec vient d'une session perdue non encore
+      // rétablie (voir INTERACTIVE_RECOVERY_TIMEOUT_MS ci-dessus) — sans ça, un ajout qui
+      // n'a PAS eu lieu ressemblait à un pépin réseau ordinaire, réessayer immédiatement
+      // échouant de nouveau pour la même raison tant que la reconnexion de fond n'a pas
+      // abouti.
+      showToast(sessionLost
+        ? `⚠ Session Crunchyroll perdue — « ${title || 'Série'} » n'a PAS été ajoutée. Reconnexion en cours, réessaie dans un instant.`
+        : '✗ Ajout impossible — réessaie dans un instant');
     } finally {
       STATE.addingId = null;
       if (!patchDiscoverAction(seriesId)) forceRender();
@@ -1997,12 +2054,15 @@
     STATE.addingId = seriesId;   // même indicateur visuel « busy » que l'ajout
     if (!patchDiscoverAction(seriesId)) forceRender();
     try {
-      await removeFromCustomList(listId, seriesId);
+      await removeFromCustomList(listId, seriesId, INTERACTIVE_RECOVERY_TIMEOUT_MS);
       STATE.addedToList.delete(seriesId);
       showToast(`↺ « ${title || 'Série'} » retirée — ajout annulé`);
     } catch (e) {
       console.warn('[reste-à-voir] annulation d\'ajout échouée', e);
-      showToast('✗ Annulation impossible — retire-la à la main si besoin');
+      // (fix v3.77.0) même distinction que handleAddToList — voir plus haut.
+      showToast(sessionLost
+        ? `⚠ Session Crunchyroll perdue — l'annulation n'a PAS abouti, « ${title || 'Série'} » reste ajoutée. Réessaie une fois reconnecté.`
+        : '✗ Annulation impossible — retire-la à la main si besoin');
     } finally {
       STATE.addingId = null;
       if (!patchDiscoverAction(seriesId)) forceRender();
@@ -2030,11 +2090,11 @@
     const total = listIds.length + (inWatchlist ? 1 : 0);
     try {
       for (const l of listIds) {
-        try { await removeFromCustomList(l.id, seriesId); okCount++; }
+        try { await removeFromCustomList(l.id, seriesId, INTERACTIVE_RECOVERY_TIMEOUT_MS); okCount++; }
         catch (e) { console.warn('[reste-à-voir] retrait Crunchylist échoué', l, e); }
       }
       if (inWatchlist) {
-        try { await removeFromWatchlist(seriesId); okCount++; }
+        try { await removeFromWatchlist(seriesId, INTERACTIVE_RECOVERY_TIMEOUT_MS); okCount++; }
         catch (e) { console.warn('[reste-à-voir] retrait watchlist échoué', e); }
       }
       if (okCount === total) {
@@ -2043,7 +2103,10 @@
       } else if (okCount > 0) {
         showToast(`⚠ ${title || 'Série'} retirée partiellement — réessaie dans un instant`);
       } else {
-        showToast('✗ Retrait impossible — réessaie dans un instant');
+        // (fix v3.77.0) même distinction que handleAddToList — voir plus haut.
+        showToast(sessionLost
+          ? `⚠ Session Crunchyroll perdue — « ${title || 'Série'} » n'a PAS été retirée. Reconnexion en cours, réessaie dans un instant.`
+          : '✗ Retrait impossible — réessaie dans un instant');
       }
     } finally {
       STATE.removingId = null;
@@ -8123,9 +8186,19 @@
   function addListBtn(s) {
     const added = STATE.addedToList.has(s.id);
     const busy = STATE.addingId === s.id;
-    const cls = added ? 'done' : busy ? 'busy' : '';
-    const label = added ? 'Ajoutée à ta liste' : busy ? 'Ajout en cours…' : 'Ajouter à ma liste';
-    const icon = added ? '✓' : busy ? '⋯' : '+';
+    // (fix v3.77.0) `sessionLost` (même variable que la bannière « Session expirée », voir
+    // errorBanner) est visible ici : un clic « busy » pendant que le token est perdu bascule
+    // dans un état distinct — sans ça le bouton restait sur « Ajout en cours… » jusqu'à
+    // INTERACTIVE_RECOVERY_TIMEOUT_MS (voir handleAddToList) sans rien indiquer qu'il
+    // attendait une reconnexion plutôt que de simplement travailler. markSessionLost/
+    // resolveSessionRecovered appellent déjà render() : ce bouton se met donc à jour tout
+    // seul dès que sessionLost change, sans câblage supplémentaire.
+    const waiting = busy && sessionLost;
+    const cls = added ? 'done' : waiting ? 'busy waiting-session' : busy ? 'busy' : '';
+    const label = added ? 'Ajoutée à ta liste'
+      : waiting ? 'Session Crunchyroll perdue — reconnexion en cours…'
+      : busy ? 'Ajout en cours…' : 'Ajouter à ma liste';
+    const icon = added ? '✓' : waiting ? '⚠' : busy ? '⋯' : '+';
     return `<button class="crrav-addlist${cls ? ` ${cls}` : ''}" data-addlist="${s.id}"
       data-title="${escapeHtml(s.title)}"
       title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}"
@@ -8139,11 +8212,14 @@
   // irréversible côté Crunchyroll — jamais de suppression au premier clic.
   function removeListBtn(s) {
     const busy = STATE.removingId === s.id;
-    const label = busy ? 'Retrait en cours…' : 'Retirer de tes listes';
-    return `<button class="crrav-removelist${busy ? ' busy' : ''}" data-removelist="${s.id}"
+    // (fix v3.77.0) même état « reconnexion » que addListBtn ci-dessus — voir son commentaire.
+    const waiting = busy && sessionLost;
+    const label = waiting ? 'Session Crunchyroll perdue — reconnexion en cours…'
+      : busy ? 'Retrait en cours…' : 'Retirer de tes listes';
+    return `<button class="crrav-removelist${waiting ? ' busy waiting-session' : busy ? ' busy' : ''}" data-removelist="${s.id}"
       data-title="${escapeHtml(s.title)}"
       title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}"
-      ${busy ? 'disabled' : ''}>${busy ? '⋯' : '🗑'}</button>`;
+      ${busy ? 'disabled' : ''}>${waiting ? '⚠' : busy ? '⋯' : '🗑'}</button>`;
   }
 
   // Feuille de choix de liste (CFG.askListEachTime uniquement) : ouverte via
@@ -10166,6 +10242,15 @@
   .crrav-addlist:hover{background:#f47521;color:#12120f;border-color:#f47521}
   .crrav-addlist.done{opacity:1;background:#5ce6a0;color:#12120f;border-color:#5ce6a0;pointer-events:none}
   .crrav-addlist.busy{opacity:1;pointer-events:none}
+  /* (fix v3.77.0) État « reconnexion » — voir addListBtn/removeListBtn : même ambre que la
+     tonalité warn des toasts (#crrav-toast-fixed[data-tone="warn"]), pour que « ça n'a pas
+     abouti, le script attend de te reconnecter » soit visuellement distinct d'un simple
+     spinner « ça travaille ». Pulse doux plutôt que figé, pour rester lisible dans la durée. */
+  .crrav-addlist.waiting-session,.crrav-removelist.waiting-session{
+    opacity:1;background:rgba(255,193,90,.22);border-color:#ffc15a;color:#ffc15a;
+    animation:crrav-waitsession-pulse 1.6s ease-in-out infinite}
+  @keyframes crrav-waitsession-pulse{0%,100%{opacity:1}50%{opacity:.55}}
+  @media (prefers-reduced-motion:reduce){.crrav-addlist.waiting-session,.crrav-removelist.waiting-session{animation:none;opacity:.85}}
   .crrav-addlist[disabled]{opacity:.5;pointer-events:none}
   .crrav-listpicker{position:fixed;inset:0;z-index:60;display:flex;align-items:flex-end;justify-content:center;
     background:rgba(6,6,8,.7)}
