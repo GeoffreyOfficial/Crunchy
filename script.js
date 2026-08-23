@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.71.0
+// @version      3.72.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -28,7 +28,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.71.0';
+  const SCRIPT_VERSION = '3.72.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -14359,9 +14359,19 @@
   // le nombre d'épisodes, leur plage de numéros, et le rang qu'on lui attribue (celui
   // affiché « S{rang} » sur les cartes/calendrier — voir distinctSeasons ailleurs).
   function renderSeasonDiag() {
-    const s = (STATE.series || []).find((x) => x.id === STATE.anilistDiagTargetId);
+    const s = anilistDiagAllSeries().find((x) => x.id === STATE.anilistDiagTargetId);
     if (!s) return `<div class="crrav-diagcard warn">
       <div class="crrav-diagcard-head"><span class="ic">⚠</span>Choisis une série ci-dessus (diagnostic AniList)</div>
+    </div>`;
+    // (fix) Une fiche venant de Découverte (jamais ajoutée à une liste) n'a que le NOMBRE
+    // d'épisodes (s.episodes = 12), pas le détail par épisode/saison des séries suivies —
+    // ce diagnostic n'a rien à analyser dans ce cas, contrairement au diagnostic AniList
+    // ci-dessus qui, lui, fonctionne pour les deux.
+    if (!Array.isArray(s.episodes)) return `<div class="crrav-diagcard warn">
+      <div class="crrav-diagcard-head"><span class="ic">⚠</span>Diagnostic saisons indisponible</div>
+      <p class="crrav-diagcard-note">« ${escapeHtml(s.title)} » vient de Découverte (jamais ajoutée à une liste) —
+        le détail des épisodes par saison n'est pas chargé pour ce type de fiche. Le diagnostic AniList
+        ci-dessus reste utilisable.</p>
     </div>`;
     const groups = new Map();
     for (const e of s.episodes) {
@@ -14401,8 +14411,20 @@
   // n'a aucune raison de se limiter au sous-ensemble « en diffusion ». Tri purement
   // alphabétique (pas de priorité aux séries en diffusion) pour retrouver une série
   // facilement dans une longue liste.
+  // (fix) Le diagnostic ne portait QUE sur STATE.series (Reste à voir / Hors listes) —
+  // une série jamais ajoutée à une liste (ex. rencontrée seulement via Découverte, comme
+  // Isekai Quartet 3) n'y apparaissait donc jamais, même une fois le tri alphabétique
+  // corrigé. Fusionne les deux sources, la série de STATE.series faisant foi en cas de
+  // doublon (données plus complètes : notes perso, progression…).
+  function anilistDiagAllSeries() {
+    const map = new Map();
+    for (const s of (STATE.discover && STATE.discover.series) || []) if (s && s.id != null) map.set(s.id, s);
+    for (const s of STATE.series || []) if (s && s.id != null) map.set(s.id, s);   // priorité : écrase Découverte
+    return [...map.values()];
+  }
+
   function anilistDiagSeriesSelect() {
-    const all = (STATE.series || []).slice()
+    const all = anilistDiagAllSeries()
       .sort((a, b) => a.title.localeCompare(b.title, 'fr'));
     if (!all.length) return '';
     if (!STATE.anilistDiagTargetId || !all.some((s) => s.id === STATE.anilistDiagTargetId)) {
@@ -14425,7 +14447,7 @@
     const d = { steps: [] };
     try {
       const airingPool = STATE.series.filter((s) => s.airing);
-      const target = (STATE.anilistDiagTargetId && STATE.series.find((s) => s.id === STATE.anilistDiagTargetId))
+      const target = (STATE.anilistDiagTargetId && anilistDiagAllSeries().find((s) => s.id === STATE.anilistDiagTargetId))
         || STATE.series.find((s) => /tsugai|daemon/i.test(s.title)) || airingPool[0] || STATE.series[0];
       if (!target) { d.error = "Aucune série chargée. Ouvre d'abord « Reste à voir »."; }
       else {
@@ -14774,9 +14796,9 @@
 
   // Verdict pour le découpage en saisons de la série ciblée par le diagnostic AniList.
   function summarizeSeasonDiag() {
-    const s = (STATE.series || []).find((x) => x.id === STATE.anilistDiagTargetId);
-    if (!s || !s.episodes || !s.episodes.length) {
-      return { status: 'warn', note: 'Aucune série avec épisodes chargés pour ce test (dépend du test AniList ci-dessus).' };
+    const s = anilistDiagAllSeries().find((x) => x.id === STATE.anilistDiagTargetId);
+    if (!s || !Array.isArray(s.episodes) || !s.episodes.length) {
+      return { status: 'warn', note: 'Aucune série avec épisodes détaillés chargés pour ce test (dépend du test AniList ci-dessus, ou fiche venant de Découverte).' };
     }
     return { status: 'ok', note: `${s.episodes.length} épisode(s) analysés pour « ${s.title} ».` };
   }
