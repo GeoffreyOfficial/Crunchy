@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.67.0
+// @version      3.68.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -28,7 +28,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.67.0';
+  const SCRIPT_VERSION = '3.68.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -3741,7 +3741,7 @@
       }
     }
   }`;
-  const EMPTY_ANI = { plannedTotal: null, seasonEndTs: null, plannedApprox: false, anilistStatus: null, nextEpTs: null, nextEpNum: null, genres: [], tags: [], studio: null, meanScore: null, popularity: null, duration: null, season: null, seasonYear: null, source: null, format: null };
+  const EMPTY_ANI = { matched: false, plannedTotal: null, seasonEndTs: null, plannedApprox: false, anilistStatus: null, nextEpTs: null, nextEpNum: null, genres: [], tags: [], studio: null, meanScore: null, popularity: null, duration: null, season: null, seasonYear: null, source: null, format: null };
   // Version du FORMAT du cache AniList : à incrémenter quand la logique de calcul change,
   // pour re-questionner AniList sans vider tout le reste du cache (pas de rescan complet).
   const ANILIST_CACHE_VER = 9;   // 4 : ajout du repli titre anglais CR (voir enrichAnilistSchedule)
@@ -4180,8 +4180,70 @@
     return out;
   }
 
-  // ids : [Int] — récupère airingSchedule + nextAiringEpisode par ID, groupés via alias
-  // `m{i}`. Renvoie Map(id → { nextAiringEpisode, airingSchedule }). Best-effort.
+  // Enrichit un lot de candidats via AniList, en MUTANT directement leurs objets de
+  // référence (categories/tags/aniScore/aniMatched/secTotal/maxAir) — deux passes :
+  //   1. titre CR tel quel (locale d'affichage, ex. fr-FR) — la même recherche multi-
+  //      variantes qu'avant (anilistSearchTerms : hepburn, sans accents, sans année,
+  //      parties du titre).
+  //   2. UNIQUEMENT pour les survivants toujours sans fiche AniList après la passe 1 :
+  //      titre ANGLAIS de la même série, redemandé à Crunchyroll (voir
+  //      getSeriesEnglishTitle) — 1 requête CR de plus par survivant non matché, jamais
+  //      pour les autres. Beaucoup de titres CR très localisés (fr-FR) n'ont aucun
+  //      recoupement lexical avec les titres romaji/anglais indexés par AniList (ex. un
+  //      titre entièrement traduit), alors que le titre anglais de la MÊME fiche CR colle
+  //      presque toujours de bien plus près — c'est exactement le repli déjà utilisé pour
+  //      l'enrichissement genres en tâche de fond (voir plus haut), étendu ici à la
+  //      Découverte/dé légendaire pour réduire les « non trouvée sur AniList alors qu'elle
+  //      existe ».
+  // `items` : [{ id, title, ref }] — `id`/`title` servent à interroger AniList/CR, `ref`
+  // est l'objet réellement affiché/scoré (peut être `id`/`title` lui-même, ou un objet
+  // englobant comme un survivor { p, categories, tags… } dont seul `p` porte id/title).
+  async function anilistEnrichWithFallback(items) {
+    if (!items || !items.length) return;
+    const applyResult = (ref, result) => {
+      if (result.matched) ref.aniMatched = true;
+      if (result.genres && result.genres.length) ref.categories = mergeGenreLists(ref.categories, result.genres);
+      if (result.tags && result.tags.length) ref.tags = mergeTagLists(ref.tags, result.tags);
+      if (result.meanScore != null) ref.aniScore = result.meanScore;
+      // (durée) Complète la durée totale estimée dès que la durée/épisode AniList est
+      // connue, sans jamais toucher une durée déjà obtenue (secTotal > 0).
+      if (ref.episodes && !ref.secTotal) {
+        const st = secTotalFromAni(ref.episodes, result);
+        if (st) { ref.secTotal = st; ref.maxAir = aniMaxAir(result) || ref.maxAir; }
+      }
+    };
+    const pass = async (list, titleOf) => {
+      let map;
+      try { map = await anilistSearchBatch(list.map((it) => ({ key: it.id, title: titleOf(it) }))); }
+      catch (_) { return list; }   // best-effort : requête ratée → tous restent « non matchés »
+      const unmatched = [];
+      for (const it of list) {
+        const r = map.get(it.id);
+        const t = titleOf(it);
+        const sLike = { id: it.id, title: t, airing: isAiring(it.ref.maxAir),
+          lastAired: it.ref.maxAir ? { air: it.ref.maxAir } : null, episodes: it.ref.episodes || null };
+        const best = r ? aniPickMatch(r.media, sLike) : null;
+        const result = { matched: false, ...EMPTY_ANI, aniId: null, aniTitle: '', av: ANILIST_CACHE_VER };
+        if (best) Object.assign(result, computeAniSchedule(best, sLike),
+          { matched: true, aniId: best.id, aniTitle: aniPrimaryTitle(best) });
+        cacheSet('anilist:' + it.id, result);
+        applyResult(it.ref, result);
+        if (!result.matched) unmatched.push(it);
+      }
+      return unmatched;
+    };
+    const unmatched = await pass(items, (it) => it.title);
+    if (!unmatched.length) return;
+    const enItems = [];
+    for (const it of unmatched) {
+      let enTitle = null;
+      try { enTitle = await getSeriesEnglishTitle(it.id); } catch (_) { /* best-effort */ }
+      if (enTitle && aniNorm(enTitle) !== aniNorm(it.title)) enItems.push({ id: it.id, title: enTitle, ref: it.ref });
+    }
+    if (enItems.length) await pass(enItems, (it) => it.title);
+  }
+
+
   async function anilistFetchSchedules(ids) {
     const out = new Map();
     const clean = [...new Set((ids || []).filter((x) => Number.isFinite(x)))];
@@ -4422,6 +4484,7 @@
     if (!o || !o.v || o.v.av !== ANILIST_CACHE_VER) return EMPTY_ANI;   // absent/ancien format
     if (Date.now() - o.ts > anilistTtlMs(o.v)) return EMPTY_ANI;        // périmé : sera re-fetché
     return {
+      matched: !!o.v.matched,
       plannedTotal: o.v.plannedTotal ?? null,
       seasonEndTs: o.v.seasonEndTs ?? null,
       plannedApprox: !!o.v.plannedApprox,
@@ -5606,6 +5669,7 @@
     // ou le second bassin AniList) — zéro requête. Complétée plus tard pour les
     // survivants qui n'ont pas encore été enrichis (voir anilistSearchBatch plus bas).
     let aniScore = cachedAni.meanScore ?? null;
+    let aniMatched = cachedAni.matched;
     // Tags déjà en cache, sans requête (voir plus bas : complétés en mode légendaire
     // pour les survivants qui n'en ont toujours pas, via anilistSearchBatch).
     let tags = cachedAni.tags || [];
@@ -5673,7 +5737,7 @@
 
     // `epsPending` = énumération CR encore à faire après le filtre de score (mode légendaire
     // SANS estimation gratuite : historique incomplet, ou panel sans episode_count).
-    return { p, seasons, categories, tags, rating, aniScore, episodes, secTotal, maxAir,
+    return { p, seasons, categories, tags, rating, aniScore, aniMatched, episodes, secTotal, maxAir,
       epsPending: deferEpisodes && !haveEstimate };
   }
 
@@ -6175,7 +6239,7 @@
             id: x.p.id, title: x.p.title, slug: x.p.slug_title, poster: posterOf(x.p),
             synopsis: x.p.description || '',
             rating: x.rating, seasons: x.seasons,
-            categories: x.categories, tags: x.tags, aniScore: x.aniScore ?? null,
+            categories: x.categories, tags: x.tags, aniScore: x.aniScore ?? null, aniMatched: !!x.aniMatched,
             episodes: x.episodes, secTotal: x.secTotal, maxAir: x.maxAir,
             order: seenCandidate.size,
           });
@@ -6316,27 +6380,7 @@
               (x.categories.length < 2 || !x.tags.length) && anilistNeedsFetch(x.p.id));
             if (needAni.length) {
               try {
-                const map = await anilistSearchBatch(needAni.map((x) => ({ key: x.p.id, title: x.p.title })));
-                for (const x of needAni) {
-                  const r = map.get(x.p.id);
-                  const sLike = { id: x.p.id, title: x.p.title, airing: isAiring(x.maxAir),
-                    lastAired: x.maxAir ? { air: x.maxAir } : null, episodes: x.episodes || null };
-                  const best = r ? aniPickMatch(r.media, sLike) : null;
-                  const result = { matched: false, ...EMPTY_ANI, aniId: null, aniTitle: '', av: ANILIST_CACHE_VER };
-                  if (best) Object.assign(result, computeAniSchedule(best, sLike),
-                    { matched: true, aniId: best.id, aniTitle: aniPrimaryTitle(best) });
-                  cacheSet('anilist:' + x.p.id, result);
-                  if (result.genres && result.genres.length) x.categories = mergeGenreLists(x.categories, result.genres);
-                  if (result.tags && result.tags.length) x.tags = mergeTagLists(x.tags, result.tags);
-                  if (result.meanScore != null) x.aniScore = result.meanScore;
-                  // (durée) Complète la durée totale estimée dès que la durée/épisode AniList
-                  // est connue : nb total d'épisodes (CR, toutes saisons) × durée/ép. Ne touche
-                  // pas une durée déjà obtenue (secTotal > 0, estimation ou énumération réelle).
-                  if (x.episodes && !x.secTotal) {
-                    const st = secTotalFromAni(x.episodes, result);
-                    if (st) { x.secTotal = st; x.maxAir = aniMaxAir(result) || x.maxAir; }
-                  }
-                }
+                await anilistEnrichWithFallback(needAni.map((x) => ({ id: x.p.id, title: x.p.title, ref: x })));
               } catch (_) { /* best-effort : les survivants gardent leurs seuls genres CR (et pas de tags) */ }
             }
           }
@@ -6374,7 +6418,7 @@
             for (const x of survivors) {
               if (D.cancelRequested) break;
               const sig = discoverSignals(
-                { categories: x.categories, tags: x.tags, rating: x.rating, aniScore: x.aniScore },
+                { categories: x.categories, tags: x.tags, rating: x.rating, aniScore: x.aniScore, aniMatched: x.aniMatched },
                 tasteProfile);
               scoreSamples.push(sig.score);
               // (fix) Verdict enregistré pour la PROCHAINE fois que cette candidate est
@@ -6408,7 +6452,7 @@
             poster: posterOf(x.p),
             synopsis: x.p.description || '',
             rating: x.rating, seasons: x.seasons,
-            categories: x.categories, tags: x.tags, aniScore: x.aniScore ?? null,
+            categories: x.categories, tags: x.tags, aniScore: x.aniScore ?? null, aniMatched: !!x.aniMatched,
             episodes: x.episodes, secTotal: x.secTotal, maxAir: x.maxAir,
             order: seenCandidate.size,
             // (fix) Notables bonus (voir CFG.discoverLegendaryIncludeNotable) : ce flag sert
@@ -6504,7 +6548,7 @@
             id: x.p.id, title: x.p.title, slug: x.p.slug_title, poster: posterOf(x.p),
             synopsis: x.p.description || '',
             rating: x.rating, seasons: x.seasons,
-            categories: x.categories, tags: x.tags, aniScore: x.aniScore ?? null,
+            categories: x.categories, tags: x.tags, aniScore: x.aniScore ?? null, aniMatched: !!x.aniMatched,
             episodes: x.episodes, secTotal: x.secTotal, maxAir: x.maxAir,
             order: seenCandidate.size,
           };
@@ -6603,26 +6647,7 @@
           if (D.cancelRequested || anilistCooldownRemainingMs() > 0) break;
           const slice = need.slice(i, i + 8);
           try {
-            const map = await anilistSearchBatch(slice.map((x) => ({ key: x.id, title: x.title })));
-            for (const x of slice) {
-              const r = map.get(x.id);
-              const sLike = { id: x.id, title: x.title, airing: isAiring(x.maxAir),
-                lastAired: x.maxAir ? { air: x.maxAir } : null, episodes: x.episodes || null };
-              const best = r ? aniPickMatch(r.media, sLike) : null;
-              const result = { matched: false, ...EMPTY_ANI, aniId: null, aniTitle: '', av: ANILIST_CACHE_VER };
-              if (best) Object.assign(result, computeAniSchedule(best, sLike),
-                { matched: true, aniId: best.id, aniTitle: aniPrimaryTitle(best) });
-              cacheSet('anilist:' + x.id, result);
-              if (result.genres && result.genres.length) x.categories = mergeGenreLists(x.categories, result.genres);
-              if (result.tags && result.tags.length) x.tags = mergeTagLists(x.tags, result.tags);
-              if (result.meanScore != null) x.aniScore = result.meanScore;
-              // (durée) Complète la durée totale estimée = nb total d'épisodes (CR, toutes
-              // saisons) × durée/épisode AniList, une fois cette dernière connue.
-              if (x.episodes && !x.secTotal) {
-                const st = secTotalFromAni(x.episodes, result);
-                if (st) { x.secTotal = st; x.maxAir = aniMaxAir(result) || x.maxAir; }
-              }
-            }
+            await anilistEnrichWithFallback(slice.map((x) => ({ id: x.id, title: x.title, ref: x })));
           } catch (_) { /* best-effort : sans note AniList, la carte garde sa seule note CR */ }
           if (withRender) render();   // note + tags apparaissent au fur et à mesure
         }
@@ -8755,17 +8780,19 @@
     const superShown = r1(superBonusVal);
     const favRecShown = r1(favRecBonusVal);
     const scoreShown = tasteShown + prefShown + wellShown + superShown + favRecShown;
-    // (fix v3.59.0) Une candidate SANS tags AniList (repli genre-seul, voir tasteScore/
-    // tagless) est comparée à ton profil dans un espace bien plus grossier — une poignée de
-    // genres larges (Action, Fantastique…) au lieu de centaines de tags fins. Un cosinus
-    // élevé y est plus facile à obtenir par coïncidence (2-3 genres communs suffisent) que
-    // dans l'espace des tags, où correspondre vraiment demande d'aligner des dizaines de
-    // signaux fins. Sans ce plafond, une candidate jamais enrichie pouvait donc décrocher
-    // « légendaire » sur un signal en réalité moins fiable qu'une candidate enrichie au
-    // score pourtant plus bas. Plafonnée à « notable » au mieux — jamais légendaire tant
-    // que son vrai alignement de tags n'a pas pu être vérifié.
-    const tagless = !(s.tags && s.tags.length);
-    const legendary = scoreShown >= CFG.discoverLegendaryScore && !tagless;
+    // (fix v3.59.0, durci) Une candidate SANS LIAISON ANILIST DU TOUT (jamais matchée, voir
+    // s.aniMatched) est comparée à ton profil dans un espace bien plus grossier — une
+    // poignée de genres larges (Action, Fantastique…) au lieu de centaines de tags fins. Un
+    // cosinus élevé y est plus facile à obtenir par coïncidence (2-3 genres communs
+    // suffisent) que dans l'espace des tags, où correspondre vraiment demande d'aligner des
+    // dizaines de signaux fins. Sans ce plafond, une candidate jamais matchée pouvait donc
+    // décrocher « légendaire » sur un signal en réalité moins fiable. Plafonnée à
+    // « notable » au mieux tant qu'aucune fiche AniList n'a pu être associée à la série —
+    // qu'elle ait ou non des tags/une note à ce stade n'entre plus en jeu, seule la LIAISON
+    // elle-même compte (une fiche AniList peut être matchée sans note communautaire connue,
+    // et reste alors éligible « légendaire » via le goût seul).
+    const noAniLink = !s.aniMatched;
+    const legendary = scoreShown >= CFG.discoverLegendaryScore && !noAniLink;
     const notable = !legendary && scoreShown >= CFG.discoverNotableScore;
     // Décomposition chiffrée AFFICHÉE (termes arrondis, somme = scoreShown) pour l'affichage
     // détaillé optionnel (voir scoreDetailHtml / CFG.discoverShowScoreDetail).
@@ -9586,7 +9613,7 @@
      fois à l'apparition (même garde .crrav-fresh, aucun état JS de plus). */
   .crrav-fresh.crrav-legendary .crrav-legribbon,
   .crrav-fresh.crrav-legendary .crrav-legribbon-sm{
-    position:relative;overflow:hidden}
+    overflow:hidden}
   .crrav-fresh.crrav-legendary .crrav-legribbon::after,
   .crrav-fresh.crrav-legendary .crrav-legribbon-sm::after{
     content:'';position:absolute;inset:0;
