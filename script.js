@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.80.9
+// @version      3.80.10
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -28,7 +28,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.80.9';
+  const SCRIPT_VERSION = '3.80.10';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -4823,6 +4823,13 @@
         s.aniSeasonYear = result.seasonYear;
         s.aniSource = result.source;
         s.aniFormat = result.format;
+        // (fix clavier — non, fix plafond légendaire) `result.matched` n'était propagé QUE dans
+        // le cache (cacheSet ci-dessus), jamais sur l'objet série VIVANT `s`. Résultat : une
+        // série enrichie ici (aniScore/tags/genres bien posés, AL ★ affichée sur sa carte)
+        // gardait s.aniMatched à false/undefined, et discoverSignals() la plafonnait à
+        // « Notable » (voir noAniLink) alors qu'elle a une fiche AniList réellement liée —
+        // parfois AU-DESSUS du score d'une autre série correctement marquée « Légendaire ».
+        s.aniMatched = result.matched;
         // Fusion (jamais remplacement) : les genres Crunchyroll déjà posés restent en tête,
         // AniList complète ce qui manque (voir mergeGenreLists). Alimente les tops genres
         // des Stats et le profil de goût de Découverte, qui lisent s.categories.
