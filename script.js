@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.80.4
+// @version      3.80.9
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -28,7 +28,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.80.4';
+  const SCRIPT_VERSION = '3.80.9';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -1215,6 +1215,11 @@
     if (!missing.length) return;
     backfillRunning = true;
     try {
+      // (fix v3.80.8) paceLimit() plutôt que CFG.concurrency dans le plafond ≤4 : ce pool
+      // (et les 3 autres passes de fond identiques — notes, notes perso, favoris) reste
+      // volontairement discret par défaut, mais s'il tombe pile pendant une rafale de 429
+      // déclenchée par autre chose (ex. Découverte en parallèle), autant qu'il lève aussi
+      // le pied plutôt que d'insister à 4 en pure perte.
       await pool(missing, async ([id]) => {
         BACKFILL_TRIED.add(id);
         try {
@@ -1224,7 +1229,7 @@
           v.poster = posterOf(panel);
           v.synopsis = panel.description || '';
         } catch (e) { safeCall.log(e, 'backfillIgnoredMeta:' + id); }
-      }, Math.max(2, Math.min(4, CFG.concurrency)));
+      }, Math.max(2, Math.min(4, paceLimit())));
       saveIgnored();
       forceRender();
     } finally {
@@ -2018,7 +2023,7 @@
     if (!patchDiscoverAction(seriesId)) forceRender();
     try {
       await addToCustomList(listId, seriesId, INTERACTIVE_RECOVERY_TIMEOUT_MS);
-      STATE.addedToList.set(seriesId, listId);   // (fix v3.80.4) mémorise la liste cible
+      STATE.addedToList.set(seriesId, listId);   // (fix v3.80.8) mémorise la liste cible
       // (fix v3.49.0) Effet « wahou » — voir discoverCard/discoverListRow et le CSS
       // .crrav-flourish-add : joué une seule fois, à l'instant précis de l'ajout.
       discoverFlourish = { id: seriesId, type: 'add' };
@@ -2634,22 +2639,50 @@
   }
 
   // (2) garde-fou : on compare ce qu'on reçoit à ce que l'API annonce.
+  // (fix v3.80.8) Page 1 à part : c'est elle qui révèle `r.total` (nombre d'entrées annoncé
+  // par l'API), impossible à connaître avant. Mais UNE FOIS ce total connu, on n'a plus
+  // besoin de découvrir les pages suivantes une par une — on sait déjà exactement combien il
+  // en reste, donc on les lance toutes en parallèle (pool, paceLimit()) au lieu d'attendre
+  // chaque réponse avant de demander la suivante. Pour une watchlist de plusieurs centaines
+  // d'entrées (5-10 pages à 100/page), ça change une attente strictement séquentielle
+  // (somme de toutes les latences) en une attente ≈ celle de la page la plus lente. Repli sur
+  // l'ancienne boucle séquentielle si l'API ne renvoie pas de total (cas jamais vu en
+  // pratique mais pas à exclure) : impossible alors de prédire le nombre de pages à l'avance.
   async function getWatchlist(accountId) {
     const items = [];
-    let start = 0, announced = null;
-    for (let page = 0; page < 40; page++) {
-      const r = await api(`/content/v2/discover/${accountId}/watchlist`, {
-        n: 100, start, locale: CFG.locale, order: 'desc',
-      });
-      const data = r.data || [];
-      if (announced === null && typeof r.total === 'number') announced = r.total;
-      if (!data.length) break;
-      const before = items.length;
-      items.push(...data);
-      if (items.length === before) break;            // page vide : on arrête
-      if (announced !== null && items.length >= announced) break;
-      if (data.length < 100) break;
-      start += 100;
+    const first = await api(`/content/v2/discover/${accountId}/watchlist`, {
+      n: 100, start: 0, locale: CFG.locale, order: 'desc',
+    });
+    const firstData = first.data || [];
+    const announced = typeof first.total === 'number' ? first.total : null;
+    items.push(...firstData);
+    const maxPages = 40;   // garde-fou inchangé (équivalent de l'ancienne boucle `page < 40`)
+    if (firstData.length === 100 && announced !== null && items.length < announced) {
+      // Chemin rapide : total connu → pages restantes prédictibles, lancées en parallèle.
+      const starts = [];
+      for (let p = 1; p < maxPages && p * 100 < announced; p++) starts.push(p * 100);
+      if (starts.length) {
+        const pages = await pool(starts, async (start) => {
+          const r = await api(`/content/v2/discover/${accountId}/watchlist`, {
+            n: 100, start, locale: CFG.locale, order: 'desc',
+          });
+          return r.data || [];
+        }, paceLimit());
+        for (const data of pages) if (data && data.length) items.push(...data);
+      }
+    } else if (firstData.length === 100 && announced === null) {
+      // Chemin lent (repli) : total inconnu, on redécouvre page par page comme avant.
+      let start = 100;
+      for (let page = 1; page < maxPages; page++) {
+        const r = await api(`/content/v2/discover/${accountId}/watchlist`, {
+          n: 100, start, locale: CFG.locale, order: 'desc',
+        });
+        const data = r.data || [];
+        if (!data.length) break;
+        items.push(...data);
+        if (data.length < 100) break;
+        start += 100;
+      }
     }
     STATE.announced = announced;
     if (announced !== null && items.length < announced) {
@@ -3012,12 +3045,15 @@
       let stop = stopAtMark;
       for (let i = 0; i < pageNums.length && !stop; i += CFG.concurrency) {
         const wave = pageNums.slice(i, i + CFG.concurrency);
+        // (fix v3.80.8) paceLimit() dans le pool — la taille de la « vague » ci-dessus reste
+        // basée sur CFG.concurrency (juste un découpage en tranches), mais l'exécution
+        // réelle en parallèle doit, elle, respecter le rythme adaptatif courant.
         const pages = await pool(wave, async (pg) => {
           const r = await api(`/content/v2/${accountId}/watch-history`, {
             page: pg, page_size: PAGE_SIZE, locale: CFG.locale, preferred_audio_language: 'ja-JP',
           });
           return r.data || [];
-        }, CFG.concurrency);
+        }, paceLimit());
         for (const data of pages) {
           if (!data) continue;
           scanned += data.length;
@@ -3106,6 +3142,7 @@
       // Chaque cible marquée « tentée » dès cette phase, avant même de savoir si AniList
       // sera sollicité, pour ne jamais la repasser en cas d'échec plus loin.
       const needAni = [];
+      // (fix v3.80.8) paceLimit().
       await pool(targets, async (d) => {
         historyGenreTried.add(d.id);
         let g = [];
@@ -3116,7 +3153,7 @@
         if (g.length) { d.genres = g; changed = true; }
         else if (aniOk) needAni.push(d);
         doneCount++; bump();
-      }, CFG.concurrency);
+      }, paceLimit());
 
       // ── Phase 2 : repli AniList, GROUPÉ (voir anilistSearchBatch) — le vrai frein aux
       // 429 était une requête HTTP par série ; ici comme dans enrichAnilistSchedule, on
@@ -3148,11 +3185,12 @@
       // score AniList tombe entre 0.6 et 0.9 (ex. synonyme FR légèrement différent, cas de
       // « Nina du royaume des/aux étoiles ») serait sinon perdu pour de bon.
       if (anilistCooldownRemainingMs() === 0 && noMatch2.length) {
-        const enItems = [];
-        for (const d of noMatch2) {
+        // (fix v3.80.8) paceLimit() — même correctif que la Phase 1bis d'enrichAnilistSchedule.
+        const enResults2 = await pool(noMatch2, async (d) => {
           const enTitle = await getSeriesEnglishTitle(d.id);
-          if (enTitle && aniNorm(enTitle) !== aniNorm(d.title)) enItems.push({ d, enTitle });
-        }
+          return (enTitle && aniNorm(enTitle) !== aniNorm(d.title)) ? { d, enTitle } : null;
+        }, paceLimit());
+        const enItems = enResults2.filter(Boolean);
         for (let i = 0; i < enItems.length; i += ANI_BATCH) {
           if (anilistCooldownRemainingMs() > 0) break;
           const batch = enItems.slice(i, i + ANI_BATCH);
@@ -3408,7 +3446,7 @@
       await pool(todo, async (s) => {
         const val = await getRating(s.id);
         if (val != null) { s.rating = val; changed++; }
-      }, Math.max(2, Math.min(4, CFG.concurrency)));
+      }, Math.max(2, Math.min(4, paceLimit())));
       if (changed) { LOG(`notes complétées en fond : ${changed}`); render(); }
     } catch (e) { safeCall.log(e, 'fillMissingRatings'); }
     finally { ratingPassRunning = false; }
@@ -3486,7 +3524,7 @@
       await pool(todo, async (s) => {
         const val = await getMyRating(accountId, s.id);
         if (val != null) { s.myRating = val; s.favorite = val >= 5; changed++; }
-      }, Math.max(2, Math.min(4, CFG.concurrency)));
+      }, Math.max(2, Math.min(4, paceLimit())));
       if (changed) { LOG(`notes perso complétées en fond : ${changed}`); render(); }
     } catch (e) { safeCall.log(e, 'fillMissingMyRatings'); }
     finally { myRatingPassRunning = false; }
@@ -3516,7 +3554,7 @@
         s.myRating = val;
         s.favorite = val != null && val >= 5;
         if (s.favorite !== wasFav) changed++;
-      }, Math.max(2, Math.min(4, CFG.concurrency)));
+      }, Math.max(2, Math.min(4, paceLimit())));
       showToast(changed
         ? `✓ Favoris à jour — ${changed} changement${changed > 1 ? 's' : ''}`
         : '✓ Favoris à jour — aucun changement');
@@ -4305,12 +4343,13 @@
     };
     const unmatched = await pass(items, (it) => it.title);
     if (!unmatched.length) return;
-    const enItems = [];
-    for (const it of unmatched) {
+    // (fix v3.80.8) paceLimit() — même correctif, 3ᵉ occurrence du même repli titre anglais.
+    const enResults3 = await pool(unmatched, async (it) => {
       let enTitle = null;
       try { enTitle = await getSeriesEnglishTitle(it.id); } catch (_) { /* best-effort */ }
-      if (enTitle && aniNorm(enTitle) !== aniNorm(it.title)) enItems.push({ id: it.id, title: enTitle, ref: it.ref });
-    }
+      return (enTitle && aniNorm(enTitle) !== aniNorm(it.title)) ? { id: it.id, title: enTitle, ref: it.ref } : null;
+    }, paceLimit());
+    const enItems = enResults3.filter(Boolean);
     if (enItems.length) await pass(enItems, (it) => it.title);
   }
 
@@ -4709,11 +4748,18 @@
       // Le titre anglais vient de Crunchyroll (endpoint distinct, mis en cache) — ce n'est
       // PAS une requête AniList, donc sans incidence sur le rate limit d'AniList.
       if (anilistCooldownRemainingMs() === 0 && noMatch.length) {
-        const enItems = [];
-        for (const s of noMatch) {
+        // (fix v3.80.8) paceLimit() au lieu d'une boucle for-of séquentielle : chaque
+        // getSeriesEnglishTitle est une vraie requête Crunchyroll (mise en cache ensuite,
+        // mais froide la première fois) — pour une bibliothèque avec beaucoup de séries
+        // sans match sur leur titre FR (typiquement après un premier scan), ça pouvait
+        // ajouter plusieurs secondes de pure attente en série avant même d'attaquer la
+        // recherche AniList groupée qui suit. Un candidat sans titre anglais utile
+        // (enTitle vide/identique) est juste ignoré, comme avant.
+        const enResults = await pool(noMatch, async (s) => {
           const enTitle = await getSeriesEnglishTitle(s.id);
-          if (enTitle && aniNorm(enTitle) !== aniNorm(s.title)) enItems.push({ s, enTitle });
-        }
+          return (enTitle && aniNorm(enTitle) !== aniNorm(s.title)) ? { s, enTitle } : null;
+        }, paceLimit());
+        const enItems = enResults.filter(Boolean);
         for (let i = 0; i < enItems.length; i += SEARCH_BATCH) {
           if (anilistCooldownRemainingMs() > 0) break;
           const batch = enItems.slice(i, i + SEARCH_BATCH);
@@ -5084,7 +5130,7 @@
     myLists: { items: [], loading: false, error: null },
     // Ids ajoutés depuis Découverte dans CETTE session : masqués de la liste sans
     // attendre un rechargement complet (voir mAddedThisSession dans render()).
-    // (fix v3.80.4) Map (id → listId), pas Set : il faut retenir DANS quelle liste chaque
+    // (fix v3.80.8) Map (id → listId), pas Set : il faut retenir DANS quelle liste chaque
     // série a été ajoutée pour pouvoir proposer un retrait direct depuis sa carte (bouton ✓,
     // voir addListBtn) — avant, seul le bouton « Annuler » du toast juste après l'ajout le
     // permettait ; une fois le toast disparu, l'ajout devenait irréversible depuis la carte.
@@ -5359,6 +5405,10 @@
 
       for (let i = 0; i < seriesRefs.length; i += CHUNK) {
         const slice = seriesRefs.slice(i, i + CHUNK);
+        // (fix v3.80.8) paceLimit() — même bug (panel + épisodes = 2 requêtes CR par
+        // série) sur le chemin de synchro principal (Reste à voir / Hors listes), pas
+        // seulement Découverte : un gros compte (beaucoup de séries) pouvait générer la
+        // même rafale de 429 jamais amortie ici non plus.
         const results = await pool(slice, async (ref, k) => {
           const panel = ref.panel || (await getSeriesPanel(ref.id));
           if (!panel) return null;
@@ -5366,7 +5416,7 @@
           const rating = getRatingCached(ref.id);      // sans requête : complété plus tard
           const myRating = getMyRatingCached(ref.id);   // idem, note perso
           return { panel, episodes: eps.episodes, maxAir: eps.maxAir, rating, myRating, order: i + k, refId: ref.id };
-        }, CFG.concurrency);
+        }, paceLimit());
 
         const ok = results.filter(Boolean);
         const ids = [...new Set(ok.flatMap((r) => r.episodes.flatMap((e) => e.ids)))];
@@ -6248,6 +6298,11 @@
           // unes des autres : les lancer en parallèle (même plafond CFG.concurrency que le
           // reste du script) au lieu d'une par une réduit le temps mur d'un facteur proche
           // du nombre de favoris traités, sans faire une seule requête réseau de plus.
+          // (note v3.80.8) Volontairement PAS paceLimit() ici, contrairement aux pools
+          // voisins corrigés dans cette version : fetchAnilistSimilar n'appelle QUE AniList,
+          // jamais api() (Crunchyroll) — or PACE.limit ne réagit qu'aux 429 Crunchyroll (voir
+          // paceOnThrottle, câblé uniquement dans api()). Le limiteur pertinent ici est déjà
+          // anilistCooldownRemainingMs() (le shouldStop juste en dessous), pas PACE.
           const recsByFav = await pool(favBatch, async (fav) => {
             if (D.cancelRequested || anilistCooldownRemainingMs() > 0) return [];
             try { return await fetchAnilistSimilar({ title: fav.title }); }
@@ -6336,7 +6391,11 @@
             // comme le fait déjà runAniBatch pour son propre lot — sans souci, render()
             // encaisse déjà des appels rapprochés ailleurs dans le scan.
             publishFound();
-          }, CFG.concurrency, (done) => {
+          // (fix v3.80.8) paceLimit() — même bug : resolveCrunchyrollForPremiere ci-dessus
+          // enchaîne plusieurs recherches Crunchyroll par candidate (voir la note détaillée
+          // dans scanAnilistPopularity, v3.80.8) — c'est le même pool coupable, juste dans
+          // le chemin « similaires de tes favoris » de Découverte plutôt que le dé légendaire.
+          }, paceLimit(), (done) => {
             favProcessed = done;
             onProgress(stepLabel(3, 3, `Découverte : similaires de tes favoris… (${favProcessed}/${allRecs.length})`));
           }, () => D.cancelRequested || matches.length >= target);
@@ -6481,9 +6540,13 @@
         for (let c = 0; c < candidates.length && (legendary ? legTotal(matches) + legTotal(results) : matches.length + results.length) < target; c += 8) {
           if (D.cancelRequested) break;
           const slice = candidates.slice(c, c + 8);
+          // (fix v3.80.8) paceLimit() au lieu de CFG.concurrency en dur — même bug que le
+          // pool de scanAnilistPopularity (v3.80.8) : evaluateDiscoverCandidate enchaîne
+          // plusieurs requêtes Crunchyroll par candidate (genres/note/épisodes), donc
+          // justement ce qui fait baisser PACE.limit sur 429 — jamais pris en compte ici.
           const got = await pool(slice,
             (p) => evaluateDiscoverCandidate(p, { accountId, REJ, D }, { deferEpisodes: legendary }),
-            CFG.concurrency, undefined, () => D.cancelRequested);
+            paceLimit(), undefined, () => D.cancelRequested);
 
           let survivors = got.filter(Boolean);
 
@@ -6580,13 +6643,14 @@
             }
             // Épisodes + progression UNIQUEMENT pour les légendaires (étape chère différée).
             if (kept.length && !D.cancelRequested) {
+              // (fix v3.80.8) paceLimit() — même bug, étape épisodes du dé légendaire.
               const checked = await pool(kept, async (x) => {
                 if (!x.epsPending) return x;   // déjà récupérés (ne devrait pas arriver ici)
                 const r = await fetchCandidateEpisodes({ p: x.p, ctx: { accountId, REJ, D } });
                 if (!r.ok) return null;
                 x.episodes = r.episodes; x.secTotal = r.secTotal; x.maxAir = r.maxAir; x.epsPending = false;
                 return x;
-              }, CFG.concurrency, undefined, () => D.cancelRequested);
+              }, paceLimit(), undefined, () => D.cancelRequested);
               kept = checked.filter(Boolean);
             }
           } else {
@@ -7416,14 +7480,17 @@
       const recMedia = await fetchAnilistSimilar(D.similarTo);
       if (recMedia && recMedia.length) {
         found.similarRecTotal = recMedia.length;   // (fix) pour le rapport : « X recos AniList »
-        // (fix v3.63.0) Traitées en PARALLÈLE (pool, même plafond CFG.concurrency que le
-        // reste du scan) au lieu d'une par une — chaque recommandation coûte 2-3 allers-
-        // retours réseau (résolution Crunchyroll, fiche complète, évaluation), jusqu'à 25
-        // recommandations : traitées séquentiellement, ça pouvait prendre 10-30 s pendant
-        // lesquelles RIEN ne s'affichait (même symptôme que le bug des favoris, corrigé en
-        // v3.61.0/v3.62.0 — même fix ici). onFound (voir processMedia) publie chaque
-        // pépite dès qu'elle est retenue, pas seulement une fois tout le lot terminé.
-        await pool(recMedia, async (m) => { await processMedia(m); }, CFG.concurrency,
+        // (fix v3.80.8) paceLimit() au lieu de CFG.concurrency en dur : ce pool enchaîne
+        // les requêtes Crunchyroll (resolveCrunchyrollForPremiere peut faire PLUSIEURS
+        // recherches séquentielles par candidate, + getSeriesPanel, + evaluateDiscoverCandidate)
+        // — donc justement celles qui déclenchent PACE.limit à la baisse (voir
+        // paceOnThrottle, sur les 429 de api()). En forçant CFG.concurrency ici, le
+        // ralentissement adaptatif calculé n'était jamais appliqué à CE scan précis : après
+        // une rafale de 429, l'app continuait de lancer plein pot (8 par défaut), en
+        // déclenchant encore plus, chacun relançant en cascade (backoff exponentiel jusqu'à
+        // 6.4 s PAR requête, voir api()) — d'où des pages qui pouvaient rester bloquées très
+        // longtemps malgré le commentaire promettant un rythme auto-adaptatif plus haut.
+        await pool(recMedia, async (m) => { await processMedia(m); }, paceLimit(),
           (done) => { if (onProgress) onProgress(done, recMedia.length); },
           () => D.cancelRequested || anilistCooldownRemainingMs() > 0 || found.length >= target);
         found.considered = considered;
@@ -7475,7 +7542,10 @@
       // runAniBatch), le mode légendaire (second bassin AniList) et le mode similaire en
       // repli tag_in — le fix profite aux trois d'un coup. onFound (voir processMedia) fait
       // toujours son travail de diffusion immédiate, candidat par candidat, y compris ici.
-      await pool(media, async (m) => { await processMedia(m); }, CFG.concurrency, undefined,
+      // (fix v3.80.8) paceLimit() au lieu de CFG.concurrency en dur — voir la note détaillée
+      // au premier pool() de cette fonction (mode similaire, plus haut) : même bug, même
+      // fix, boucle la PLUS coûteuse en requêtes Crunchyroll (jusqu'à 50 candidats/page).
+      await pool(media, async (m) => { await processMedia(m); }, paceLimit(), undefined,
         () => D.cancelRequested || found.length >= target);
     }
     if (cursor) { cursor.page = page; cursor.hasNext = hasNext; }
@@ -7716,6 +7786,7 @@
         return;
       }
 
+      // (fix v3.80.8) paceLimit() — même bug, chemin « Hors listes » cette fois.
       const results = await pool(candidateIds, async (id, idx) => {
         const panel = await getSeriesPanel(id);
         if (!panel) return null;
@@ -7723,7 +7794,7 @@
         const rating = getRatingCached(id);            // sans requête : complété plus tard
         const myRating = getMyRatingCached(id);         // idem, note perso
         return { panel, episodes: eps.episodes, maxAir: eps.maxAir, rating, myRating, order: idx };
-      }, CFG.concurrency, (done, total) => onProgress(stepLabel(3, 4, `Analyse des épisodes… ${done}/${total}`)));
+      }, paceLimit(), (done, total) => onProgress(stepLabel(3, 4, `Analyse des épisodes… ${done}/${total}`)));
 
       const ok = results.filter(Boolean);
       const allIds = [...new Set(ok.flatMap((r) => r.episodes.flatMap((e) => e.ids)))];
@@ -8187,7 +8258,7 @@
   // Bouton « + » (Découverte uniquement) : ajoute la série à une Crunchylist. Quatre
   // états visuels : normal (+), en cours (busy, ⋯), ajoutée cette session (done, ✓).
   // data-title porte le titre pour le sélecteur de liste (CFG.askListEachTime).
-  // (fix v3.80.4) L'état « done » n'est plus désactivé : avant, une fois l'ajout fait, seul
+  // (fix v3.80.8) L'état « done » n'est plus désactivé : avant, une fois l'ajout fait, seul
   // le bouton « Annuler » du toast (éphémère, voir handleAddToList) permettait de revenir en
   // arrière — passé ce délai, l'ajout devenait irréversible depuis la carte elle-même
   // (contrairement au bouton ⊘ ignorer, qui bascule dans les deux sens à volonté). ✓ ouvre
@@ -8209,7 +8280,7 @@
       : waiting ? 'Session Crunchyroll perdue — reconnexion en cours…'
       : busy ? 'Ajout en cours…' : 'Ajouter à ma liste';
     const icon = added ? '' : waiting ? '⚠' : busy ? '⋯' : '+';
-    // (fix v3.80.4) added : icône vide ici — le ✓/✕ est fourni par CSS (::after,
+    // (fix v3.80.8) added : icône vide ici — le ✓/✕ est fourni par CSS (::after,
     // .crrav-addlist.done) pour pouvoir basculer visuellement au survol/focus vers ✕,
     // signe qu'un clic RETIRE désormais (sans quoi ✓ fixe ressemblait à un simple badge
     // d'état, pas à un bouton actif).
@@ -10257,13 +10328,13 @@
   .crrav-addlist::before{content:'';position:absolute;inset:-6px;border-radius:50%}
   .crrav-addlist:focus-visible{opacity:1}
   .crrav-addlist:hover{background:#f47521;color:#12120f;border-color:#f47521}
-  /* (fix v3.80.4) Retiré pointer-events:none : ✓ redevient cliquable pour retirer l'ajout
+  /* (fix v3.80.8) Retiré pointer-events:none : ✓ redevient cliquable pour retirer l'ajout
      (voir addListBtn/data-undoaddlist) — même esprit que .crrav-ignore.on, qui bascule déjà
      dans les deux sens. Le survol passe à la teinte danger (même rouge que .crrav-ignore:hover)
      pour signaler qu'un second clic RETIRE, contrairement à l'ajout initial. */
   .crrav-addlist.done{opacity:1;background:#5ce6a0;color:#12120f;border-color:#5ce6a0;cursor:pointer}
   .crrav-addlist.done:hover{background:#e0574a;color:#fff;border-color:#e0574a}
-  /* (fix v3.80.4) icône fournie ici plutôt qu'en texte du bouton (voir addListBtn, icon='')
+  /* (fix v3.80.8) icône fournie ici plutôt qu'en texte du bouton (voir addListBtn, icon='')
      pour pouvoir la faire basculer ✓ → ✕ au survol/focus : un ✓ figé ressemble à un badge
      d'état inerte, alors que ce bouton est bien cliquable (retire l'ajout). ✕ ne s'affiche
      qu'au moment où le geste devient réellement disponible (survol souris / focus clavier) ;
@@ -15739,6 +15810,16 @@
   // jour la sheet en place SANS la recréer si elle est déjà ouverte et inchangée.
   let sheetOpenInDom = false;
   let FORCE_RENDER = false;
+  // (fix clavier mobile — chargement initial) Un render() de fond (loadAll/loadDiscover en
+  // cours, tick de progression) qui survient PENDANT que la recherche globale a le focus
+  // détruit son <input> (content.innerHTML) puis le refocalise juste après (voir
+  // activeFieldInfo) — mais un focus() posé hors de la pile d'appel d'un vrai geste
+  // utilisateur ne rouvre PAS le clavier virtuel sur mobile : le curseur revient dans le
+  // champ, le clavier reste fermé. Ce drapeau distingue le rendu déclenché par LE CHAMP
+  // LUI-MÊME (frappe en cours, a besoin de rafraîchir renderGlobalSearch() en dessous, voir
+  // le handler 'input' plus bas) d'un rendu de fond quelconque : seul le second doit éviter
+  // de toucher au nœud du champ (voir le repli plus bas dans renderNow()).
+  let liveSearchRenderInFlight = false;
   // (fix reprise navigation) Mémoire de défilement par onglet : `lastRenderedPanel` détecte
   // un changement d'onglet (panneau affiché différent du précédent render) pour savoir
   // QUAND retenter une restauration ; `scrollRestorePending` porte l'onglet dont le scroll
@@ -16273,6 +16354,24 @@
       if (!ae || !content.contains(ae) || typeof ae.selectionStart !== 'number') return null;
       return { cls: ae.className, start: ae.selectionStart, end: ae.selectionEnd };
     })();
+    // (fix clavier mobile — chargement initial) Si la recherche globale a le focus et que
+    // ce rendu n'est PAS celui déclenché par le champ lui-même (voir liveSearchRenderInFlight),
+    // c'est un rendu de fond (progression de chargement, sync…) qui n'a rien à mettre à jour
+    // dans le champ ou ses résultats : on se contente de rafraîchir la barre d'activité en
+    // place et on s'arrête là, SANS jamais toucher .crrav-globalrow — contrairement au
+    // refocus a posteriori (activeFieldInfo ci-dessus), qui recrée le nœud puis le refocalise
+    // (ça déplace bien le curseur, mais ça NE rouvre PAS le clavier virtuel sur mobile, un
+    // focus() programmatique hors d'un geste utilisateur ne le faisant jamais). Ne jamais
+    // toucher le nœud = le clavier ne se ferme jamais pendant ces rendus de fond.
+    const searchFieldFocused = document.activeElement
+      && document.activeElement.classList
+      && document.activeElement.classList.contains('crrav-search-global')
+      && content.contains(document.activeElement);
+    if (searchFieldFocused && !liveSearchRenderInFlight && !FORCE_RENDER) {
+      const activityEl = content.querySelector('.crrav-activitybar');
+      if (activityEl) activityEl.outerHTML = renderActivityBar();
+      return;
+    }
     // (fix v3.50.0) Le VRAI conteneur défilant est `root` (.crrav-overlay, overflow-y:auto,
     // position:fixed) — PAS .crrav-content, qui n'a aucun overflow propre. `content.scrollTop`
     // valait donc quasiment toujours 0 : la « restauration » ci-dessous ne restaurait rien
@@ -16303,7 +16402,7 @@
     // fermée) passent par la reconstruction complète plus bas.
     const existingSheet = content.querySelector('.crrav-settingssheet');
     if (STATE.settingsOpen && existingSheet && sheetOpenInDom) {
-      // (fix v3.80.4) Modale de confirmation mise à jour EN PREMIER, avant le patch du
+      // (fix v3.80.8) Modale de confirmation mise à jour EN PREMIER, avant le patch du
       // corps de la sheet : avec l'ordre précédent, si buildSettingsSheetBodyHtml()
       // (appelé par patchSettingsSheetInPlace juste en dessous) levait une exception —
       // notamment possible juste après « Fermer sans enregistrer », le brouillon et
@@ -16651,7 +16750,12 @@
         // elles n'ont jamais été chargées, un bouton explicite dans renderGlobalSearch
         // permet à l'utilisateur de lancer le scan à la demande (voir data-act
         // 'search-scan-orphan-discover').
-        renderNow();                       // le focus est repris juste après : rendu immédiat
+        // (fix clavier mobile) Drapeau posé le temps du rendu : voir liveSearchRenderInFlight,
+        // pour que renderNow() sache que CE rendu-ci vient bien du champ (résultats à
+        // rafraîchir) et non d'un tick de fond, et distingue ainsi les deux cas.
+        liveSearchRenderInFlight = true;
+        try { renderNow(); }                // le focus est repris juste après : rendu immédiat
+        finally { liveSearchRenderInFlight = false; }
         const s = root.querySelector('.crrav-search-global');
         if (s) { s.focus(); s.setSelectionRange(s.value.length, s.value.length); }
       }, 220));
@@ -17105,7 +17209,7 @@
           forceRender();
           return;
         }
-        // (fix v3.80.4) Retrait direct depuis la carte Découverte, une fois l'ajout fait
+        // (fix v3.80.8) Retrait direct depuis la carte Découverte, une fois l'ajout fait
         // (bouton ✓, voir addListBtn) — pendant du 🗑 de Reste à voir (data-removelist),
         // avec la même confirmation puisque c'est une vraie suppression côté Crunchyroll,
         // pas juste un marquage local comme ignorer. listId retenu dans STATE.addedToList
@@ -17355,7 +17459,7 @@
           saveFilters(); render(); return;
         }
         if (act.dataset.act === 'ignore-all-discover') {
-          // (fix v3.80.4) visibleDiscover() sans argument équivaut à (false, false) : ça
+          // (fix v3.80.8) visibleDiscover() sans argument équivaut à (false, false) : ça
           // excluait aussi les pépites déjà AJOUTÉES à une liste, alors qu'elles restent
           // affichées dans la grille (renderDecouverte, lui, utilise (true, true)). Le lot
           // ignoré en masse était donc plus petit que ce qui était réellement visible à
