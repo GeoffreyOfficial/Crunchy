@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.82.0
+// @version      3.83.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.82.0';
+  const SCRIPT_VERSION = '3.83.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -2047,6 +2047,14 @@
       // demandait de rouvrir la fiche sur Crunchyroll pour retirer la série à la main.
       showToast(`✓ ${title || 'Série'} ajoutée à « ${listTitle} »`,
         { undo: () => handleUndoAddToList(seriesId, listId, title) });
+      // (fix v3.82.0) Même mécanisme que loadDiscover (voir hasNewMember plus haut dans le
+      // fichier) : un ajout depuis Découverte OU Hors listes ne touche jamais STATE.series
+      // (Reste à voir) tout seul — sans ça, la série ajoutée n'apparaissait dans Reste à voir
+      // qu'après un « Actualiser » manuel ou une prochaine relance de Découverte qui la
+      // détectait incidemment. On relance ici directement, en tâche de fond (idle, ne bloque
+      // pas le toast/l'effet visuel), avec le même double contrôle !STATE.loading qu'ailleurs
+      // pour ne jamais chevaucher un chargement déjà en cours.
+      if (!STATE.loading) idle(() => { if (!STATE.loading) refresh(); });
     } catch (e) {
       console.warn('[reste-à-voir] ajout à la liste échoué', e);
       // (fix v3.77.0) Message distinct si l'échec vient d'une session perdue non encore
@@ -2074,6 +2082,11 @@
     try {
       await removeFromCustomList(listId, seriesId, INTERACTIVE_RECOVERY_TIMEOUT_MS);
       STATE.addedToList.delete(seriesId);
+      // (fix v3.82.0) Symétrique du refresh de fond posé dans handleAddToList : si Reste à
+      // voir avait déjà rechargé (ou est en train de le faire) et affiche désormais cette
+      // série, l'annulation doit la faire disparaître tout de suite — sans attendre un
+      // prochain refresh(), qui pourrait de toute façon la remettre entre-temps.
+      STATE.series = STATE.series.filter((x) => x.id !== seriesId);
       showToast(`↺ « ${title || 'Série'} » retirée — ajout annulé`);
     } catch (e) {
       console.warn('[reste-à-voir] annulation d\'ajout échouée', e);
@@ -9960,7 +9973,7 @@
      n'existe que sur Reste à voir, ajouter que sur Découverte/Hors listes), donc la colonne
      bas-centre est libre. .crrav-addlist-bottom écrase le placement haut-droite par défaut
      (pensé pour Découverte, voir plus bas) sans toucher à son gabarit rond ni ses couleurs
-     d'état (busy/done/waiting-session), partagées à l'identique avec Découverte.
+     d'état (busy/done/waiting-session), partagées à l'identique avec Découverte. */
   /* Coloration Découverte : pastilles de signaux + liseré coloré (couleur = signal dominant) */
   .crrav-sigs{display:flex;gap:5px;margin:3px 0 2px;font-size:13px;line-height:1;min-height:15px}
   /* (39) Badge devenu <button> (voir sigMarkup/discoverCard) : cercle tappable discret,
@@ -10393,7 +10406,7 @@
   @keyframes crrav-waitsession-pulse{0%,100%{opacity:1}50%{opacity:.55}}
   @media (prefers-reduced-motion:reduce){.crrav-addlist.waiting-session,.crrav-removelist.waiting-session{animation:none;opacity:.85}}
   .crrav-addlist[disabled]{opacity:.5;pointer-events:none}
-  .crrav-listpicker{position:fixed;inset:0;z-index:60;display:flex;align-items:flex-end;justify-content:center;
+  .crrav-listpicker{position:fixed;inset:0;z-index:90;display:flex;align-items:flex-end;justify-content:center;
     background:rgba(6,6,8,.7)}
   .crrav-listpicker-sheet{width:100%;max-width:420px;background:#141419;border:1px solid rgba(255,255,255,.1);
     border-radius:16px 16px 0 0;padding:16px;display:flex;flex-direction:column;gap:10px;
@@ -10410,7 +10423,15 @@
     border-radius:10px;padding:10px;color:#c9c9d2;font:600 12.5px/1 system-ui;cursor:pointer}
 
   /* Modale de confirmation générique (même moule que le sélecteur de liste) */
-  .crrav-confirm{position:fixed;inset:0;z-index:70;display:flex;align-items:flex-end;justify-content:center;
+  /* (fix v3.82.0) z-index relevé de 70 à 91 (et 60→90 pour .crrav-listpicker ci-dessus) :
+     #crrav-toast-fixed (z-index:80) est un nœud à part posé directement sur « root », PAS
+     dans .crrav-modals — un toast encore affiché (ex. celui avec bouton Annuler, 6 s) passait
+     donc DEVANT ces modales alors ancrées à 60/70, masquant potentiellement leur message et
+     leurs boutons puisque les deux sont ancrés au même endroit (bas de l'écran, mobile). La
+     vraie correction est dismissToast() (voir plus haut, appelée à chaque ouverture) : ceci
+     n'est qu'un filet de sécurité si un toast apparaissait malgré tout pendant qu'une modale
+     est déjà ouverte. */
+  .crrav-confirm{position:fixed;inset:0;z-index:91;display:flex;align-items:flex-end;justify-content:center;
     background:rgba(6,6,8,.72)}
   .crrav-confirm-sheet{width:100%;max-width:420px;background:#141419;border:1px solid rgba(255,255,255,.1);
     border-radius:16px 16px 0 0;padding:18px 16px;display:flex;flex-direction:column;gap:12px;
@@ -12127,6 +12148,24 @@
     // renderNow), d'où « ça saute une seconde fois » une fois le toast parti. On appelle
     // maintenant directement renderToastOverlay(), qui ne touche QUE le nœud du toast.
     toastTimer = setTimeout(() => { toastMsg = ''; toastUndo = null; renderToastOverlay(); }, toastUndo ? 6000 : 4000);
+  }
+
+  // (fix v3.82.0) Le toast (#crrav-toast-fixed, z-index:80) et la modale de confirmation /
+  // le sélecteur de liste (.crrav-confirm/.crrav-listpicker, z-index:70/60) sont tous les
+  // trois ancrés en bas de l'écran (mobile) — un toast encore affiché (ex. celui avec bouton
+  // Annuler après un ajout, visible 6 s) passe DEVANT la modale qui s'ouvre juste après et
+  // peut masquer entièrement son message et ses boutons, malgré son z-index plus faible en
+  // apparence (le toast est un nœud à part, ajouté directement sur `root`, PAS dans
+  // .crrav-modals — voir renderToastOverlay). Plutôt que de jouer sur l'empilement, on
+  // ferme simplement le toast dès qu'une modale bloquante s'ouvre : les deux ne devraient
+  // jamais être visibles en même temps. Appelée juste avant chaque `STATE.confirmModal = {…}`
+  // et `STATE.listPicker = {…}`.
+  function dismissToast() {
+    if (!toastMsg) return;
+    clearTimeout(toastTimer);
+    toastMsg = '';
+    toastUndo = null;
+    renderToastOverlay();
   }
 
   // Tonalité déduite du glyphe en tête de message (voir showToast ci-dessus — tous les
@@ -17217,6 +17256,7 @@
           const seriesId = addBtn2.dataset.addlist;
           const title = addBtn2.dataset.title || '';
           if (CFG.askListEachTime) {
+            dismissToast();
             STATE.listPicker = { seriesId, title };
             ensureMyListsLoaded();
             forceRender();
@@ -17249,6 +17289,7 @@
             ...(s && s.inWatchlist ? ['ta watchlist'] : []),
           ];
           const where = listNames.length ? listNames.join(', ') : 'tes listes';
+          dismissToast();
           STATE.confirmModal = {
             title: 'Retirer de tes listes ?',
             message: `<p>Retirer <b>${escapeHtml(title)}</b> de <b>${escapeHtml(where)}</b> ?</p>`
@@ -17274,6 +17315,7 @@
           const listId = STATE.addedToList.get(seriesId);
           if (!listId) { forceRender(); return; }   // état incohérent (ex. ajout d'une session précédente) : rien à faire
           const listTitle = (STATE.myLists.items.find((l) => l.id === listId) || {}).title || 'cette liste';
+          dismissToast();
           STATE.confirmModal = {
             title: 'Retirer de la liste ?',
             message: `<p>Retirer <b>${escapeHtml(title)}</b> de <b>${escapeHtml(listTitle)}</b> ?</p>`,
@@ -17441,6 +17483,7 @@
                 .map((f) => `<li>${escapeHtml(f.label)}</li>`).join('');
               const rest = dirty.length - MAX_LISTED;
               const n = dirty.length;
+              dismissToast();
               STATE.confirmModal = {
                 title: 'Fermer sans enregistrer ?',
                 message: `<p><b>${n}</b> réglage${n > 1 ? 's' : ''} modifié${n > 1 ? 's' : ''} `
@@ -17522,6 +17565,7 @@
           const toIgnore = visibleDiscover(false, true);   // exactement la « page actuelle » affichée
           const n = toIgnore.length;
           if (!n) return;
+          dismissToast();
           STATE.confirmModal = {
             title: `Ignorer ${n} série${n > 1 ? 's' : ''} ?`,
             message: `<p>Les <b>${n}</b> série${n > 1 ? 's' : ''} actuellement affichée${n > 1 ? 's' : ''} `
@@ -17666,6 +17710,7 @@
             // des centaines, sans lien entre elles) : irréversible en un clic, donc
             // confirmation avant d'agir — même mécanisme que « Tout ignorer » de Découverte.
             const n = IGNORED.size;
+            dismissToast();
             STATE.confirmModal = {
               title: `Réafficher les ${n} série${n > 1 ? 's' : ''} ignorées ?`,
               message: `<p>Les <b>${n}</b> série${n > 1 ? 's' : ''} actuellement ignorée${n > 1 ? 's' : ''} `
@@ -17728,6 +17773,7 @@
                 .map((f) => `<li>${escapeHtml(f.label)}</li>`).join('');
               const rest = dirty.length - MAX_LISTED;
               const n = dirty.length;
+              dismissToast();
               STATE.confirmModal = {
                 title: 'Fermer sans enregistrer ?',
                 message: `<p><b>${n}</b> réglage${n > 1 ? 's' : ''} modifié${n > 1 ? 's' : ''} `
