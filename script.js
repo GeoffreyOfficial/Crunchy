@@ -3,12 +3,25 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.80.10
+// @version      3.81.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
 // @noframes
 // @run-at       document-start
+// ── Version Safari/Userscripts (quoid) ──────────────────────────────────
+// Il existe un fichier séparé, script-safari.js, identique à celui-ci SAUF les 4 lignes
+// @grant/@connect ci-dessous, retirées. Raison : sur Userscripts (Safari iOS), la simple
+// PRÉSENCE d'un @grant force l'app à injecter le script dans un contexte isolé plutôt que
+// dans le vrai contexte de la page — ce qui coupe l'accès aux cookies de session
+// Crunchyroll (401 systématique sur /auth/v1/token, quel que soit le canal réseau utilisé
+// ensuite). Retirer ces 4 lignes restaure le contexte page réel → cookies transmis
+// normalement → Crunchyroll refonctionne. Aucune autre ligne de ce fichier n'a besoin
+// d'être modifiée pour Safari : le code détecte déjà l'absence de GM_xmlhttpRequest
+// (voir GM_XHR plus bas) et bascule automatiquement sur fetch() pour tout, y compris
+// AniList — qui, empiriquement, n'est PAS bloqué par la CSP de Crunchyroll sous Safari/
+// WebKit (contrairement à Firefox, où fetch() vers anilist.co est bloqué et GM reste donc
+// nécessaire). Sur Safari, retirer le grant ne fait donc perdre AUCUNE fonctionnalité.
 // @grant        GM_xmlhttpRequest
 // @grant        GM.xmlHttpRequest
 // @connect      anilist.co
@@ -28,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.80.10';
+  const SCRIPT_VERSION = '3.81.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
