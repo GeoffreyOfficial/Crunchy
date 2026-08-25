@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.81.0
+// @version      3.82.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.81.0';
+  const SCRIPT_VERSION = '3.82.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -8275,7 +8275,7 @@
       aria-label="${ign ? 'Réafficher' : 'Ignorer'}">${ign ? '↺' : '⊘'}</button>`;
   }
 
-  // Bouton « + » (Découverte uniquement) : ajoute la série à une Crunchylist. Quatre
+  // Bouton « + » (Découverte + Hors listes) : ajoute la série à une Crunchylist. Quatre
   // états visuels : normal (+), en cours (busy, ⋯), ajoutée cette session (done, ✓).
   // data-title porte le titre pour le sélecteur de liste (CFG.askListEachTime).
   // (fix v3.80.8) L'état « done » n'est plus désactivé : avant, une fois l'ajout fait, seul
@@ -8284,7 +8284,14 @@
   // (contrairement au bouton ⊘ ignorer, qui bascule dans les deux sens à volonté). ✓ ouvre
   // maintenant la même confirmation que 🗑 (data-removelist) avant de retirer, puisque
   // c'est un appel réseau réel côté Crunchyroll.
-  function addListBtn(s) {
+  // (fix v3.81.0) `bottom` (Hors listes uniquement) ajoute crrav-addlist-bottom : repositionne
+  // le bouton en bas-centre de la jaquette, exactement là où vit 🗑 sur Reste à voir — les deux
+  // ne coexistent jamais (card() ne connaît que 'watchlist' et 'orphan', jamais ensemble sur la
+  // même carte), donc aucun risque de chevauchement. Découverte, elle, garde le placement
+  // historique haut-droite (bottom=false). Le câblage (clic, confirmation d'ajout, sélecteur de
+  // liste CFG.askListEachTime, toast Annuler) est entièrement partagé via data-addlist/
+  // data-undoaddlist : rien à dupliquer, Hors listes se comporte à l'identique de Découverte.
+  function addListBtn(s, bottom) {
     const added = STATE.addedToList.has(s.id);
     const busy = STATE.addingId === s.id;
     // (fix v3.77.0) `sessionLost` (même variable que la bannière « Session expirée », voir
@@ -8295,7 +8302,8 @@
     // resolveSessionRecovered appellent déjà render() : ce bouton se met donc à jour tout
     // seul dès que sessionLost change, sans câblage supplémentaire.
     const waiting = busy && sessionLost;
-    const cls = added ? 'done' : waiting ? 'busy waiting-session' : busy ? 'busy' : '';
+    const cls = [added ? 'done' : '', waiting ? 'busy waiting-session' : busy ? 'busy' : '', bottom ? 'crrav-addlist-bottom' : '']
+      .filter(Boolean).join(' ');
     const label = added ? 'Ajoutée à ta liste — touche pour retirer'
       : waiting ? 'Session Crunchyroll perdue — reconnexion en cours…'
       : busy ? 'Ajout en cours…' : 'Ajouter à ma liste';
@@ -8612,7 +8620,7 @@
         ${state}
         ${s.isNew ? '<span class="crrav-newdot">Nouvel épisode</span>' : ''}
         ${ignoreBtn(s, source)}
-        ${source === 'watchlist' ? removeListBtn(s) : ''}
+        ${source === 'watchlist' ? removeListBtn(s) : source === 'orphan' ? addListBtn(s, true) : ''}
         ${synopsisBlock(s)}
       </div>
       <div class="crrav-body">
@@ -8675,7 +8683,7 @@
       </div>
       <div class="crrav-lactions-more">
         ${ignoreBtn(s, source)}
-        ${source === 'watchlist' ? removeListBtn(s) : ''}
+        ${source === 'watchlist' ? removeListBtn(s) : source === 'orphan' ? addListBtn(s) : ''}
       </div>
     </article>`;
   }
@@ -9947,6 +9955,12 @@
   .crrav-thumb .crrav-removelist:hover{background:#e0574a;color:#fff;border-color:#e0574a;
     transform:translateX(-50%) translateY(-1px)}
   .crrav-thumb .crrav-removelist:active{transform:translateX(-50%) scale(.94)}
+  /* (fix v3.81.0) Ajout depuis Hors listes (bouton +, voir addListBtn(s, true)) : même
+     emplacement bas-centre que 🗑 ci-dessus — jamais coprésents sur une même carte (retirer
+     n'existe que sur Reste à voir, ajouter que sur Découverte/Hors listes), donc la colonne
+     bas-centre est libre. .crrav-addlist-bottom écrase le placement haut-droite par défaut
+     (pensé pour Découverte, voir plus bas) sans toucher à son gabarit rond ni ses couleurs
+     d'état (busy/done/waiting-session), partagées à l'identique avec Découverte.
   /* Coloration Découverte : pastilles de signaux + liseré coloré (couleur = signal dominant) */
   .crrav-sigs{display:flex;gap:5px;margin:3px 0 2px;font-size:13px;line-height:1;min-height:15px}
   /* (39) Badge devenu <button> (voir sigMarkup/discoverCard) : cercle tappable discret,
@@ -10345,6 +10359,12 @@
   .crrav-addlist{position:absolute;top:8px;right:8px;z-index:2;width:32px;height:32px;border-radius:50%;
     background:rgba(10,10,12,.92);border:1px solid rgba(255,255,255,.22);
     color:#c9c9d2;font:700 16px/1 system-ui;cursor:pointer;padding:0;opacity:1;transition:opacity .15s,background .15s}
+  /* (fix v3.81.0) Hors listes uniquement (voir addListBtn(s, true)) : bas-centre au lieu de
+     haut-droite, même position que .crrav-thumb .crrav-removelist plus haut. */
+  .crrav-thumb .crrav-addlist.crrav-addlist-bottom{top:auto;left:50%;right:auto;bottom:8px;
+    transform:translateX(-50%)}
+  .crrav-thumb .crrav-addlist.crrav-addlist-bottom:hover{transform:translateX(-50%) translateY(-1px)}
+  .crrav-thumb .crrav-addlist.crrav-addlist-bottom:active{transform:translateX(-50%) scale(.94)}
   .crrav-addlist::before{content:'';position:absolute;inset:-6px;border-radius:50%}
   .crrav-addlist:focus-visible{opacity:1}
   .crrav-addlist:hover{background:#f47521;color:#12120f;border-color:#f47521}
@@ -10475,6 +10495,11 @@
      de la liste aient la même hauteur, quel que soit le texte à côté. */
   .crrav-lactions-more{display:flex;flex-direction:column;align-items:center;gap:6px;flex:0 0 auto}
   .crrav-lactions-more .crrav-ignore{width:40px;height:40px;position:static;opacity:1}
+  /* (fix v3.81.0) Ajout depuis Hors listes en vue liste : même traitement statique que
+     .crrav-ignore/.crrav-removelist ci-dessus — .crrav-addlist est en position:absolute par
+     défaut (pensé pour Découverte en vue carte), inutilisable tel quel dans cette colonne. */
+  .crrav-lactions-more .crrav-addlist{width:40px;height:40px;position:static;opacity:1}
+  .crrav-lactions-more .crrav-addlist::before{content:none}
   /* La ligne « X/Y vus · Z restants » + durée restante ne doit jamais passer à la
      ligne (ça décale visuellement chaque .crrav-lrow d'une hauteur différente) : même
      traitement nowrap+ellipsis que la vue liste de Découverte (5bis) plus bas. */
@@ -10505,7 +10530,8 @@
     .crrav-lrow:not(.crrav-lrow-discover) .crrav-lleftcol .crrav-similar{width:32px;height:29px}
     .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions-more{gap:4px}
     .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions-more .crrav-ignore,
-    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions-more .crrav-removelist{width:34px;height:34px}
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions-more .crrav-removelist,
+    .crrav-lrow:not(.crrav-lrow-discover) .crrav-lactions-more .crrav-addlist{width:34px;height:34px}
   }
   /* Très petit téléphone : la baguette « séries similaires » est la moins essentielle
      des actions de la colonne de gauche (resume = action principale) — on la retire
@@ -16897,6 +16923,12 @@
   // Point d'entrée unique appelé par toggleIgnored/handleAddToList/handleUndoAddToList côté
   // Découverte. Renvoie true si le patch ciblé a suffi (l'appelant n'a alors PAS besoin de
   // forceRender()) ; false si un rendu complet reste nécessaire (repli sûr).
+  // (fix v3.81.0) Hors listes utilise aussi addListBtn (voir card()), donc handleAddToList/
+  // handleUndoAddToList l'appellent également pour ces cartes-là — mais patchDiscoverCardDOM
+  // ne connaît que STATE.discover.series : pour une série Hors listes, `s` y est introuvable,
+  // le patch échoue proprement (false) et l'appelant retombe sur forceRender(). Correct mais
+  // moins optimisé que Découverte ; pas de quoi dupliquer ce chemin pour l'instant, l'ajout
+  // depuis Hors listes restant un geste ponctuel plutôt qu'une action répétée en rafale.
   function patchDiscoverAction(seriesId) {
     if (!root) return false;
     const content = root.querySelector('.crrav-content');
