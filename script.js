@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.83.0
+// @version      3.84.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.83.0';
+  const SCRIPT_VERSION = '3.84.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -16422,9 +16422,37 @@
     }
   }
 
+  // (fix v3.84.0) Sélecteur de liste (.crrav-listpicker) et modale de confirmation
+  // (.crrav-confirm) : posés directement sur `root`, EXACTEMENT comme #crrav-toast-fixed
+  // ci-dessus — jamais imbriqués dans .crrav-content, contrairement à avant. Raison : le
+  // changement d'onglet anime .crrav-content via .crrav-tabswitch (voir @keyframes
+  // crrav-tabswitch-in plus bas, transform:translateY(7px)→none). Un élément avec un
+  // `transform` actif (même de façon transitoire, le temps de l'animation) devient le
+  // référentiel de positionnement de TOUT descendant en position:fixed, au lieu du viewport
+  // (règle CSS standard, pas un bug de moteur) — un .crrav-confirm alors imbriqué dans
+  // .crrav-content se retrouvait donc ancré au bas de .crrav-content (potentiellement des
+  // milliers de pixels sous la zone visible, la grille de cartes étant bien plus haute que
+  // l'écran) plutôt qu'au bas de l'écran réel. Symptôme observé : fond assombri (le calque
+  // semi-transparent, lui, couvre bien tout .crrav-content donc tout ce qui est visible),
+  // mais ni message ni boutons — la vraie feuille de dialogue était rendue hors-champ, plus
+  // bas dans une page qu'on ne fait jamais défiler jusque-là. En sortant .crrav-modals de
+  // .crrav-content, ce référentiel ne peut plus jamais être perturbé par une animation du
+  // contenu — le même raisonnement qui protège déjà le toast.
+  function renderModalsOverlay() {
+    if (!root) return;
+    let el = root.querySelector('.crrav-modals');
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'crrav-modals';
+      root.appendChild(el);
+    }
+    el.innerHTML = listPickerHtml() + confirmModalHtml();
+  }
+
   function renderNow() {
     if (!root) return;
     renderToastOverlay();
+    renderModalsOverlay();
     const content = root.querySelector('.crrav-content');
     if (!content) return;
     // (fix clavier mobile) Sauvegarde le champ actif AVANT reconstruction : content.innerHTML
@@ -16499,8 +16527,9 @@
       // dans le DOM), sans jamais montrer la boîte « Fermer sans enregistrer » elle-même.
       // patchSettingsSheetInPlace est en plus protégé par safeCall : une erreur y est
       // désormais journalisée sans jamais empêcher la modale de rester joignable.
-      const modalsEl = content.querySelector('.crrav-modals');
-      if (modalsEl) modalsEl.innerHTML = listPickerHtml() + confirmModalHtml();
+      // (fix v3.84.0) .crrav-modals vit maintenant sur `root` (voir renderModalsOverlay,
+      // appelée une seule fois en tête de renderNow — plus dans .crrav-content) : rien à
+      // patcher spécifiquement ici, la mise à jour est déjà faite.
       if (FORCE_RENDER) {
         FORCE_RENDER = false;
         safeCall(() => patchSettingsSheetInPlace(existingSheet), undefined, 'patchSettingsSheetInPlace');
@@ -16625,8 +16654,6 @@
         <div class="crrav-sheetfoot">${settingsSheetFoot}</div>
       </div>` : '';
 
-    const listPickerSheet = listPickerHtml();
-
     // Recherche masquée par défaut (voir CFG.showSearchBar) : visible si le réglage
     // permanent est actif, si affichée ponctuellement cette session (🔍 dans l'en-tête),
     // ou si l'écran est assez large pour l'accueillir en permanence (voir isWideSearchScreen).
@@ -16679,7 +16706,7 @@
           : STATE.tab === 'stats' ? renderStats()
           : STATE.tab === 'calendrier' ? renderCalendrier()
           : renderSuivi()}`
-      + settingsSheet + `<div class="crrav-modals">${listPickerSheet}${confirmModalHtml()}</div>`;
+      + settingsSheet;
 
     // Restauration du défilement, juste après le remplacement du DOM.
     if (prevScroll > 0 && scrollEl.scrollHeight > scrollEl.clientHeight) scrollEl.scrollTop = prevScroll;
@@ -17094,7 +17121,7 @@
       root.className = 'crrav-overlay';
       // Structure fixe : l'indicateur de pull-to-refresh doit survivre aux rendus,
       // qui ne réécrivent que .crrav-content.
-      root.innerHTML = '<div class="crrav-ptr">↓</div><div class="crrav-content"></div>';
+      root.innerHTML = '<div class="crrav-ptr">↓</div><div class="crrav-content"></div><div class="crrav-modals"></div>';
       attachPullToRefresh(root, root.querySelector('.crrav-ptr'));
       // (fix reprise navigation) Mémorise le scroll de l'onglet actif en sessionStorage
       // (SESSION_NAV, PAS localStorage), débattu (400 ms après la fin du défilement) pour
