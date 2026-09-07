@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.90.0
+// @version      3.92.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -39,7 +39,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.90.0';
+  const SCRIPT_VERSION = '3.92.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -2649,6 +2649,40 @@
     return Array.isArray(v) && v.length ? v : null;
   }
 
+  // (fix v3.92.0) Même principe que snapshotSave/snapshotLoad ci-dessus, pour l'onglet
+  // « Hors listes » : avant ce correctif, seul Reste à voir avait un instantané persisté
+  // affiché immédiatement à l'ouverture — Hors listes retombait systématiquement sur le
+  // squelette de chargement complet à chaque ouverture d'onglet/panneau, faute d'un
+  // équivalent. Clé de cache distincte ('snapshotOrphan') : les deux listes n'ont aucune
+  // raison de partager le même instantané.
+  function orphanSnapshotSave() {
+    safeCall(() => {
+      cacheSet('snapshotOrphan', STATE.orphan.series.map((s) => ({
+        ...s,
+        episodes: s.episodes.map((e) => ({
+          n: e.n, season: e.season, title: e.title, dur: e.dur, seen: e.seen, started: e.started,
+        })),
+        next: s.next ? { id: s.next.id, season: s.next.season, n: s.next.n, dur: s.next.dur } : null,
+      })));
+    }, undefined, 'orphanSnapshotSave');
+  }
+  function orphanSnapshotLoad() {
+    const v = cacheGet('snapshotOrphan', 7 * DAY);
+    return Array.isArray(v) && v.length ? v : null;
+  }
+  // Affiche l'instantané persisté avant de lancer le scan, exactement comme le fait
+  // l'ouverture du panneau pour Reste à voir (voir open()) — appelé à chaque entrée sur
+  // l'onglet Hors listes (ouverture directe dessus, ou changement d'onglet).
+  function primeOrphanSnapshot() {
+    if (STATE.orphan.series.length || STATE.orphan.loading) return;
+    const snap = orphanSnapshotLoad();
+    if (snap) {
+      STATE.orphan.series = snap;
+      STATE.orphan.fromSnapshot = true;
+      LOG(`Hors listes — instantané affiché : ${snap.length} séries — actualisation en arrière-plan`);
+    }
+  }
+
   const isAiring = (maxAir) => !!maxAir && Date.now() - maxAir < CFG.airingWindowDays * DAY;
 
   // ─────────────────────────────────────────────────────────────
@@ -5178,7 +5212,7 @@
     // Reste à voir — jamais mémorisé au-delà (fermeture de l'onglet = repart de zéro).
     tab: SESSION_NAV.tab,
     discover: { series: [], loading: false, error: null, warning: null, shortfallDetail: null, lastSync: null, excludedIds: new Set(), searchedFilters: undefined, similarTo: null, similarProfile: null, similarFetching: false, legendaryHunt: false, cancelRequested: false, scan: null },
-    orphan: { series: [], loading: false, error: null, warning: null, lastSync: null },
+    orphan: { series: [], loading: false, error: null, warning: null, lastSync: null, fromSnapshot: false },
     newPremieres: { series: [], loading: false, error: null, lastSync: null, debug: null },
     // Crunchylists détectées (id + titre), pour le bouton d'ajout depuis Découverte.
     myLists: { items: [], loading: false, error: null },
@@ -7837,6 +7871,12 @@
       if (!candidateIds.length) {
         O.series = [];
         O.lastSync = new Date();
+        // (fix v3.92.0) Un instantané positif pouvait rester affiché ici sans être corrigé :
+        // si le scan frais ne trouve plus aucun candidat (tout a été ajouté à une liste
+        // entre-temps), on efface aussi l'état "instantané" et le cache — sinon la prochaine
+        // ouverture réafficherait cette liste périmée avant de la corriger à vide.
+        O.fromSnapshot = false;
+        orphanSnapshotSave();
         return;
       }
 
@@ -7863,6 +7903,8 @@
         // garde que celles avec au moins un épisode vu ET au moins un épisode restant.
         .filter((s) => s.total > 0 && s.seen > 0 && s.remaining > 0);
       O.lastSync = new Date();
+      O.fromSnapshot = false;
+      orphanSnapshotSave();
       idle(() => fillMissingRatings(O.series));
       idle(() => fillMissingMyRatings(O.series, accountId));
       idle(() => enrichAnilistSchedule(O.series));
@@ -8233,10 +8275,6 @@
     }
     const tg = s.total <= 30 ? 2 : s.total <= 60 ? 1 : 0;   // gouttière entre épisodes
     const sg = s.total <= 30 ? 6 : s.total <= 60 ? 4 : 3;   // gouttière entre saisons
-    // (fix v3.90.0) Même seuil que ci-dessus pour décider si un bloc fusionné a la place
-    // d'afficher son libellé texte (« S1 · 12 ép. » / « Film · 1 h 30 ») : au-delà, la
-    // ligne est déjà chargée — le bloc garde sa couleur/icône mais perd le texte.
-    const hasRoom = s.total <= 30;
     const groups = new Map();
     for (const e of s.episodes) {
       if (!groups.has(e.season)) groups.set(e.season, []);
@@ -8246,33 +8284,51 @@
       && groups.has(s.targetSeason))
       ? Math.max(0, s.plannedTotal - groups.get(s.targetSeason).length)
       : 0;
-    const html = [...groups.entries()].map(([num, eps]) => {
+
+    // (fix v3.90.0) Un groupe compté comme « saison » par Crunchyroll mais qui ne contient
+    // qu'UN SEUL épisode de 60 min ou plus est en réalité un film (ex. les films Jujutsu
+    // Kaisen, comptés à tort comme une saison à part) — détecté sur la durée réelle
+    // (e.dur, en secondes), jamais sur le titre ou le numéro de saison. Premier passage :
+    // on classe chaque groupe (fusionné ou détaillé) avant de savoir combien de cases
+    // individuelles restent réellement à afficher.
+    const info = [...groups.entries()].map(([num, eps]) => {
       const extra = num === s.targetSeason ? upcoming : 0;
-      // (fix v3.90.0) Un groupe compté comme « saison » par Crunchyroll mais qui ne
-      // contient qu'UN SEUL épisode de 60 min ou plus est en réalité un film (ex. les
-      // films Jujutsu Kaisen, comptés à tort comme une saison à part) — détecté sur la
-      // durée réelle (e.dur, en secondes), jamais sur le titre ou le numéro de saison.
       const isMovie = eps.length === 1 && eps[0].dur >= 3600;
       // (33) Saison déjà entièrement vue (hors saison en cours, qui garde toujours son
-      // détail épisode par épisode) : un seul gros bloc plutôt qu'un carré par épisode.
-      // Sans gouttière interne (un seul <span>), ce bloc se lit comme UN morceau plein,
-      // visuellement distinct des cases fines — l'essentiel de la place gagnée sert au
-      // détail de ce qu'il reste réellement à voir. Poids modeste et plafonné (2 à 4) :
-      // le but est de signaler « déjà fait », pas de continuer à peser sur la largeur
-      // en proportion du nombre d'épisodes. Sous 4 épisodes, la fusion ne fait normalement
-      // pas gagner grand-chose et on garde le détail — SAUF un film (toujours 1 épisode) :
-      // lui doit rester identifiable comme film, jamais confondu avec un épisode ordinaire.
+      // détail épisode par épisode) : un seul gros bloc plutôt qu'un carré par épisode —
+      // sous 4 épisodes la fusion ne fait normalement pas gagner grand-chose, SAUF un
+      // film (toujours 1 épisode) : lui doit rester identifiable, jamais confondu avec
+      // un épisode ordinaire.
       const allSeen = num !== s.targetSeason && extra === 0 && eps.every((e) => e.seen)
         && (eps.length >= 4 || isMovie);
+      return { num, eps, extra, isMovie, allSeen };
+    });
+    // (fix v3.91.0) La place pour le libellé texte du bloc fusionné (« S1 · 12 ép. » /
+    // « Film · 1 h 30 ») ne dépend PAS du total brut de la série : un show avec plusieurs
+    // saisons déjà vues (donc déjà fusionnées en blocs compacts) mais une saison en cours
+    // courte a largement la place, même si son total cumulé dépasse 30 — c'était le bug
+    // remonté (JJK, 59/60 : saisons 1/2 fusionnées + film, mais AUCUN texte nulle part).
+    // Seul le nombre de cases qui s'affichent réellement en détail (la/les saison(s) pas
+    // encore entièrement vues) pèse sur la place disponible.
+    const plainCount = info.reduce((n, g) => n + (g.allSeen ? 0 : g.eps.length + g.extra), 0);
+    const hasRoom = plainCount <= 48;
+
+    const html = info.map(({ num, eps, extra, isMovie, allSeen }) => {
       if (allSeen) {
         const doneWeight = Math.max(2, Math.min(4, Math.round(eps.length / 6)));
         const label = isMovie ? `Film · ${fmtDuration(eps[0].dur)}` : `S${num} · ${eps.length} ép.`;
         const title = isMovie
           ? `Film — entièrement vu (${fmtDuration(eps[0].dur)})`
           : `Saison ${num} — entièrement vue (${eps.length} épisodes)`;
-        const cls = `crrav-tick season-block${isMovie ? ' movie' : ''}${hasRoom ? ' labeled' : ''}`;
-        const inner = hasRoom ? `${isMovie ? TICK_MOVIE_ICO : TICK_CHECK_ICO}<b>${escapeHtml(label)}</b>` : '';
-        return `<div class="crrav-season crrav-season-done" style="flex:${hasRoom ? '0 0 auto' : doneWeight}">
+        // (fix v3.91.0) Un film reste signalé par son ICÔNE (clap de cinéma) même sans la
+        // place pour le texte — jamais réduit à un simple changement de couleur, trop
+        // discret pour se remarquer (retour direct : « on voit pas clairement que c'est
+        // un film »). Seule une saison ordinaire retombe sur une teinte nue dans ce cas.
+        const cls = `crrav-tick season-block${isMovie ? ' movie' : ''}${
+          hasRoom ? ' labeled' : isMovie ? ' iconly' : ''}`;
+        const inner = hasRoom ? `${isMovie ? TICK_MOVIE_ICO : TICK_CHECK_ICO}<b>${escapeHtml(label)}</b>`
+          : isMovie ? TICK_MOVIE_ICO : '';
+        return `<div class="crrav-season crrav-season-done" style="flex:${(hasRoom || isMovie) ? '0 0 auto' : doneWeight}">
           <span class="${cls}" title="${escapeHtml(title)}">${inner}</span>
         </div>`;
       }
@@ -10336,6 +10392,12 @@
     font:700 9px/1 system-ui,-apple-system,sans-serif;color:#0b0f0c;white-space:nowrap}
   .crrav-tick.season-block.labeled svg{width:9px;height:9px;flex:0 0 auto}
   .crrav-tick.season-block.labeled b{font-weight:700}
+  /* (fix v3.91.0) film sans la place pour le texte : reste un clap de cinéma visible
+     (jamais juste une teinte, trop discret) dans un petit carré dédié — plus compact
+     que .labeled, mais toujours une vraie icône, pas une simple couleur. */
+  .crrav-tick.season-block.iconly{flex:0 0 auto;width:14px;height:14px;border-radius:4px;
+    display:flex;align-items:center;justify-content:center;box-shadow:none;color:#08262a}
+  .crrav-tick.season-block.iconly svg{width:9px;height:9px}
   .crrav-bar{height:6px;border-radius:3px;background:rgba(255,255,255,.12);overflow:hidden;
     box-shadow:inset 0 1px 2px rgba(0,0,0,.35)}
   .crrav-bar i{display:block;height:100%;background:var(--prog)}
@@ -13617,6 +13679,10 @@
     }
 
     return `
+        ${O.loading && list.length ? `<p class="crrav-warn" style="background:rgba(159,214,255,.1);border-color:rgba(159,214,255,.3);color:#9fd6ff">
+              ${O.fromSnapshot
+                ? 'Affichage du dernier état connu — actualisation en cours…'
+                : 'Chargement en cours — les séries apparaissent au fur et à mesure.'}</p>` : ''}
         ${hintBlock('orphan-intro', `Séries dont tu as vu au moins un épisode mais qui ne sont dans aucune de tes listes
           (watchlist ou Crunchylists), et qu'il te reste à finir.`)}
         ${O.warning ? `<p class="crrav-warn">${escapeHtml(O.warning)}</p>` : ''}
@@ -17532,8 +17598,11 @@
             refreshDiscover();
           }
           if (STATE.tab === 'decouverte') ensureMyListsLoaded();
-          if (STATE.tab === 'orphelines' && !STATE.orphan.series.length && !STATE.orphan.loading) {
-            refreshOrphelines();
+          // (fix v3.92.0) Instantané persisté affiché avant de relancer le scan — même
+          // comportement que Reste à voir à l'ouverture du panneau (voir open()).
+          if (STATE.tab === 'orphelines' && !STATE.orphan.loading) {
+            primeOrphanSnapshot();
+            if (!STATE.orphan.series.length || STATE.orphan.fromSnapshot) refreshOrphelines();
           }
           if (STATE.tab === 'calendrier' && CFG.discoverNewPremieres
             && !STATE.newPremieres.series.length && !STATE.newPremieres.loading) {
@@ -18146,8 +18215,11 @@
       refreshDiscover();
     }
     if (STATE.tab === 'decouverte') ensureMyListsLoaded();
-    if (STATE.tab === 'orphelines' && !STATE.orphan.series.length && !STATE.orphan.loading) {
-      refreshOrphelines();
+    // (fix v3.92.0) Même instantané persisté qu'au changement d'onglet ci-dessus — couvre
+    // l'ouverture directe sur Hors listes (onglet restauré via SESSION_NAV).
+    if (STATE.tab === 'orphelines' && !STATE.orphan.loading) {
+      primeOrphanSnapshot();
+      if (!STATE.orphan.series.length || STATE.orphan.fromSnapshot) refreshOrphelines();
     }
     if (STATE.tab === 'calendrier' && CFG.discoverNewPremieres
       && !STATE.newPremieres.series.length && !STATE.newPremieres.loading) {
