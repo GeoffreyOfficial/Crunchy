@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.86.0
+// @version      3.89.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -39,7 +39,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.86.0';
+  const SCRIPT_VERSION = '3.89.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -3453,8 +3453,17 @@
   // les séries pas toute fraîches — recharger toutes les semaines pour une valeur qui bouge
   // de 0,0X était surtout du gaspillage de requêtes sur des séries déjà croisées.
   const RATING_TTL = 21 * DAY;
+  // (fix v3.89.0) Même bug que readAnilistCached (v3.88.0) : cette lecture sert UNIQUEMENT
+  // à peupler l'affichage sans requête à la construction de chaque série (voir les appels
+  // "sans requête : complété plus tard") — passé RATING_TTL, cacheGet() la traitait comme
+  // absente et la note disparaissait de la carte jusqu'à ce que fillMissingRatings()
+  // réussisse à la retélécharger. Si CR est injoignable entre-temps, elle restait absente
+  // indéfiniment alors qu'une note vieille de 22 jours est presque sûrement encore juste
+  // (dérive de 0,0X). cacheGetStale() (lecture sans contrainte d'âge, déjà utilisée pour le
+  // scan Découverte) affiche la dernière valeur connue ; RATING_TTL continue de piloter
+  // SEUL la décision de retenter une requête, dans fillMissingRatings() et getRating().
   function getRatingCached(seriesId) {
-    const c = cacheGet('rating:' + seriesId, RATING_TTL);
+    const c = cacheGetStale('rating:' + seriesId);
     return (c && 'r' in c) ? c.r : null;
   }
 
@@ -3504,8 +3513,11 @@
   // `resteAVoir.probeMyRating('titre de la série')` dans la console pour voir la réponse
   // brute et ajuster le parsing ci-dessous.
   const MYRATING_TTL = RATING_TTL;
+  // (fix v3.89.0) Même correctif que getRatingCached() juste au-dessus : lecture d'affichage
+  // seule, sans contrainte d'âge — MYRATING_TTL reste seul décisionnaire du refetch, dans
+  // fillMissingMyRatings() et getMyRating().
   function getMyRatingCached(seriesId) {
-    const c = cacheGet('myrating:' + seriesId, MYRATING_TTL);
+    const c = cacheGetStale('myrating:' + seriesId);
     return (c && 'r' in c) ? c.r : null;
   }
   function parseMyRatingResponse(r) {
@@ -4670,7 +4682,18 @@
   function readAnilistCached(seriesId) {
     const o = cacheReadRaw('anilist:' + seriesId);
     if (!o || !o.v || o.v.av !== ANILIST_CACHE_VER) return EMPTY_ANI;   // absent/ancien format
-    if (Date.now() - o.ts > anilistTtlMs(o.v)) return EMPTY_ANI;        // périmé : sera re-fetché
+    // (fix v3.88.0) Avant : passé le TTL de anilistTtlMs() (aussi court que 12h pour une
+    // série en diffusion), la valeur était traitée comme ABSENTE ici — pas seulement « à
+    // rafraîchir ». anilistNeedsFetch() (même TTL) déclenche déjà un nouveau passage dès que
+    // possible ; si AniList est injoignable entre-temps (403/429, coupure réseau), ce TTL
+    // effaçait purement et simplement le prochain épisode/planning/genres affichés, alors
+    // que la donnée n'a probablement pas bougé (un planning de diffusion ne change pas
+    // d'heure en heure). On la garde désormais affichée tant qu'elle existe, quel que soit
+    // son âge — seul anilistNeedsFetch() décide QUAND retenter un fetch, plus si la valeur
+    // en cache reste montrable en attendant. Une date de prochain épisode devenue caduque
+    // (déjà passée) est de toute façon ignorée par renderCalendrier (qui exige nextTs > now
+    // et retombe sinon sur l'estimation hebdomadaire) : aucun risque d'afficher une info
+    // devenue fausse indéfiniment.
     return {
       matched: !!o.v.matched,
       plannedTotal: o.v.plannedTotal ?? null,
@@ -13240,26 +13263,20 @@
     const toggleChips = quickChips(f);
 
     let body;
-    // (fix v3.85.0) Les deux branches "STATE.loading" ci-dessous ne concernent QUE le
-    // scan à froid, sans instantané (STATE.fromSnapshot false) : données encore
-    // partielles, arrivant par paquets, tri/regroupement pas encore pertinents. Quand un
-    // instantané est affiché (STATE.fromSnapshot true), la liste est DÉJÀ complète et
-    // stable pendant tout le rafraîchissement en fond (~25 s) — avant ce correctif, ces
-    // branches la faisaient quand même passer en liste plate SANS sections ni tri par
-    // groupe le temps du scan, avant de "sauter" d'un coup vers l'affichage groupé une
-    // fois terminé. On laisse maintenant tomber jusqu'à la branche de regroupement
-    // normale (plus bas) dans ce cas, exactement comme à l'état stabilisé.
-    if (STATE.loading && !STATE.fromSnapshot && !list.length) {
+    // (fix v3.87.0) Avant : pendant un scan à froid (pas encore d'instantané), la liste
+    // restait plate et SANS sections tant que STATE.loading était vrai — impossible de
+    // replier/trier par section avant la toute fin du scan (~25 s), alors que chaque
+    // série déjà arrivée a déjà tout ce qu'il faut (seen/remaining) pour rejoindre sa
+    // bonne section tout de suite. On groupe désormais dès qu'il y a au moins une série
+    // à l'écran, QUE le chargement vienne d'un instantané (rafraîchissement en fond, déjà
+    // stable — voir fix v3.85.0) OU d'un scan à froid en cours (les sections se
+    // remplissent au fil de l'arrivée des séries) : dans les deux cas on peut replier,
+    // trier, réordonner sans attendre la fin. Seul le cas VRAIMENT vide (rien encore
+    // arrivé) garde l'écran de squelettes.
+    if (STATE.loading && !list.length) {
       // (11) squelettes plutôt qu'un écran vide
       body = `<div class="crrav-grid">${Array.from({ length: 12 },
         () => '<div class="crrav-skel"><div></div></div>').join('')}</div>
-        <div class="crrav-foot">${escapeHtml(progressMsg)}</div>`;
-    } else if (STATE.loading && !STATE.fromSnapshot) {
-      // Chargement progressif à froid : ce qui est prêt est déjà lisible, le reste arrive.
-      const skels = STATE.filters.view === 'list' ? ''
-        : Array.from({ length: 4 }, () => '<div class="crrav-skel"><div></div></div>').join('');
-      body = `<div class="crrav-grid${STATE.filters.view === 'list' ? ' crrav-list' : ''}">${
-        list.map((s, i) => card(s, i, 'watchlist')).join('')}${skels}</div>
         <div class="crrav-foot">${escapeHtml(progressMsg)}</div>`;
     } else if (STATE.error) {
       body = `<div class="crrav-msg"><h3>Ça n'a pas marché</h3><p>${escapeHtml(STATE.error)}</p>
@@ -13305,14 +13322,20 @@
       }).join('');
       body = secs || `<div class="crrav-msg"><h3>Rien à afficher</h3>
         <p>Aucune des sections choisies ne contient de série avec ce filtre.</p></div>`;
+      // (fix v3.87.0) Scan encore en cours (à froid ou rafraîchissement) : progression
+      // visible sous les sections déjà affichées et interactives — pas de squelettes qui
+      // gêneraient le repli/tri en cours de route.
+      if (STATE.loading) body += `<div class="crrav-foot">${escapeHtml(progressMsg)}</div>`;
     } else {
       body = `<div class="crrav-grid${STATE.filters.view === 'list' ? ' crrav-list' : ''}">${list.map((s, i) => card(s, i, 'watchlist')).join('')}</div>`;
+      if (STATE.loading) body += `<div class="crrav-foot">${escapeHtml(progressMsg)}</div>`;
     }
 
     return `
-        ${STATE.fromSnapshot && STATE.loading
-          ? `<p class="crrav-warn" style="background:rgba(159,214,255,.1);border-color:rgba(159,214,255,.3);color:#9fd6ff">
-              Affichage du dernier état connu — actualisation en cours…</p>` : ''}
+        ${STATE.loading && list.length ? `<p class="crrav-warn" style="background:rgba(159,214,255,.1);border-color:rgba(159,214,255,.3);color:#9fd6ff">
+              ${STATE.fromSnapshot
+                ? 'Affichage du dernier état connu — actualisation en cours…'
+                : 'Chargement en cours — les séries apparaissent au fur et à mesure.'}</p>` : ''}
         <div class="crrav-statsrow">
           <div class="crrav-stats">
             <div class="crrav-stat"><b data-countup="${list.length}" data-countup-key="suivi-series">${list.length}</b><small>séries</small></div>
