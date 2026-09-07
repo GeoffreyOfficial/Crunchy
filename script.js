@@ -1,9 +1,7 @@
-
-
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.84.0
+// @version      3.86.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +39,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.84.0';
+  const SCRIPT_VERSION = '3.86.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -13242,15 +13240,23 @@
     const toggleChips = quickChips(f);
 
     let body;
-    if (STATE.loading && !list.length) {
+    // (fix v3.85.0) Les deux branches "STATE.loading" ci-dessous ne concernent QUE le
+    // scan à froid, sans instantané (STATE.fromSnapshot false) : données encore
+    // partielles, arrivant par paquets, tri/regroupement pas encore pertinents. Quand un
+    // instantané est affiché (STATE.fromSnapshot true), la liste est DÉJÀ complète et
+    // stable pendant tout le rafraîchissement en fond (~25 s) — avant ce correctif, ces
+    // branches la faisaient quand même passer en liste plate SANS sections ni tri par
+    // groupe le temps du scan, avant de "sauter" d'un coup vers l'affichage groupé une
+    // fois terminé. On laisse maintenant tomber jusqu'à la branche de regroupement
+    // normale (plus bas) dans ce cas, exactement comme à l'état stabilisé.
+    if (STATE.loading && !STATE.fromSnapshot && !list.length) {
       // (11) squelettes plutôt qu'un écran vide
       body = `<div class="crrav-grid">${Array.from({ length: 12 },
         () => '<div class="crrav-skel"><div></div></div>').join('')}</div>
         <div class="crrav-foot">${escapeHtml(progressMsg)}</div>`;
-    } else if (STATE.loading) {
-      // Chargement progressif : ce qui est prêt est déjà lisible, le reste arrive.
-      // Sous un instantané, pas de squelettes : la liste est déjà complète.
-      const skels = STATE.fromSnapshot || STATE.filters.view === 'list' ? ''
+    } else if (STATE.loading && !STATE.fromSnapshot) {
+      // Chargement progressif à froid : ce qui est prêt est déjà lisible, le reste arrive.
+      const skels = STATE.filters.view === 'list' ? ''
         : Array.from({ length: 4 }, () => '<div class="crrav-skel"><div></div></div>').join('');
       body = `<div class="crrav-grid${STATE.filters.view === 'list' ? ' crrav-list' : ''}">${
         list.map((s, i) => card(s, i, 'watchlist')).join('')}${skels}</div>
@@ -13511,9 +13517,21 @@
     const secLeft = list.reduce((a, s) => a + s.secLeft, 0);
 
     let body;
-    if (O.loading) {
+    // (fix v3.86.0) Même bug que Reste à voir (v3.85.0) : ne vider l'écran vers des
+    // squelettes que s'il n'y a VRAIMENT rien à montrer. Sinon (refreshOrphelines() relancé
+    // avec O.series déjà peuplé — ex. tirer-pour-actualiser sur cet onglet, via
+    // refreshActive()), O.series n'est remplacé qu'à la toute fin du scan (voir
+    // loadOrphelines) : la liste affichée reste valable pendant tout le rafraîchissement,
+    // pas besoin de l'effacer sous les yeux pour la faire réapparaître ensuite à l'identique.
+    if (O.loading && !list.length) {
       body = `<div class="crrav-grid">${Array.from({ length: 12 },
         () => '<div class="crrav-skel"><div></div></div>').join('')}</div>
+        <div class="crrav-foot">${escapeHtml(progressMsgOrphan)}</div>`;
+    } else if (O.loading) {
+      // Rafraîchissement en fond avec liste déjà connue : on la garde affichée (mêmes
+      // cartes que l'état stabilisé), la progression restant visible en pied de grille —
+      // pas de squelettes qui remplaceraient des cartes encore valides.
+      body = `<div class="crrav-grid${STATE.filters.view === 'list' ? ' crrav-list' : ''}">${list.map((s, i) => card(s, i, 'orphan')).join('')}</div>
         <div class="crrav-foot">${escapeHtml(progressMsgOrphan)}</div>`;
     } else if (O.error) {
       body = `<div class="crrav-msg"><h3>Ça n'a pas marché</h3><p>${escapeHtml(O.error)}</p>
