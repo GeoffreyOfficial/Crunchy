@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.89.0
+// @version      3.90.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -39,7 +39,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.89.0';
+  const SCRIPT_VERSION = '3.90.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -8220,6 +8220,12 @@
   // (AniList) Pour la saison en cours, on complète avec des cases « pas encore sorti »
   // jusqu'au total annoncé par AniList (s.plannedTotal) — couleur distincte, plutôt que
   // le texte « X restant (sur Y prévus) » qui alourdissait la carte (voir plannedInfo).
+  // (fix v3.90.0) Icônes inline pour le bloc « saison entièrement vue » quand il porte
+  // un libellé texte (voir plus bas) : un chèque pour une vraie saison, un clap de
+  // cinéma pour un film détecté. currentColor pour hériter la couleur du texte du bloc.
+  const TICK_CHECK_ICO = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5 9.5 18 20 6"/></svg>';
+  const TICK_MOVIE_ICO = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5 5 4h3L6 8.5M9 8.5 11 4h3L12 8.5M15 8.5 17 4h3L18 8.5"/><rect x="3" y="8.5" width="18" height="11.5" rx="1.5"/></svg>';
+
   function ticks(s) {
     if (s.total > 120) {
       // (4) dégradé animé tant qu'il reste des épisodes à voir (pct < 100).
@@ -8227,6 +8233,10 @@
     }
     const tg = s.total <= 30 ? 2 : s.total <= 60 ? 1 : 0;   // gouttière entre épisodes
     const sg = s.total <= 30 ? 6 : s.total <= 60 ? 4 : 3;   // gouttière entre saisons
+    // (fix v3.90.0) Même seuil que ci-dessus pour décider si un bloc fusionné a la place
+    // d'afficher son libellé texte (« S1 · 12 ép. » / « Film · 1 h 30 ») : au-delà, la
+    // ligne est déjà chargée — le bloc garde sa couleur/icône mais perd le texte.
+    const hasRoom = s.total <= 30;
     const groups = new Map();
     for (const e of s.episodes) {
       if (!groups.has(e.season)) groups.set(e.season, []);
@@ -8238,27 +8248,43 @@
       : 0;
     const html = [...groups.entries()].map(([num, eps]) => {
       const extra = num === s.targetSeason ? upcoming : 0;
+      // (fix v3.90.0) Un groupe compté comme « saison » par Crunchyroll mais qui ne
+      // contient qu'UN SEUL épisode de 60 min ou plus est en réalité un film (ex. les
+      // films Jujutsu Kaisen, comptés à tort comme une saison à part) — détecté sur la
+      // durée réelle (e.dur, en secondes), jamais sur le titre ou le numéro de saison.
+      const isMovie = eps.length === 1 && eps[0].dur >= 3600;
       // (33) Saison déjà entièrement vue (hors saison en cours, qui garde toujours son
       // détail épisode par épisode) : un seul gros bloc plutôt qu'un carré par épisode.
       // Sans gouttière interne (un seul <span>), ce bloc se lit comme UN morceau plein,
       // visuellement distinct des cases fines — l'essentiel de la place gagnée sert au
       // détail de ce qu'il reste réellement à voir. Poids modeste et plafonné (2 à 4) :
       // le but est de signaler « déjà fait », pas de continuer à peser sur la largeur
-      // en proportion du nombre d'épisodes. Sous 4 épisodes, la fusion ne fait pas
-      // gagner grand-chose : on garde alors le détail, plus lisible qu'un bloc minuscule.
-      const doneWeight = Math.max(2, Math.min(4, Math.round(eps.length / 6)));
-      const allSeen = num !== s.targetSeason && extra === 0
-        && eps.length >= 4 && eps.every((e) => e.seen);
+      // en proportion du nombre d'épisodes. Sous 4 épisodes, la fusion ne fait normalement
+      // pas gagner grand-chose et on garde le détail — SAUF un film (toujours 1 épisode) :
+      // lui doit rester identifiable comme film, jamais confondu avec un épisode ordinaire.
+      const allSeen = num !== s.targetSeason && extra === 0 && eps.every((e) => e.seen)
+        && (eps.length >= 4 || isMovie);
       if (allSeen) {
-        return `<div class="crrav-season crrav-season-done" style="flex:${doneWeight}">
-          <span class="crrav-tick season-block" title="Saison ${num} — entièrement vue (${eps.length} épisodes)"></span>
+        const doneWeight = Math.max(2, Math.min(4, Math.round(eps.length / 6)));
+        const label = isMovie ? `Film · ${fmtDuration(eps[0].dur)}` : `S${num} · ${eps.length} ép.`;
+        const title = isMovie
+          ? `Film — entièrement vu (${fmtDuration(eps[0].dur)})`
+          : `Saison ${num} — entièrement vue (${eps.length} épisodes)`;
+        const cls = `crrav-tick season-block${isMovie ? ' movie' : ''}${hasRoom ? ' labeled' : ''}`;
+        const inner = hasRoom ? `${isMovie ? TICK_MOVIE_ICO : TICK_CHECK_ICO}<b>${escapeHtml(label)}</b>` : '';
+        return `<div class="crrav-season crrav-season-done" style="flex:${hasRoom ? '0 0 auto' : doneWeight}">
+          <span class="${cls}" title="${escapeHtml(title)}">${inner}</span>
         </div>`;
       }
       const notYetOut = Array.from({ length: extra }, (_, i) =>
         `<span class="crrav-tick upcoming" title="S${num} E${eps.length + i + 1} — pas encore sorti (prévu, AniList)"></span>`
       ).join('');
+      // (fix v3.90.0) Film pas (encore) entièrement vu : reste une case de taille normale
+      // (pas la place pour une icône), mais teintée à part pour ne pas se confondre avec
+      // un épisode ordinaire — cf. .crrav-tick.movie-pending.
       return `<div class="crrav-season" style="flex:${eps.length + extra}">${eps.map((e) =>
-        `<span class="crrav-tick${e.seen ? ' on' : e.started ? ' half' : ''}" title="S${num} E${e.n}${
+        `<span class="crrav-tick${e.seen ? ' on' : e.started ? ' half' : ''}${isMovie ? ' movie-pending' : ''}" title="${
+          isMovie ? 'Film' : `S${num} E${e.n}`}${
           e.title ? ' — ' + escapeHtml(e.title) : ''}${e.seen ? ' · vu' : e.started ? ' · commencé' : ''}"></span>`
         ).join('') + notYetOut}</div>`;
     }).join('');
@@ -10277,17 +10303,39 @@
     justify-content:flex-end}
   .crrav-actrow .crrav-resume{flex:1;min-width:0}
 
-  .crrav-ticks{display:flex;gap:var(--sg,6px);height:6px;overflow:hidden}
-  .crrav-season{display:flex;gap:var(--tg,2px);min-width:0}
-  .crrav-tick{flex:1 1 0;min-width:1px;border-radius:1px;background:rgba(255,255,255,.14)}
+  /* (fix v3.90.0) plus de hauteur/overflow fixes ici : un bloc fusionné « libellé »
+     (voir .season-block.labeled) est plus haut que la ligne de cases (6px) et doit
+     pouvoir la faire grandir au lieu d'être rogné. align-items:center recentre les
+     cases normales, restées à 6px via leur propre hauteur explicite ci-dessous. */
+  .crrav-ticks{display:flex;align-items:center;gap:var(--sg,6px);min-height:6px}
+  .crrav-season{display:flex;align-items:center;gap:var(--tg,2px);min-width:0}
+  .crrav-tick{flex:1 1 0;min-width:1px;height:6px;border-radius:1px;background:rgba(255,255,255,.14)}
   .crrav-tick.on{background:var(--prog)}
   .crrav-tick.half{background:rgba(255,255,255,.42)}
   .crrav-tick.upcoming{background:rgba(159,214,255,.4)}
+  /* (fix v3.90.0) film pas encore (entièrement) vu : reste une case normale (pas la
+     place pour une icône dans une simple case), mais teintée à part pour ne jamais se
+     confondre avec un épisode ordinaire — même teinte que .season-block.movie ci-dessous. */
+  .crrav-tick.movie-pending{background:rgba(94,211,220,.3)}
+  .crrav-tick.movie-pending.half{background:rgba(94,211,220,.6)}
+  .crrav-tick.movie-pending.on{background:#5ed3dc}
   /* (33) bloc « saison entièrement vue » : même teinte que les cases vues, mais plus
      arrondi et légèrement bordé — se lit comme UN morceau plein, pas comme une case
      de plus parmi d'autres. */
-  .crrav-tick.season-block{border-radius:3px;background:var(--prog);
+  .crrav-tick.season-block{height:6px;border-radius:3px;background:var(--prog);
     box-shadow:inset 0 0 0 1px rgba(255,255,255,.22)}
+  /* (fix v3.90.0) film détecté (1 seul épisode ≥ 60 min) : teinte dédiée, distincte du
+     vert « saison vue », qu'il porte son libellé texte ou non. */
+  .crrav-tick.season-block.movie{background:#5ed3dc}
+  /* (fix v3.90.0) libellé texte (« S1 · 12 ép. » / « Film · 1 h 30 ») affiché seulement
+     quand il y a la place (voir hasRoom dans ticks()) : le bloc sort alors de la
+     proportion habituelle (flex:0 0 auto posé sur .crrav-season-done, voir plus bas) et
+     grandit pour accueillir icône + texte, plutôt que de rester une case de 6px. */
+  .crrav-tick.season-block.labeled{flex:0 0 auto;width:auto;height:16px;border-radius:8px;
+    padding:0 6px;display:inline-flex;align-items:center;gap:4px;box-shadow:none;
+    font:700 9px/1 system-ui,-apple-system,sans-serif;color:#0b0f0c;white-space:nowrap}
+  .crrav-tick.season-block.labeled svg{width:9px;height:9px;flex:0 0 auto}
+  .crrav-tick.season-block.labeled b{font-weight:700}
   .crrav-bar{height:6px;border-radius:3px;background:rgba(255,255,255,.12);overflow:hidden;
     box-shadow:inset 0 1px 2px rgba(0,0,0,.35)}
   .crrav-bar i{display:block;height:100%;background:var(--prog)}
