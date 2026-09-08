@@ -1,7 +1,9 @@
+
+
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.92.0
+// @version      3.93.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -39,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.92.0';
+  const SCRIPT_VERSION = '3.93.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -8311,10 +8313,24 @@
     // Seul le nombre de cases qui s'affichent réellement en détail (la/les saison(s) pas
     // encore entièrement vues) pèse sur la place disponible.
     const plainCount = info.reduce((n, g) => n + (g.allSeen ? 0 : g.eps.length + g.extra), 0);
-    const hasRoom = plainCount <= 48;
+    const hasRoomBudget = plainCount <= 48;
+    // (fix v3.93.0) Cette place globale ne suffit pas à elle seule : une série avec PLUSIEURS
+    // saisons déjà vues (ex. « Tensei Slime », S1+S2+S3 fusionnées) empilait autant de
+    // pastilles de texte que de saisons — sur une carte étroite (mobile), la 3e débordait
+    // hors de la carte au lieu de s'arrêter à son bord (retour direct : « c'est coupé »,
+    // « complètement cassé »). Le texte reste donc réservé aux 2 blocs fusionnés les plus
+    // RÉCENTS (les plus proches de la saison en cours, donc les plus pertinents) ; les plus
+    // anciens repassent en icône/teinte seule quel que soit le total. `flex-wrap` sur
+    // .crrav-ticks (CSS) sert de filet de sécurité si cette estimation reste trop large sur
+    // un écran très étroit : au pire un retour à la ligne, jamais un débordement hors carte.
+    const MAX_LABELED_BLOCKS = 2;
+    const allSeenIdx = [];
+    info.forEach((g, i) => { if (g.allSeen) allSeenIdx.push(i); });
+    const labelableIdx = new Set(allSeenIdx.slice(-MAX_LABELED_BLOCKS));
 
-    const html = info.map(({ num, eps, extra, isMovie, allSeen }) => {
+    const html = info.map(({ num, eps, extra, isMovie, allSeen }, i) => {
       if (allSeen) {
+        const hasRoom = hasRoomBudget && labelableIdx.has(i);
         const doneWeight = Math.max(2, Math.min(4, Math.round(eps.length / 6)));
         const label = isMovie ? `Film · ${fmtDuration(eps[0].dur)}` : `S${num} · ${eps.length} ép.`;
         const title = isMovie
@@ -10362,8 +10378,13 @@
   /* (fix v3.90.0) plus de hauteur/overflow fixes ici : un bloc fusionné « libellé »
      (voir .season-block.labeled) est plus haut que la ligne de cases (6px) et doit
      pouvoir la faire grandir au lieu d'être rogné. align-items:center recentre les
-     cases normales, restées à 6px via leur propre hauteur explicite ci-dessous. */
-  .crrav-ticks{display:flex;align-items:center;gap:var(--sg,6px);min-height:6px}
+     cases normales, restées à 6px via leur propre hauteur explicite ci-dessous.
+     (fix v3.93.0) flex-wrap:wrap = filet de sécurité contre le débordement hors
+     carte sur mobile : le JS (voir ticks(), MAX_LABELED_BLOCKS) limite déjà le
+     nombre de libellés texte simultanés, mais si l'estimation reste trop large sur
+     un écran très étroit, la ligne doit au pire se replier sur une deuxième ligne,
+     jamais déborder par-dessus la carte voisine. */
+  .crrav-ticks{display:flex;flex-wrap:wrap;align-items:center;gap:var(--sg,6px);min-height:6px}
   .crrav-season{display:flex;align-items:center;gap:var(--tg,2px);min-width:0}
   .crrav-tick{flex:1 1 0;min-width:1px;height:6px;border-radius:1px;background:rgba(255,255,255,.14)}
   .crrav-tick.on{background:var(--prog)}
