@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.93.0
+// @version      3.94.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.93.0';
+  const SCRIPT_VERSION = '3.94.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -8314,23 +8314,24 @@
     // encore entièrement vues) pèse sur la place disponible.
     const plainCount = info.reduce((n, g) => n + (g.allSeen ? 0 : g.eps.length + g.extra), 0);
     const hasRoomBudget = plainCount <= 48;
-    // (fix v3.93.0) Cette place globale ne suffit pas à elle seule : une série avec PLUSIEURS
-    // saisons déjà vues (ex. « Tensei Slime », S1+S2+S3 fusionnées) empilait autant de
-    // pastilles de texte que de saisons — sur une carte étroite (mobile), la 3e débordait
-    // hors de la carte au lieu de s'arrêter à son bord (retour direct : « c'est coupé »,
-    // « complètement cassé »). Le texte reste donc réservé aux 2 blocs fusionnés les plus
-    // RÉCENTS (les plus proches de la saison en cours, donc les plus pertinents) ; les plus
-    // anciens repassent en icône/teinte seule quel que soit le total. `flex-wrap` sur
-    // .crrav-ticks (CSS) sert de filet de sécurité si cette estimation reste trop large sur
-    // un écran très étroit : au pire un retour à la ligne, jamais un débordement hors carte.
-    const MAX_LABELED_BLOCKS = 2;
-    const allSeenIdx = [];
-    info.forEach((g, i) => { if (g.allSeen) allSeenIdx.push(i); });
-    const labelableIdx = new Set(allSeenIdx.slice(-MAX_LABELED_BLOCKS));
-
-    const html = info.map(({ num, eps, extra, isMovie, allSeen }, i) => {
+    const doneGroups = info.filter((g) => g.allSeen);
+    // (fix v3.94.0) v3.93.0 plafonnait à 2 le nombre de pastilles-texte simultanées, mais
+    // 2 pastilles largeur fixe (S1 · 25 ép. / S2 · 26 ép.) suffisaient déjà à écraser la
+    // VRAIE saison en cours jusqu'à la rendre invisible sur une carte téléphone (retour
+    // direct, capture à l'appui : « on voit même pas les barres des derniers episodes »).
+    // Fix plus radical : au-delà d'UN SEUL bloc déjà vu, on ne pose plus qu'UNE pastille
+    // récapitulative (largeur fixe et CONSTANTE quel que soit le nombre de saisons/films
+    // concernés), avec le détail saison par saison relégué dans l'infobulle plutôt que sur
+    // la carte — priorité rendue à la saison en cours, qui garde toute la place restante.
+    let summaryDone = false;
+    const html = info.map(({ num, eps, extra, isMovie, allSeen }) => {
       if (allSeen) {
-        const hasRoom = hasRoomBudget && labelableIdx.has(i);
+        if (doneGroups.length > 1) {
+          if (summaryDone) return '';
+          summaryDone = true;
+          return doneSummaryBlock(doneGroups, hasRoomBudget);
+        }
+        const hasRoom = hasRoomBudget;
         const doneWeight = Math.max(2, Math.min(4, Math.round(eps.length / 6)));
         const label = isMovie ? `Film · ${fmtDuration(eps[0].dur)}` : `S${num} · ${eps.length} ép.`;
         const title = isMovie
@@ -8361,6 +8362,25 @@
         ).join('') + notYetOut}</div>`;
     }).join('');
     return `<div class="crrav-ticks" style="--tg:${tg}px;--sg:${sg}px">${html}</div>`;
+  }
+
+  // (fix v3.94.0) Pastille récapitulative unique pour 2+ blocs déjà entièrement vus (voir
+  // ticks()) : largeur fixe quel que soit le nombre de saisons/films fusionnés, le détail
+  // complet (quelle saison, combien d'épisodes, quel film) part dans l'infobulle native.
+  function doneSummaryBlock(doneGroups, hasRoomBudget) {
+    const seasons = doneGroups.filter((g) => !g.isMovie).length;
+    const movies = doneGroups.filter((g) => g.isMovie).length;
+    const label = movies === 0 ? `${seasons} saisons vues`
+      : seasons === 0 ? `${movies} films vus`
+      : `${doneGroups.length} vues`;
+    const title = doneGroups.map((g) => (g.isMovie
+      ? `Film — entièrement vu (${fmtDuration(g.eps[0].dur)})`
+      : `Saison ${g.num} — entièrement vue (${g.eps.length} épisodes)`)).join('\n');
+    const cls = `crrav-tick season-block${hasRoomBudget ? ' labeled' : ' iconly'}`;
+    const inner = hasRoomBudget ? `${TICK_CHECK_ICO}<b>${escapeHtml(label)}</b>` : TICK_CHECK_ICO;
+    return `<div class="crrav-season crrav-season-done" style="flex:0 0 auto">
+      <span class="${cls}" title="${escapeHtml(title)}">${inner}</span>
+    </div>`;
   }
 
   // (6) anneau de progression : le pourcentage se lit d'un coup d'œil, là où « +12 »
@@ -8660,10 +8680,27 @@
     idle(step);
   }
 
+  // (fix v3.94.0) Un groupe compté comme « saison » par Crunchyroll mais qui ne contient
+  // qu'UN SEUL épisode de 60 min ou plus est en réalité un film (même détection que
+  // ticks(), voir isMovie) — utilisé pour que le bouton reprendre affiche « Film » plutôt
+  // qu'un numéro de saison/épisode qui n'évoque rien (retour direct, Jujutsu Kaisen :
+  // « on voit même pas qu'il reste un film à voir, le texte dit Reprendre S3 E1 »).
+  function nextIsMovie(s) {
+    if (!s.next || !Array.isArray(s.episodes)) return false;
+    const grp = s.episodes.filter((e) => e.season === s.next.season);
+    return grp.length === 1 && grp[0].dur >= 3600;
+  }
+
   function resumeLink(s, cls) {
     if (!s.next) return '';
-    const label = s.seen === 0 ? 'Commencer' : s.resuming ? '▶ Reprendre' : 'Épisode suivant';
-    const full = `${label} · S${s.next.season} E${s.next.n}`;
+    // (fix v3.94.0) « Épisode suivant » raccourci en « Suivant » : sur une carte étroite
+    // (mobile), le libellé complet forçait le bouton sur 2 lignes (retour direct, capture
+    // à l'appui) — plus court, il tient naturellement sur une seule ligne dans l'immense
+    // majorité des cas ; nowrap+ellipsis (CSS, voir .crrav-resume) sert de filet de
+    // sécurité pour les rares titres de série qui ne laisseraient toujours pas la place.
+    const label = s.seen === 0 ? 'Commencer' : s.resuming ? '▶ Reprendre' : '▶ Suivant';
+    const target = nextIsMovie(s) ? 'Film' : `S${s.next.season} E${s.next.n}`;
+    const full = `${label} · ${target}`;
     // title/aria-label : indispensable maintenant que la variante vue-liste (crrav-lresume)
     // masque tout texte visible (icône seule) — sans ça, plus aucun moyen de connaître
     // l'épisode ciblé sans cliquer, ni pour un lecteur d'écran de savoir où mène le lien.
@@ -10360,8 +10397,12 @@
   .crrav-planned-compact{background:none;border:none;padding:0;display:inline-block;
     white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600;
     max-width:100%}
+  /* (fix v3.94.0) nowrap+ellipsis en filet de sécurité : le libellé (resumeLink()) est
+     désormais court par défaut (« ▶ Suivant · S4 E1 »), mais un titre de saison/épisode
+     inhabituellement long ne doit plus jamais forcer le bouton sur 2 lignes. */
   .crrav-resume{display:block;text-align:center;text-decoration:none;border-radius:8px;padding:7px 6px;
-    font:700 11.5px/1.2 system-ui;color:#12120f;background:var(--prog);opacity:.92}
+    font:700 11.5px/1.2 system-ui;color:#12120f;background:var(--prog);opacity:.92;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .crrav-resume:hover{opacity:1}
   .crrav-card a:focus-visible{outline:2px solid #fff;outline-offset:2px}
 
@@ -10380,12 +10421,18 @@
      pouvoir la faire grandir au lieu d'être rogné. align-items:center recentre les
      cases normales, restées à 6px via leur propre hauteur explicite ci-dessous.
      (fix v3.93.0) flex-wrap:wrap = filet de sécurité contre le débordement hors
-     carte sur mobile : le JS (voir ticks(), MAX_LABELED_BLOCKS) limite déjà le
-     nombre de libellés texte simultanés, mais si l'estimation reste trop large sur
-     un écran très étroit, la ligne doit au pire se replier sur une deuxième ligne,
+     carte sur mobile : le JS (voir ticks(), doneSummaryBlock) limite déjà le nombre
+     de pastilles-texte à une seule, mais si l'estimation reste trop large sur un
+     écran très étroit, la ligne doit au pire se replier sur une deuxième ligne,
      jamais déborder par-dessus la carte voisine. */
   .crrav-ticks{display:flex;flex-wrap:wrap;align-items:center;gap:var(--sg,6px);min-height:6px}
   .crrav-season{display:flex;align-items:center;gap:var(--tg,2px);min-width:0}
+  /* (fix v3.94.0) la/les pastille(s) « déjà vu » sont flex:0 0 auto (largeur fixe) et ne
+     doivent jamais grignoter la place de la VRAIE saison en cours — seule ligne qui
+     affiche encore un détail épisode par épisode digne d'intérêt sur la carte. Un
+     plancher de largeur lui garantit de rester lisible ; flex-wrap (ci-dessus) prend le
+     relais si la carte est trop étroite pour tout tenir sur une ligne. */
+  .crrav-season:not(.crrav-season-done){min-width:44px}
   .crrav-tick{flex:1 1 0;min-width:1px;height:6px;border-radius:1px;background:rgba(255,255,255,.14)}
   .crrav-tick.on{background:var(--prog)}
   .crrav-tick.half{background:rgba(255,255,255,.42)}
