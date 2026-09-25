@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.94.0
+// @version      3.95.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.94.0';
+  const SCRIPT_VERSION = '3.95.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -3723,6 +3723,13 @@
   // (watchlist / Hors listes, cache persistant eps3) et getEpisodesForDiscover() (scan
   // Découverte, cache séparé — voir plus bas) pour que les deux n'aient qu'UNE seule
   // implémentation à maintenir.
+  // (v3.95.0) Version de la LOGIQUE de filtrage saisons/épisodes, estampillée dans chaque
+  // entrée des caches épisodes (eps3 + discep:). Une entrée d'une autre version est
+  // traitée comme absente → refetch ciblé de ces seules séries, sans vider tout le cache
+  // (notes, AniList…) comme le ferait un changement de CACHE_TIER. À incrémenter à chaque
+  // changement de fetchEpisodesRaw() qui modifie le résultat pour des données identiques.
+  const EPS_FILTER_VER = 2;
+
   async function fetchEpisodesRaw(seriesId) {
     const seasonsAll = await fetchSeasonsRaw(seriesId);
 
@@ -3736,19 +3743,60 @@
     // suit (certaines séries à saison unique n'ont jamais ce libellé) : dans ce cas on
     // ne filtre que les titres explicitement marqués OAD/OVA/spécial, pour ne rien
     // casser sur les séries sans convention de nommage.
+    //
+    // (v3.95.0) PIÈGE : Crunchyroll titre souvent la PREMIÈRE saison avec le seul nom de
+    // l'œuvre (« Hell's Paradise », 13 ép.) et les suivantes « Season 2 ». La simple
+    // présence de « Season 2 » activait le filtre strict ci-dessus et la S1 était jetée
+    // comme un spécial (12/12 au lieu de 25). Une saison non labellisée est donc désormais
+    // GARDÉE si c'est la première saison de la fiche (plus petit season_sequence_number,
+    // à défaut season_number) ou si son titre est exactement celui de la série. Les vrais
+    // spéciaux à titre propre (« Le rêve de Coleus ») ne sont ni l'un ni l'autre : toujours
+    // filtrés. Chaque décision est tracée dans `seasonsDiag` (diagnostic Réglages).
     const SEASON_LABEL_RE = /^(saison|season)\s*\d+\b/i;
     const SPECIAL_MARK_RE = /\b(OAD|OVA|OAV|special|sp[ée]cial|bonus|hors[\s-]?s[ée]rie)\b/i;
+    const normTitle = (t) => String(t || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const seqOf = (s) => (Number.isFinite(s.season_sequence_number) ? s.season_sequence_number
+      : Number.isFinite(s.season_number) ? s.season_number : Infinity);
     const hasLabeledSeasons = seasonsAll.some((s) => SEASON_LABEL_RE.test(s.title || ''));
+    const nonSpecial = seasonsAll.filter((s) => !SPECIAL_MARK_RE.test(String(s.title || '')));
+    const firstSeason = nonSpecial.reduce((a, s) => (!a || seqOf(s) < seqOf(a) ? s : a), null);
+    const seriesTitleN = normTitle((seasonsAll.find((s) => s.series_title) || {}).series_title);
+    const seasonsDiag = [];
     const seasons = seasonsAll.filter((s) => {
       const t = String(s.title || '');
-      if (SPECIAL_MARK_RE.test(t)) return false;
-      return hasLabeledSeasons ? SEASON_LABEL_RE.test(t) : true;
+      let why;
+      if (SPECIAL_MARK_RE.test(t)) why = 'special';
+      else if (!hasLabeledSeasons) why = 'noConvention';
+      else if (SEASON_LABEL_RE.test(t)) why = 'label';
+      else if (s === firstSeason) why = 'first';
+      else if (seriesTitleN && normTitle(t) === seriesTitleN) why = 'seriesTitle';
+      else why = 'unlabeled';
+      const keep = why !== 'special' && why !== 'unlabeled';
+      seasonsDiag.push({ id: s.id, t, sn: s.season_number ?? null, seq: s.season_sequence_number ?? null, keep, why });
+      return keep;
     });
 
     const lists = await pool(seasons, async (s) => {
       const er = await api(`/content/v2/cms/seasons/${s.id}/episodes`, { locale: CFG.locale });
-      return (er.data || [])
-        .filter((e) => e.episode_number !== null && e.episode_number !== undefined)
+      const rawEps = er.data || [];
+      let numbered = rawEps.filter((e) => e.episode_number !== null && e.episode_number !== undefined);
+      // (v3.95.0) Film rangé comme une « saison » à 1 élément SANS episode_number (ex.
+      // « Demon Slayer — Le film : Le train de l'infini ») : le filtre ci-dessus (conçu
+      // pour écarter les récaps/spéciaux x.5 au sein d'une saison) vidait la saison
+      // entière → film invisible et absent du total. Repêché UNIQUEMENT si rien n'est
+      // numéroté ET que c'est manifestement un film (1 seul élément, ou tous ≥ 60 min) —
+      // même critère de durée que la détection film de ticks().
+      let rescued = false;
+      if (!numbered.length && rawEps.length
+          && (rawEps.length === 1 || rawEps.every((e) => (e.duration_ms || 0) >= 3600e3))) {
+        numbered = rawEps.map((e, i) => ({ ...e,
+          episode_number: Number.isFinite(e.sequence_number) && e.sequence_number > 0 ? e.sequence_number : i + 1 }));
+        rescued = true;
+      }
+      const d = seasonsDiag.find((x) => x.id === s.id);
+      if (d) { d.raw = rawEps.length; d.kept = numbered.length; d.rescued = rescued; }
+      return numbered
         .map((e) => {
           const ids = [e.id, ...(e.versions || []).map((v) => v.guid)].filter(Boolean);
           const air = Date.parse(e.episode_air_date || e.upload_date || '') || null;
@@ -3781,7 +3829,9 @@
     }
     episodes.sort((a, b) => a.season - b.season || a.n - b.n);
     const maxAir = episodes.reduce((m, e) => (e.air && e.air > m ? e.air : m), 0) || null;
-    return { episodes, maxAir };
+    // Diagnostic allégé (pas d'id) : quelques dizaines d'octets par série.
+    const diag = seasonsDiag.map(({ id, ...rest }) => rest);
+    return { episodes, maxAir, fv: EPS_FILTER_VER, seasonsDiag: diag };
   }
 
   // Renvoie { episodes, maxAir }. Cache adaptatif (3) : court si la série diffuse encore.
@@ -3789,7 +3839,7 @@
   // commencées — ça vaut la peine de garder leur détail longtemps).
   async function getEpisodes(seriesId) {
     const raw = eps3ReadRaw(seriesId);
-    if (raw && raw.v) {
+    if (raw && raw.v && raw.v.fv === EPS_FILTER_VER) {
       const ttl = (isAiring(raw.v.maxAir) ? CFG.cacheHoursAiring : CFG.cacheHoursFinished) * 3600e3;
       if (Date.now() - raw.ts < ttl) { STATS.hit++; return raw.v; }
     }
@@ -3811,14 +3861,14 @@
   // cache-là plutôt que d'en dupliquer un second.
   function getEpisodesDiscoverCached(seriesId) {
     const c = cacheReadRaw('discep:' + seriesId);
-    if (!c || !c.v) return null;
+    if (!c || !c.v || c.v.fv !== EPS_FILTER_VER) return null;
     const ttl = (isAiring(c.v.maxAir) ? CFG.cacheHoursAiring : CFG.cacheHoursFinished) * 3600e3;
     if (Date.now() - c.ts > ttl) return null;
     return c.v;
   }
   async function getEpisodesForDiscover(seriesId) {
     const main = eps3ReadRaw(seriesId);
-    if (main && main.v) {
+    if (main && main.v && main.v.fv === EPS_FILTER_VER) {
       const ttl = (isAiring(main.v.maxAir) ? CFG.cacheHoursAiring : CFG.cacheHoursFinished) * 3600e3;
       if (Date.now() - main.ts < ttl) { STATS.hit++; return main.v; }
     }
@@ -14965,6 +15015,7 @@
       <p class="crrav-diagcard-note">Le rang « S{n} » en gras est celui affiché sur les cartes/le calendrier —
         pas forcément le season_number brut de Crunchyroll, indiqué à côté.</p>
       <div class="crrav-diagtbl" style="margin-top:8px">${rows}</div>
+      ${renderRawSeasonsDiag(s.id)}
     </div>`;
   }
 
@@ -15377,6 +15428,34 @@
   }
 
   // Verdict pour le découpage en saisons de la série ciblée par le diagnostic AniList.
+  // (v3.95.0) Saisons BRUTES de la fiche Crunchyroll et décision du filtre pour chacune
+  // (gardée / écartée + raison, éléments reçus vs comptés). Sans ça, une saison jetée à
+  // tort était invisible dans le diagnostic ci-dessus, qui ne voit que ce qui a été gardé.
+  const SEASON_WHY_FR = {
+    label: 'libellé « Saison N »', first: '1re saison de la fiche', seriesTitle: 'titre = série',
+    noConvention: 'pas de convention de nommage', special: 'marquée spécial/OAD', unlabeled: 'sans libellé « Saison N »',
+  };
+  function renderRawSeasonsDiag(seriesId) {
+    const raw = eps3ReadRaw(seriesId);
+    const diag = raw && raw.v && raw.v.seasonsDiag;
+    if (!Array.isArray(diag) || !diag.length) return `<p class="crrav-diagcard-note" style="margin-top:8px">
+      Détail des saisons brutes Crunchyroll indisponible (cache épisodes d'avant v3.95.0 — rafraîchis la liste).</p>`;
+    const snCount = new Map();
+    for (const d of diag) if (d.keep) snCount.set(d.sn, (snCount.get(d.sn) || 0) + 1);
+    const rows = diag.map((d) => {
+      const counts = d.keep && d.raw != null
+        ? ` · ${d.kept}/${d.raw} élément${d.raw > 1 ? 's' : ''} compté${d.kept > 1 ? 's' : ''}${d.rescued ? ' (film repêché)' : ''}`
+        : '';
+      const clash = d.keep && snCount.get(d.sn) > 1 ? ' · ⚠ season_number partagé' : '';
+      return `<div class="crrav-diagrow${d.keep ? ' chosen' : ''}">
+        <span>${d.keep ? '✓' : '✗'} ${escapeHtml(d.t || '(sans titre)')}</span>
+        <small>n° ${escapeHtml(String(d.sn))} · ordre ${escapeHtml(String(d.seq))} · ${escapeHtml(SEASON_WHY_FR[d.why] || d.why)}${counts}${clash}</small></div>`;
+    }).join('');
+    return `<p class="crrav-diagcard-note" style="margin-top:10px">Saisons brutes de la fiche Crunchyroll
+      (✓ gardée / ✗ écartée par le filtre) :</p>
+      <div class="crrav-diagtbl" style="margin-top:6px">${rows}</div>`;
+  }
+
   function summarizeSeasonDiag() {
     const s = anilistDiagAllSeries().find((x) => x.id === STATE.anilistDiagTargetId);
     if (!s || !Array.isArray(s.episodes) || !s.episodes.length) {
