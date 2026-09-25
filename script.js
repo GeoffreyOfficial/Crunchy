@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.95.0
+// @version      3.96.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.95.0';
+  const SCRIPT_VERSION = '3.96.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -10465,6 +10465,12 @@
        quel que soit le nombre d'éléments présents : repère visuel toujours identique. */
     justify-content:flex-end}
   .crrav-actrow .crrav-resume{flex:1;min-width:0}
+  /* (fix v3.96.0) La baguette n'a pas de hauteur propre : elle hérite de celle du bouton
+     reprendre via align-items:stretch. Série terminée → plus de bouton reprendre → elle
+     retombait à la hauteur de son seul emoji (~18px), pastille écrasée. Plancher = hauteur
+     exacte de .crrav-resume (padding 7px×2 + font 11.5px × line-height 1.2), pour garder
+     le même gabarit avec ou sans voisin. */
+  .crrav-actrow .crrav-similar{min-height:calc(11.5px * 1.2 + 14px)}
 
   /* (fix v3.90.0) plus de hauteur/overflow fixes ici : un bloc fusionné « libellé »
      (voir .season-block.labeled) est plus haut que la ligne de cases (6px) et doit
