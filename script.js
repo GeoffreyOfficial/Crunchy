@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.109.0
+// @version      3.112.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.109.0';
+  const SCRIPT_VERSION = '3.112.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -106,6 +106,7 @@
     crEpDimSeen: false,        // fiche série : épisodes vus atténués
     crMarkUpTo: true,          // menu ⋮ : « Marquer comme vu jusqu'ici »
     crHomeCustom: true,        // accueil : rubriques masquables / réordonnables
+    crWarnings: true,          // (v3.111.0) alertes si Crunchyroll change sa page
     showHero: false,           // carte « à la une » (série bientôt finie) en haut de Reste à voir,
                                // masquée par défaut — activable dans les réglages.
 
@@ -737,8 +738,8 @@
     // → jamais rendus dans l'onglet Réglages principal, uniquement dans le sous-onglet dédié
     // 🍥 Crunchyroll (crSitePanel), où ils s'appliquent immédiatement. Ils restent dans le
     // schéma pour être chargés/sauvegardés/exportés comme les autres.
-    { key: 'crPageEnhance', label: 'Activer les ajouts sur crunchyroll.com', type: 'bool', impact: 'crsite',
-      help: 'Interrupteur général : désactivé, le site redevient exactement celui de Crunchyroll.' },
+    { key: 'crPageEnhance', label: 'Modifier crunchyroll.com', type: 'bool', impact: 'crsite',
+      help: 'Interrupteur général. Désactivé : plus aucune modification du site (aucun style, aucun ajout, aucun lien réécrit) — Crunchyroll redevient exactement l’original. Tes autres choix ci-dessous sont conservés et reviennent tels quels à la réactivation. Le panneau Mon Crunchy, lui, reste disponible.' },
     { key: 'crCwFirst', label: '« Reprendre » tout en haut de l’accueil', type: 'bool', impact: 'crsite', crsub: 'home',
       help: 'Remonte la section avant toutes les autres (sous le carrousel s’il est affiché).' },
     { key: 'crHideHero', label: 'Masquer le carrousel d’accueil', type: 'bool', impact: 'crsite', crsub: 'home',
@@ -761,14 +762,16 @@
       help: 'Seulement les séries dont Mon Crunchy sait déjà que tu as tout vu et qui ne sont plus en diffusion. Aucune requête supplémentaire.' },
     { key: 'crHideGenres', label: 'Masquer les séries d’un genre exclu de Découverte', type: 'bool', impact: 'crsite', crsub: 'hide',
       help: 'Genres exclus réglés dans Réglages › Découverte. Ne s’applique qu’aux séries dont les genres sont déjà connus de Mon Crunchy.' },
-    { key: 'crPlanning', label: 'Fiche série : bloc « Planning »', type: 'bool', impact: 'crsite', crsub: 'series',
-      help: 'Série en diffusion : compte à rebours du prochain épisode, épisodes sortis sur le total prévu, fin de saison estimée (AniList).' },
+    { key: 'crPlanning', label: 'Fiche série : tableau de bord de ta progression', type: 'bool', impact: 'crsite', crsub: 'series',
+      help: 'Sous l’en-tête de la fiche : progression, bouton « Lire la suite », saisons et films, temps restant et déjà vu, fin estimée à ton rythme, dernier visionnage, infos AniList, et pour une série en diffusion le compte à rebours du prochain épisode.' },
     { key: 'crEpFilms', label: 'Fiche série : repérer les films dans la liste d’épisodes', type: 'bool', impact: 'crsite', crsub: 'series',
       help: 'Icône clap turquoise, comme dans Mon Crunchy (Crunchyroll les range comme des épisodes).' },
     { key: 'crEpDimSeen', label: 'Fiche série : atténuer les épisodes déjà vus', type: 'bool', impact: 'crsite', crsub: 'series',
       help: 'Pour que la suite saute aux yeux. Retrouvent leur éclat au survol.' },
     { key: 'crMarkUpTo', label: 'Menu ⋮ : « Marquer comme vu jusqu’ici »', type: 'bool', impact: 'crsite', crsub: 'series',
       help: 'Sur une fiche série : marque vus cet épisode et tous ceux d’avant (saisons précédentes comprises), en deux temps.' },
+    { key: 'crWarnings', label: 'M’avertir si Crunchyroll change et qu’un ajout ne fonctionne plus', type: 'bool', impact: 'crsite', crsub: 'maint',
+      help: 'Petite pastille ⚠ en bas à gauche du site, avec le détail. Chaque alerte peut être masquée (le temps de la visite) ou ignorée définitivement. Les détections restent visibles ci-dessous même désactivé.' },
     { key: 'crOpenInApp', label: 'Android : lancer les vidéos dans l’appli Crunchyroll', type: 'bool', impact: 'crsite', crsub: 'mobile',
       help: 'Le site refuse la lecture sur téléphone (« Regardez ceci sur l’appli »). Un tap sur un épisode ouvre directement l’appli sur cet épisode, comme dans Mon Crunchy. Sur une page de lecture, un bouton « Ouvrir dans l’appli » s’affiche. Sans effet hors Android.' },
     { key: 'showHero', label: 'Carte « à la une » en haut de Reste à voir', type: 'bool',
@@ -8370,8 +8373,11 @@
   // (5) 11400 → « 3 h 10 », 2700 → « 45 min »
   function fmtDuration(sec) {
     if (!sec) return '—';
-    const h = Math.floor(sec / 3600);
-    const m = Math.round((sec % 3600) / 60);
+    // (fix v3.110.0) Arrondi sur le total en minutes : l'ancien calcul (minutes arrondies
+    // à part des heures) pouvait afficher « 20 h 60 » au lieu de « 21 h ».
+    const total = Math.round(sec / 60);
+    const h = Math.floor(total / 60);
+    const m = total % 60;
     if (!h) return `${m} min`;
     return m ? `${h} h ${String(m).padStart(2, '0')}` : `${h} h`;
   }
@@ -11642,8 +11648,17 @@
   .crrav-field.bool input[type=checkbox]{flex:0 0 auto}
   /* (v3.107.0) Sous-onglet 🍥 Crunchyroll */
   .crrav-crsite-intro{margin:-4px 0 14px;color:#a9a9b3;font:500 12.5px/1.45 system-ui}
-  .crrav-crsite-master{margin-bottom:14px}
-  .crrav-crsite-master .crrav-field.bool{border-color:rgba(255,120,40,.35);background:rgba(255,100,10,.08)}
+  .crrav-crsite-master{margin-bottom:14px;padding:12px;border-radius:14px;border:1px solid rgba(111,207,127,.4);
+    background:linear-gradient(135deg,rgba(111,207,127,.12),rgba(255,255,255,.02));transition:background .25s,border-color .25s}
+  .crrav-crsite-master.off{border-color:rgba(255,255,255,.14);background:rgba(255,255,255,.03)}
+  .crrav-crsite-mstate{margin:0 2px 10px;font:800 13px/1.3 system-ui;color:#8fe09a}
+  .crrav-crsite-master.off .crrav-crsite-mstate{color:#c9c9d1}
+  .crrav-crsite-master .crrav-field.bool{border-color:rgba(255,255,255,.14);background:rgba(0,0,0,.2)}
+  .crrav-crsite-master .crrav-field.bool span{font-size:13.5px;font-weight:800}
+  .crrav-crsite-rest{transition:opacity .25s,filter .25s}
+  .crrav-crsite.is-off .crrav-crsite-rest{opacity:.42;filter:grayscale(1);pointer-events:none;user-select:none}
+  .crrav-crsite-offnote{margin:0 0 12px;padding:10px 12px;border-radius:10px;background:rgba(255,255,255,.06);
+    font:600 12.5px/1.4 system-ui;color:#e8e8ec}
   .crrav-crsite-list{display:flex;flex-direction:column;gap:6px}
   .crrav-crsite-row{align-items:flex-start !important}
   .crrav-crsite-row input{margin-top:2px}
@@ -11651,6 +11666,9 @@
   .crrav-crsite-row.off{opacity:.45;pointer-events:none}
   .crrav-crsite-note{margin:8px 2px 0;font:500 11.5px/1.4 system-ui;color:#8f8f99}
   .crrav-crsite-live{align-self:center;font:600 12px/1 system-ui;color:#8fe09a}
+  .crrav-crhealth-list{margin:6px 0 0;padding:0 0 0 18px;font:500 12px/1.4 system-ui;color:#d6d6dc}
+  .crrav-crhealth-list li{margin:0 0 6px}
+  .crrav-crhealth-list small{color:#8a8a94}
   .crrav-crhome{display:flex;flex-direction:column;gap:4px}
   .crrav-crhome.off{opacity:.45;pointer-events:none}
   .crrav-crhome-row{display:flex;align-items:center;gap:8px;padding:6px 8px 6px 10px;border-radius:9px;
@@ -15064,6 +15082,7 @@
     { key: 'series', icon: '📺', label: 'Fiche série', hue: '255,209,102' },
     { key: 'cards', icon: '🃏', label: 'Cartes épisode & menus', hue: '93,180,255' },
     { key: 'mobile', icon: '📱', label: 'Téléphone', hue: '77,222,128' },
+    { key: 'maint', icon: '🛡', label: 'Surveillance des changements de Crunchyroll', hue: '150,150,150' },
   ];
   function crSiteRow(f, disabled) {
     const on = !!CFG[f.key];
@@ -15083,16 +15102,43 @@
         <div class="crrav-subhead"><span class="crrav-subhead-ico">${sg.icon}</span><span class="crrav-subhead-lab">${sg.label}</span></div>
         <div class="crrav-crsite-list">${fs.filter((f) => f.crsub === sg.key).map((f) => crSiteRow(f, off)).join('')}</div>
         ${sg.key === 'home' && CFG.crCwOnlyLists ? `<p class="crrav-crsite-note">${escapeHtml(listsNote)}</p>` : ''}
+        ${sg.key === 'maint' ? safeCall(crHealthHtml, '', 'crHealthHtml') : ''}
       </div>`).join('') + `<div class="crrav-subgroup" style="--subhue:180,140,255">
         <div class="crrav-subhead"><span class="crrav-subhead-ico">🧩</span><span class="crrav-subhead-lab">Rubriques de l’accueil</span></div>
         <p class="crrav-crsite-note" style="margin:0 2px 8px">Coche pour afficher, ↑ ↓ pour l’ordre. Une nouvelle rubrique apparaît à sa place d’origine jusqu’à ce que tu la règles.</p>
         ${safeCall(crHomePanelHtml, '', 'crHomePanelHtml')}
       </div>`;
-    return `<div class="crrav-settings crrav-crsite">
+    return `<div class="crrav-settings crrav-crsite${off ? ' is-off' : ''}">
       <h3>Sur crunchyroll.com</h3>
       <p class="crrav-crsite-intro">Ce que Mon Crunchy ajoute directement aux pages du site. Chaque case s’applique tout de suite, sans enregistrer.</p>
-      <div class="crrav-crsite-master">${crSiteRow(master, false)}</div>
-      ${blocks}
+      <div class="crrav-crsite-master${off ? ' off' : ''}">
+        <div class="crrav-crsite-mstate">${off ? '⏸ Crunchyroll d’origine — aucune modification' : '✓ Modifications actives sur crunchyroll.com'}</div>
+        ${crSiteRow(master, false)}
+      </div>
+      <div class="crrav-crsite-rest"${off ? ' aria-disabled="true"' : ''}>
+        ${off ? '<p class="crrav-crsite-offnote">Tout est désactivé par l’interrupteur ci-dessus. Tes réglages sont conservés et reviendront tels quels.</p>' : ''}
+        ${blocks}
+      </div>
+    </div>`;
+  }
+  // Dernières détections (persistées) : utile même alertes désactivées, et sur téléphone
+  // où la console est inaccessible.
+  function crHealthHtml() {
+    const H = APP_STATE.crHealth || {};
+    const M = APP_STATE.crWarnMute || {};
+    const ks = Object.keys(H).sort((a, b) => H[b].ts - H[a].ts);
+    const perf = typeof CRP !== 'undefined' && CRP.perf && CRP.perf.scans
+      ? `Performance sur cette page : ${CRP.perf.scans} passages, ${(CRP.perf.total / CRP.perf.scans).toFixed(1)} ms en moyenne (max ${CRP.perf.max.toFixed(0)} ms).` : '';
+    const rows = ks.length ? ks.map((k) => {
+      const w = H[k];
+      const muted = M[k] === SCRIPT_VERSION;
+      return `<li><b>${escapeHtml(w.feature || k)}</b> — ${escapeHtml(w.msg)}<br><small>${escapeHtml(fmtAgo(w.ts))} · ${escapeHtml(w.page || '')} · v${escapeHtml(w.v || '')}${muted ? ' · ignorée' : ''}</small></li>`;
+    }).join('') : '';
+    return `<div class="crrav-crhealth">
+      <p class="crrav-crsite-note" style="margin:6px 2px 0">${ks.length ? 'Dernières détections :' : '✓ Aucun changement détecté.'}</p>
+      ${rows ? `<ul class="crrav-crhealth-list">${rows}</ul>` : ''}
+      ${perf ? `<p class="crrav-crsite-note" style="margin:6px 2px 0">${perf}</p>` : ''}
+      ${ks.length || Object.keys(M).length ? '<div class="crrav-crhome-btns"><button type="button" class="crrav-btn ghost" data-act="crhealth-reset">Effacer les détections et réactiver les alertes</button></div>' : ''}
     </div>`;
   }
   function fmtAgo(ts) {
@@ -16434,6 +16480,7 @@
     const keep = new Set([STATE_KEY]);
     const keys = Object.keys(localStorage).filter((k) => k.startsWith(LS) && !keep.has(k) && !IDB_SPARED.has(k));
     keys.forEach((k) => localStorage.removeItem(k));
+    safeCall(crpStoreClear, undefined, 'crpStoreClear');   // (v3.111.0) blocs d'infos du site
     LOG(`${n + keys.length} entrées de cache supprimées`);
     return n + keys.length;
   }
@@ -18589,6 +18636,14 @@
             forceRender();
           }
         }
+        if (act.dataset.act === 'crhealth-reset') {
+          APP_STATE.crHealth = {};
+          APP_STATE.crWarnMute = {};
+          persistState(APP_STATE);
+          safeCall(() => { CRP.sessionMute.clear(); crpWarnUi(); }, undefined, 'crhealth-reset');
+          forceRender();
+          return;
+        }
         if (/^crhome-/.test(act.dataset.act || '')) {
           safeCall(() => crpHomeAct(act.dataset.act, act.dataset.key || ''), undefined, 'crpHomeAct');
           forceRender();
@@ -18936,7 +18991,10 @@
   const CRP_CARD = '[data-t^="episode-card"]';
   const CRP = { info: new Map(), TTL: 3 * 60e3, ver: 0, timer: 0, io: null, started: false, queue: [], active: 0,
     cw: new Map(), cwPending: new Set(),
-    itemOf: new WeakMap(), revealed: new WeakSet(), planAsked: new Set() };   // (v3.101.0) bilan « Reprendre » : sid → { ver, m }
+    itemOf: new WeakMap(), revealed: new WeakSet(), planAsked: new Set(),
+    // (v3.111.0) robustesse : disjoncteurs par étape, alertes, mesures de perf
+    errs: {}, off: {}, health: new Map(), sessionMute: new Set(), apiFail: 0,
+    perf: { scans: 0, total: 0, max: 0, last: 0 }, resized: false };   // (v3.101.0) bilan « Reprendre » : sid → { ver, m }
 
   // (v3.105.0) Cache persistant des blocs d'infos : affichage INSTANTANÉ au chargement, puis
   // revalidation en arrière-plan (stale-while-revalidate). Avant, chaque visite recalculait
@@ -18976,7 +19034,29 @@
   }
   function crpStoreSave() {
     clearTimeout(CRP.storeT);
-    CRP.storeT = setTimeout(() => safeCall(() => localStorage.setItem(CRP_STORE_KEY, JSON.stringify(crpStore())), undefined, 'crpStore:write'), 800);
+    CRP.storeT = setTimeout(() => {
+      const st = crpStore();
+      // Ménage : modèles non revus depuis 60 j.
+      const lim = Date.now() - 60 * DAY;
+      for (const k of Object.keys(st.s)) if (!st.s[k] || (st.s[k].ts || 0) < lim) delete st.s[k];
+      try { localStorage.setItem(CRP_STORE_KEY, JSON.stringify(st)); } catch (e) {
+        // Quota plein : on garde la moitié la plus récente et on réessaie une fois.
+        const keys = Object.keys(st.s).sort((a, b) => (st.s[b].ts || 0) - (st.s[a].ts || 0));
+        keys.slice(Math.floor(CRP_STORE_MAX / 2)).forEach((k) => { delete st.s[k]; });
+        safeCall(() => localStorage.setItem(CRP_STORE_KEY, JSON.stringify(st)), undefined, 'crpStore:write-retry');
+      }
+    }, 800);
+  }
+  // « Vider le cache » de Mon Crunchy : les blocs d'infos repartent de zéro aussi (les
+  // listes connues sont gardées : elles ne servent qu'à ne rien masquer à tort).
+  function crpStoreClear() {
+    const st = crpStore();
+    st.s = {};
+    CRP.info.clear();
+    CRP.cw.clear();
+    CRP.idx = null;
+    safeCall(() => localStorage.setItem(CRP_STORE_KEY, JSON.stringify(st)), undefined, 'crpStore:clear');
+    crpInjectCss();
   }
   // Items bruts (watchlist + Crunchylists) → ensemble d'ids de séries. Appelé par le scan
   // Reste à voir (données déjà là, gratuit) ET par crpLoadLists côté site.
@@ -19002,9 +19082,13 @@
       const acct = await getAccountId();
       const [wl, cl] = await Promise.all([getWatchlist(acct), getCustomLists(acct)]);
       crpSetLists(wl.concat(cl));
+      CRP.listsFails = 0;
+      crpWarnClear('api:lists');
     } catch (e) {
       CRP.listsFailTs = Date.now();
+      CRP.listsFails = (CRP.listsFails || 0) + 1;
       safeCall.log(e, 'crpLoadLists');
+      if (CRP.listsFails >= 3) crpWarn('api:lists', `Lecture de tes listes en échec${e && e.status ? ` (erreur ${e.status})` : ''} : « seulement mes listes » garde la dernière version connue.`, 'Reprendre');
     } finally {
       STATE.announced = keep.announced;
       STATE.warning = keep.warning;
@@ -19059,11 +19143,34 @@
         try { await enrichAnilistSchedule([s]); } catch (_) { /* AniList indisponible : on s'en passe */ }
         s = buildSeriesEntry(panel, eps.episodes, eps.maxAir, null, 0, ph, null);
       }
+      // (v3.112.0) Rythme récent (tableau de bord de la fiche) : épisodes vus ces 30 derniers
+      // jours d'après la date de visionnage de chaque épisode. Aucune requête en plus.
+      const since = Date.now() - 30 * DAY;
+      let recent = 0;
+      for (const e of s.episodes) {
+        if (!e.seen) continue;
+        const t = Math.max(0, ...(e.ids || [e.id]).map((id) => (ph.get(id) || {}).t || 0));
+        if (t > since) recent++;
+      }
+      s._pace30 = recent;
       return { s, ph };
     })();
     CRP.info.set(seriesId, { promise, ts: Date.now() });
-    promise.then((data) => CRP.info.set(seriesId, { data, ts: Date.now() }),
-      () => CRP.info.delete(seriesId));
+    // (v3.111.0) Mémoire bornée : une longue session de navigation (SPA) accumulait sinon
+    // toutes les séries croisées, avec leurs épisodes et progressions complets.
+    if (CRP.info.size > 60) {
+      const old = [...CRP.info.entries()].filter(([, v]) => !v.promise).sort((a, b) => a[1].ts - b[1].ts);
+      old.slice(0, CRP.info.size - 60).forEach(([k]) => CRP.info.delete(k));
+    }
+    promise.then((data) => {
+      CRP.info.set(seriesId, { data, ts: Date.now() });
+      if (data) { CRP.apiFail = 0; crpWarnClear('api:series'); }
+    }, (e) => {
+      CRP.info.delete(seriesId);
+      if (++CRP.apiFail >= 4) {
+        crpWarn('api:series', `Lecture des données Crunchyroll en échec (${CRP.apiFail} fois de suite${e && e.status ? `, erreur ${e.status}` : ''}) — infos, bilan et masquage peuvent être incomplets.`, 'Données');
+      }
+    });
     return promise;
   }
   // File d'attente : 2 séries à la fois au plus (une page d'accueil peut en montrer 20).
@@ -19124,6 +19231,32 @@
       nextNum: aniOk ? s.aniNextNum : null,
       // (v3.109.0) Bloc Planning de la fiche série : décrit la DERNIÈRE saison (celle en
       // diffusion), indépendamment de là où tu en es.
+      // (v3.112.0) Tableau de bord de la fiche série.
+      dash: {
+        secSeen: eps.filter((e) => e.seen).reduce((a, e) => a + (e.dur || 0), 0)
+          + movies.filter((e) => e.seen).reduce((a, e) => a + (e.dur || 0), 0),
+        epSeen: eps.length - left.length,
+        lastTs: s.lastWatchedTs || 0,
+        pace30: s._pace30 || 0,
+        aniScore: s.aniScore || null,
+        studio: s.aniStudio || null,
+        format: s.aniFormat || null,
+        year: s.aniSeasonYear || null,
+        genres: (s.categories || []).slice(0, 4),
+        airing: !!s.airing,
+      },
+      // (v3.110.0) Prochain élément à voir, films compris — pour « Lire la suite » quand la carte
+      // de Crunchyroll montre un épisode déjà vu.
+      nextEp: (() => {
+        const nx = s.episodes.find((e) => e.started && !e.seen) || s.episodes.find((e) => !e.seen);
+        if (!nx) return null;
+        const film = movies.includes(nx);
+        const pos = seasons.indexOf(nx.season) + 1;
+        return {
+          id: nx.id, n: nx.n, title: nx.title || '', film, started: !!nx.started,
+          label: film ? 'Film' : (seasons.length > 1 && pos > 0 ? `S${pos} E${nx.n}` : `E${nx.n}`),
+        };
+      })(),
       plan: {
         airing: lastAiring,
         released: eps.filter((e) => e.season === lastSeason).length,
@@ -19144,7 +19277,24 @@
     return withTime ? `${txt} · ${d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}` : txt;
   }
 
-  function crpBlockHtml(m) {
+  function crpLocalePrefix() {
+    const mm = /^\/([a-z]{2}(?:-[a-z]{2})?)(?=\/|$)/i.exec(location.pathname);
+    return mm ? `/${mm[1]}` : '';
+  }
+  // (v3.110.0) Bouton « Lire la suite » : Crunchyroll laisse souvent dans Reprendre le
+  // DERNIER épisode vu (« Vu », bouton rejouer) au lieu du suivant. Si la carte ne montre pas
+  // déjà le prochain élément à voir, on propose celui-ci directement.
+  function crpNextHtml(m, cardEpId) {
+    const nx = m && m.nextEp;
+    if (!nx || !nx.id || nx.id === cardEpId) return '';
+    const verb = nx.started ? 'Reprendre' : 'Lire la suite';
+    const full = `${nx.label}${nx.title ? ` \u2013 ${nx.title}` : ''}`;
+    return `<a class="crrav-cri-next${nx.film ? ' film' : ''}" href="${crpLocalePrefix()}/watch/${escapeHtml(nx.id)}" title="${escapeHtml(`${verb} : ${full}`)}">`
+      + `<span class="crrav-cri-next-ico">${nx.film ? TICK_MOVIE_ICO : '\u25B6'}</span>`
+      + `<span class="crrav-cri-next-v">${verb}</span><b>${escapeHtml(nx.label)}</b>`
+      + `${nx.title ? `<span class="crrav-cri-next-t">${escapeHtml(nx.title)}</span>` : ''}</a>`;
+  }
+  function crpBlockHtml(m, cardEpId) {
     const segs = m.seasons.map((g) => {
       const w = g.n ? Math.round((g.seen / g.n) * 1000) / 10 : 0;
       const cls = `crrav-cri-seg${g.k === m.cur && m.epLeft ? ' cur' : ''}${g.seen === g.n ? ' done' : ''}`;
@@ -19177,7 +19327,8 @@
     }
     return `<div class="crrav-cri-bar">${segs}</div>
       <div class="crrav-cri-top">${head}<em>${m.pct} %</em></div>
-      ${chips.length ? `<div class="crrav-cri-chips">${chips.join('')}</div>` : ''}`;
+      ${chips.length ? `<div class="crrav-cri-chips">${chips.join('')}</div>` : ''}
+      ${crpNextHtml(m, cardEpId)}`;
   }
 
   function crpFillBars(el) {
@@ -19185,6 +19336,16 @@
     if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => requestAnimationFrame(run)); else run();
   }
 
+  // L'aperçu au survol de Crunchyroll (position:absolute; inset:0 sur la carte) recouvrait
+  // notre bloc — boutons inclickables, lien de l'ancien épisode par-dessus. On lui retire la
+  // hauteur du bloc par le bas (variable CSS posée sur la carte, que React ne gère pas).
+  function crpSizeHover(card, el) {
+    if (!card || !el || !el.isConnected) return;
+    const cs = getComputedStyle(el);
+    const h = Math.ceil(el.offsetHeight + (parseFloat(cs.marginTop) || 0) + (parseFloat(cs.marginBottom) || 0));
+    const v = `${h}px`;
+    if (card.style.getPropertyValue('--crrav-crih') !== v) card.style.setProperty('--crrav-crih', v);
+  }
   function crpRenderBlock(card, seriesId, epId) {
     let el = card.querySelector(':scope > .crrav-crinfo');
     const key = `${seriesId}|${epId}|${CRP.ver}`;
@@ -19192,18 +19353,20 @@
     // Rendu instantané depuis le cache persistant (ou la dernière version déjà affichée),
     // revalidé juste après ; le squelette ne sert plus qu'à la toute première visite.
     const paint = (m) => {
-      const html = crpBlockHtml(m);
+      const html = crpBlockHtml(m, epId);
       if (el.dataset.html === html) return;
       el.dataset.html = html;
       el.classList.remove('loading');
       el.innerHTML = html;
       crpFillBars(el);
+      crpSizeHover(card, el);
     };
     if (!el) {
       el = document.createElement('div');
       el.className = 'crrav-crinfo loading';
       el.innerHTML = '<div class="crrav-cri-skel"></div>';
       card.appendChild(el);
+      card.classList.add('crrav-hasinfo');
     }
     el.dataset.key = key;
     const cached = (CRP.cw.get(seriesId) || {}).m || crpStoreGet(seriesId);
@@ -19266,7 +19429,7 @@
   }
   function crpNewMenuItem(menu, cls, label) {
     const tpl = menu.querySelector('[role="menuitem"]:not([data-crrav-item])');
-    if (!tpl || !tpl.parentElement) return null;
+    if (!tpl || !tpl.parentElement) { crpMenuMiss(menu); return null; }
     const item = document.createElement(tpl.tagName.toLowerCase());
     item.className = `${tpl.className} crrav-crdel ${cls}`.trim();   // même apparence que l'item natif
     item.setAttribute('role', 'menuitem');
@@ -19456,11 +19619,129 @@
     return `<div class="crrav-plan-h"><span class="crrav-plan-dot"></span>Saison ${p.seasonPos} en diffusion<span class="crrav-plan-src">AniList</span></div>
       <div class="crrav-plan-row">${cells.join('')}</div>`;
   }
+  // ═══════════ (v3.112.0) Tableau de bord de la fiche série ═══════════
+  // Inséré juste SOUS l'en-tête de la fiche (après .series-hero-wrapper, dans une largeur
+  // alignée sur leurs conteneurs), repli dans le corps de l'en-tête si la structure change.
+  // Grand écran : progression + bouton à gauche, tuiles à droite ; téléphone : tout empilé.
+  function crpRelDays(ts) {
+    if (!ts) return '';
+    const d = Math.floor((Date.now() - ts) / DAY);
+    if (d <= 0) return 'aujourd’hui';
+    if (d === 1) return 'hier';
+    if (d < 30) return `il y a ${d} j`;
+    if (d < 365) return `il y a ${Math.round(d / 30)} mois`;
+    return `il y a ${Math.round(d / 365)} an${d >= 730 ? 's' : ''}`;
+  }
+  function crpEta(m) {
+    const left = m.epLeft + m.filmLeft;
+    if (!left) return null;
+    const d = m.dash || {};
+    const pace = d.pace30 ? d.pace30 / 30 : 0;
+    if (pace >= 0.05) {
+      const days = Math.max(1, Math.ceil(left / pace));
+      return { ts: Date.now() + days * DAY, how: `à ton rythme (${(pace * 7).toFixed(pace * 7 < 10 ? 1 : 0).replace('.', ',')} ép./sem.)` };
+    }
+    const days = Math.max(1, Math.ceil(left / 2));
+    return { ts: Date.now() + days * DAY, how: 'à 2 épisodes par jour' };
+  }
+  function crpRing(pct, done) {
+    const r = 42, c = 2 * Math.PI * r;
+    return `<svg viewBox="0 0 100 100" aria-hidden="true"><circle cx="50" cy="50" r="${r}" class="bg"/>`
+      + `<circle cx="50" cy="50" r="${r}" class="fg${done ? ' done' : ''}" stroke-dasharray="${c.toFixed(1)}" `
+      + `style="--off:${(c * (1 - pct / 100)).toFixed(1)};--c:${c.toFixed(1)}"/></svg>`;
+  }
+  function crpDashHtml(m, sid) {
+    const d = m.dash || {};
+    const now = Date.now();
+    const all = m.epLeft + m.filmLeft;
+    const doneAll = !all;
+    const upToDate = doneAll && (m.lastAiring || d.airing);
+    const lists = crpListSet();
+    const inList = lists ? lists.has(sid) : null;
+    const ignored = typeof IGNORED !== 'undefined' && IGNORED.has(sid);
+    const seenTotal = d.epSeen != null ? d.epSeen : m.epTotal - m.epLeft;
+    // En-tête
+    let title, sub = [];
+    if (upToDate) title = '<span class="ok">À jour ✓</span> <em>en attente du prochain épisode</em>';
+    else if (doneAll) title = '<span class="ok">Série terminée ✓</span> <em>tout est vu</em>';
+    else if (!seenTotal && m.filmLeft === m.filmTotal) title = `Pas encore commencée <em><span class="sep">· </span>${m.epTotal} épisodes · ${fmtDuration(m.secLeft)}</em>`;
+    else title = `Reste ${m.epLeft} épisode${m.epLeft > 1 ? 's' : ''}${m.filmLeft ? ` + ${m.filmLeft} film${m.filmLeft > 1 ? 's' : ''}` : ''} <em><span class="sep">· </span>${fmtDuration(m.secLeft + (m.filmSec || 0))}</em>`;
+    if (m.seasonCount > 1 && m.epLeft) sub.push(`Saison ${m.curPos}/${m.seasonCount}${m.seasonsAfter ? ` · encore ${m.seasonsAfter} après` : ' · la dernière'}`);
+    if (d.lastTs) sub.push(`vu ${crpRelDays(d.lastTs)}`);
+    if (inList === false) sub.push('pas dans tes listes');
+    if (ignored) sub.push('ignorée dans Mon Crunchy');
+    // Bouton principal
+    const nx = m.nextEp;
+    const cta = nx && nx.id
+      ? `<a class="crrav-dash-cta${nx.film ? ' film' : ''}" href="${crpLocalePrefix()}/watch/${escapeHtml(nx.id)}">`
+        + `<span class="ico">${nx.film ? TICK_MOVIE_ICO : '\u25B6'}</span><span class="v">${nx.started ? 'Reprendre' : seenTotal ? 'Lire la suite' : 'Commencer'}</span>`
+        + `<b>${escapeHtml(nx.label)}</b>${nx.title ? `<span class="t">${escapeHtml(nx.title)}</span>` : ''}</a>`
+      : '';
+    // Saisons (+ films)
+    const seasons = m.seasons.map((g, i) => {
+      const w = g.n ? Math.round((g.seen / g.n) * 100) : 0;
+      const cls = g.seen === g.n ? 'done' : g.k === m.cur && m.epLeft ? 'cur' : '';
+      return `<div class="crrav-dash-s ${cls}" title="Saison ${i + 1} · ${g.seen}/${g.n} vus"><span class="l">S${i + 1}</span>`
+        + `<span class="b"><i style="width:${w}%"></i></span><span class="n">${g.seen === g.n ? '✓' : `${g.seen}/${g.n}`}</span></div>`;
+    }).join('') + (m.movies || []).map((f, i) => `<div class="crrav-dash-s film${f.seen ? ' done' : ''}" title="Film ${i + 1}${f.seen ? ' · vu' : ''}">`
+      + `<span class="l">${TICK_MOVIE_ICO}</span><span class="n">Film${m.movies.length > 1 ? ` ${i + 1}` : ''} · ${f.seen ? 'vu ✓' : 'à voir'}</span></div>`).join('');
+    // Tuiles
+    const tiles = [];
+    const tile = (ico, k, v, extra) => tiles.push(`<div class="crrav-dash-t"><span class="k">${ico} ${k}</span><b>${v}</b>${extra ? `<small>${extra}</small>` : ''}</div>`);
+    if (all) tile('⏱', 'Temps restant', fmtDuration(m.secLeft + (m.filmSec || 0)), `${all} à voir`);
+    if (d.secSeen) tile('✅', 'Déjà regardé', fmtDuration(d.secSeen), `${seenTotal} épisode${seenTotal > 1 ? 's' : ''}`);
+    let eta = crpEta(m);
+    // Série encore en diffusion : impossible de finir avant le dernier épisode prévu.
+    if (eta && m.plan && m.plan.airing && m.plan.endTs && eta.ts < m.plan.endTs) eta = { ts: m.plan.endTs, how: 'avec la fin de la diffusion' };
+    if (eta) tile('🏁', 'Fin estimée', `${m.plan && m.plan.airing && m.plan.endApprox ? '~ ' : ''}${crpDate(eta.ts)}`, eta.how);
+    if (d.lastTs) tile('🕘', 'Dernier visionnage', crpRelDays(d.lastTs), crpDate(d.lastTs));
+    if (d.aniScore) tile('⭐', 'Note AniList', `${d.aniScore} %`, d.studio ? escapeHtml(d.studio) : '');
+    else if (d.studio) tile('🎬', 'Studio', escapeHtml(d.studio), [d.format, d.year].filter(Boolean).join(' · '));
+    // Diffusion (ex-bloc Planning)
+    const p = m.plan;
+    let air = '';
+    if (p && p.airing) {
+      const next = p.nextTs && p.nextTs > now ? p.nextTs : null;
+      const end = p.endTs && p.endTs > now - DAY ? p.endTs : null;
+      const total = p.planned && p.planned >= p.released ? p.planned : null;
+      const pct = total ? Math.round((p.released / total) * 100) : null;
+      air = `<div class="crrav-dash-air">
+        <div class="h"><span class="dot"></span>Saison ${p.seasonPos} en diffusion<span class="src">AniList</span></div>
+        <div class="row">
+          <div class="c"><small>Prochain épisode</small>${next
+            ? `<b>${p.nextNum ? `E${p.nextNum} · ` : ''}${crpDate(next, true)}</b><em class="crrav-plan-cd" data-ts="${next}">${crpUntil(next)}</em>`
+            : '<b class="dim">date pas encore annoncée</b>'}</div>
+          <div class="c"><small>Épisodes sortis</small><b>${p.released}${total ? ` / ${total}` : ''}</b>${pct != null ? `<span class="bar"><i style="width:${pct}%"></i></span>` : ''}</div>
+          ${end ? `<div class="c"><small>Fin de saison</small><b>${p.endApprox ? '~ ' : ''}${crpDate(end)}</b></div>` : ''}
+        </div></div>`;
+    }
+    const genres = (d.genres || []).length ? `<div class="crrav-dash-tags">${d.genres.map((g) => `<span>${escapeHtml(g)}</span>`).join('')}</div>` : '';
+    return `<div class="crrav-dash-in">
+      <div class="crrav-dash-main">
+        <div class="crrav-dash-ring">${crpRing(m.pct, doneAll)}<div class="v"><b>${m.pct}<small>%</small></b><span>${seenTotal}/${m.epTotal}</span></div></div>
+        <div class="crrav-dash-head">
+          <span class="kick">Ta progression</span>
+          <h3>${title}</h3>
+          ${sub.length ? `<p class="sub">${sub.map(escapeHtml).join(' · ')}</p>` : ''}
+        </div>
+        ${cta}
+      </div>
+      ${tiles.length ? `<div class="crrav-dash-grid">${tiles.join('')}</div>` : ''}
+      <div class="crrav-dash-seasons">${seasons}</div>
+      ${air}${genres}
+    </div>`;
+  }
+  function crpDashHost() {
+    const wrap = document.querySelector('.erc-series .series-hero-wrapper') || document.querySelector('.series-hero-wrapper');
+    if (wrap && wrap.parentElement) return { parent: wrap.parentElement, after: wrap };
+    const body = document.querySelector('[data-t="series-hero-body"]');
+    return body ? { parent: body, after: null, inBody: true } : null;
+  }
   function crpPlanning() {
     const sid = crpPageSeriesId();
-    let el = document.querySelector('.crrav-plan');
-    const body = sid && document.querySelector('[data-t="series-hero-body"]');
-    if (!CFG.crPlanning || !body) { if (el) el.remove(); return; }
+    let el = document.querySelector('.crrav-dash');
+    const host = sid && CFG.crPlanning ? crpDashHost() : null;
+    if (!host) { if (el) el.remove(); return; }
     const m = (CRP.cw.get(sid) || {}).m || crpStoreGet(sid);
     if (!CRP.planAsked.has(sid)) {
       CRP.planAsked.add(sid);
@@ -19468,16 +19749,32 @@
         if (data && data.s) { const mm = crpModel(data.s); crpStorePut(sid, mm); CRP.cw.set(sid, { ver: CRP.ver, m: mm }); }
       }, () => {}).finally(() => crpQueueScan());
     }
-    const p = m && m.plan;
-    if (!p || !p.airing) { if (el) el.remove(); return; }
-    if (!el || el.parentElement !== body) {
+    const placed = el && el.parentElement === host.parent
+      && (host.after ? el.previousElementSibling === host.after : true);
+    if (!placed) {
       if (el) el.remove();
-      el = document.createElement('div');
-      el.className = 'crrav-plan';
-      body.appendChild(el);
+      el = document.createElement('section');
+      el.className = `crrav-dash${host.inBody ? ' inbody' : ''}`;
+      el.setAttribute('aria-label', 'Ta progression (Mon Crunchy)');
+      if (host.after) host.after.insertAdjacentElement('afterend', el); else host.parent.appendChild(el);
     }
-    const html = crpPlanHtml(p);
-    if (el.dataset.html !== html) { el.dataset.html = html; el.innerHTML = html; }
+    el.dataset.sid = sid;
+    if (!m || !m.dash) {                       // première visite : squelette de même hauteur
+      if (!el.classList.contains('loading')) { el.classList.add('loading'); el.dataset.html = ''; el.innerHTML = '<div class="crrav-dash-in"><div class="crrav-dash-skel"></div></div>'; }
+      return;
+    }
+    const html = crpDashHtml(m, sid);
+    if (el.dataset.html === html) return;
+    const first = el.classList.contains('loading') || !el.dataset.html;
+    el.classList.remove('loading');
+    el.classList.toggle('done', !(m.epLeft + m.filmLeft));
+    el.dataset.html = html;
+    el.innerHTML = html;
+    if (first) {
+      el.classList.remove('anim');
+      const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (f) => setTimeout(f, 16);
+      raf(() => raf(() => el.classList.add('anim')));
+    } else el.classList.add('anim');
   }
   function crpTickCountdowns() {
     document.querySelectorAll('.crrav-plan-cd[data-ts]').forEach((n) => {
@@ -19822,50 +20119,265 @@
     return true;
   }
 
+  // (v3.111.0) Chaque étape du scan passe par un disjoncteur : une étape qui plante 5 fois
+  // de suite (structure de page inattendue après une mise à jour de Crunchyroll) est coupée
+  // pour cette page au lieu de relancer l'erreur à chaque mutation — le reste continue — et
+  // une alerte le signale. Un succès remet le compteur à zéro.
+  function crpStep(name, fn, label) {
+    if (CRP.off[name]) return undefined;
+    try {
+      const r = fn();
+      if (CRP.errs[name]) CRP.errs[name] = 0;
+      return r;
+    } catch (e) {
+      safeCall.log(e, 'crp:' + name);
+      CRP.errs[name] = (CRP.errs[name] || 0) + 1;
+      if (CRP.errs[name] >= 5) {
+        CRP.off[name] = location.pathname;
+        crpWarn(`err:${name}`, `« ${label || name} » a rencontré une erreur répétée et a été suspendu sur cette page (structure inattendue).`, label || name);
+      }
+      return undefined;
+    }
+  }
+  function crpCleanupAll() {
+    document.querySelectorAll('.crrav-crinfo, [data-crrav-item], .crrav-crribbon, .crrav-cwstats, .crrav-herohide, .crrav-railhid, .crrav-plan, .crrav-dash, .crrav-epbadge, #crrav-crwarn, #crrav-appbtn, #crrav-crtoast')
+      .forEach((n) => n.remove());
+    const cls = ['crrav-cwdone', 'crrav-cwshow', 'crrav-cwnolist', 'crrav-hidecard', 'crrav-dimcard', 'crrav-epseen', 'crrav-epfilm', 'crrav-hasinfo', 'crrav-fhwrap', 'crrav-cwkeep'];
+    document.querySelectorAll(cls.map((c) => '.' + c).join(',')).forEach((n) => n.classList.remove(...cls));
+    document.querySelectorAll('[data-crrav-hero], [data-crrav-cw]').forEach((n) => { n.removeAttribute('data-crrav-hero'); n.removeAttribute('data-crrav-cw'); });
+  }
   function crpScan() {
     CRP.timer = 0;
     CRP.lastScan = Date.now();
-    crpInjectCss();
-    safeCall(crpAppLinks, undefined, 'crpAppLinks');
-    safeCall(crpWatchPageButton, undefined, 'crpWatchPageButton');
+    if (!document.body) return;
+    // Onglet en arrière-plan : rien à dessiner, on rattrapera au retour (visibilitychange).
+    if (document.hidden) { CRP.dirtyHidden = true; return; }
+    // Changement de page (navigation interne) : les disjoncteurs repartent de zéro.
+    if (CRP.path !== location.pathname) {
+      CRP.path = location.pathname;
+      CRP.off = {};
+      CRP.errs = {};
+      CRP.health.clear();
+      crpWarnUi();
+    }
+    const t0 = performance.now();
+    crpStep('css', crpInjectCss, 'Styles');
+    crpStep('applinks', crpAppLinks, 'Ouverture dans l’appli');
+    crpStep('watchbtn', crpWatchPageButton, 'Bouton appli');
     if (!CFG.crPageEnhance) {
-      document.querySelectorAll('.crrav-crinfo, [data-crrav-item], .crrav-crribbon, .crrav-cwstats, .crrav-herohide, .crrav-railhid, .crrav-plan, .crrav-epbadge').forEach((n) => n.remove());
-      document.querySelectorAll('.crrav-cwdone, .crrav-cwshow, .crrav-cwnolist, .crrav-hidecard, .crrav-dimcard, .crrav-epseen, .crrav-epfilm')
-        .forEach((n) => n.classList.remove('crrav-cwdone', 'crrav-cwshow', 'crrav-cwnolist', 'crrav-hidecard', 'crrav-dimcard', 'crrav-epseen', 'crrav-epfilm'));
+      // Nettoyage complet une seule fois, puis plus rien tant que c'est coupé (voir l'observateur).
+      if (!CRP.dormant) { crpCleanupAll(); CRP.health.clear(); CRP.dormant = true; }
       return;
     }
-    if (CFG.crCwFirst) safeCall(crpFeedLayoutCheck, undefined, 'crpFeedLayoutCheck');
-    safeCall(crpHeroControls, undefined, 'crpHeroControls');
-    safeCall(crpHistory, undefined, 'crpHistory');
-    safeCall(crpHomeSections, undefined, 'crpHomeSections');
-    safeCall(crpHideCards, undefined, 'crpHideCards');
-    safeCall(crpPlanning, undefined, 'crpPlanning');
-    safeCall(crpEpisodeList, undefined, 'crpEpisodeList');
-    if (!CFG.crHistoryDelete) document.querySelectorAll('[data-crrav-del], [data-crrav-scope]').forEach((n) => n.remove());
-    if (!CFG.crMarkUpTo) document.querySelectorAll('[data-crrav-upto]').forEach((n) => n.remove());
-    if (CFG.crHistoryDelete || CFG.crMarkUpTo) {
-      document.querySelectorAll('[role="menu"]').forEach((m) => safeCall(() => crpDecorateMenu(m), undefined, 'crpDecorateMenu'));
-    }
-    if (!CFG.crCardInfo) {
-      document.querySelectorAll('.crrav-crinfo').forEach((n) => n.remove());
-      return;
-    }
-    const firstOf = new Set();
-    document.querySelectorAll(CRP_CARD).forEach((card) => {
-      const { epId, seriesId } = crpIds(card);
-      const own = card.querySelector(':scope > .crrav-crinfo');
-      if (!seriesId || !epId || firstOf.has(seriesId)) { if (own) own.remove(); return; }
-      firstOf.add(seriesId);
-      safeCall(() => crpRenderBlock(card, seriesId, epId), undefined, 'crpRenderBlock');
-    });
+    CRP.dormant = false;
+    crpStep('hero', crpHeroControls, 'Carrousel');
+    crpStep('history', crpHistory, 'Reprendre');
+    crpStep('home', crpHomeSections, 'Rubriques de l’accueil');
+    crpStep('hide', crpHideCards, 'Masquage des séries');
+    crpStep('plan', crpPlanning, 'Planning');
+    crpStep('eplist', crpEpisodeList, 'Liste d’épisodes');
+    crpStep('menus', () => {
+      if (!CFG.crHistoryDelete) document.querySelectorAll('[data-crrav-del], [data-crrav-scope]').forEach((n) => n.remove());
+      if (!CFG.crMarkUpTo) document.querySelectorAll('[data-crrav-upto]').forEach((n) => n.remove());
+      if (CFG.crHistoryDelete || CFG.crMarkUpTo) {
+        document.querySelectorAll('[role="menu"]').forEach((m) => safeCall(() => crpDecorateMenu(m), undefined, 'crpDecorateMenu'));
+      }
+    }, 'Menus');
+    crpStep('cards', () => {
+      if (!CFG.crCardInfo) {
+        document.querySelectorAll('.crrav-crinfo').forEach((n) => n.remove());
+        document.querySelectorAll('.crrav-hasinfo').forEach((n) => n.classList.remove('crrav-hasinfo'));
+        return;
+      }
+      const remeasure = CRP.resized;
+      CRP.resized = false;
+      document.querySelectorAll('.crrav-hasinfo').forEach((c) => { if (!c.querySelector(':scope > .crrav-crinfo')) c.classList.remove('crrav-hasinfo'); });
+      const firstOf = new Set();
+      document.querySelectorAll(CRP_CARD).forEach((card) => {
+        const { epId, seriesId } = crpIds(card);
+        const own = card.querySelector(':scope > .crrav-crinfo');
+        const dashDup = CFG.crPlanning && seriesId === crpPageSeriesId() && card.closest('.erc-season-episode-list, .erc-playable-collection');
+        if (!seriesId || !epId || firstOf.has(seriesId) || dashDup) { if (own) own.remove(); return; }
+        firstOf.add(seriesId);
+        safeCall(() => crpRenderBlock(card, seriesId, epId), undefined, 'crpRenderBlock');
+        // Hauteur réservée sous l'aperçu au survol : remesurée seulement si la largeur a changé.
+        if (remeasure && own && !own.classList.contains('loading')) safeCall(() => crpSizeHover(card, own), undefined, 'crpSizeHover');
+      });
+    }, 'Infos sous les cartes');
+    // Mesure : un scan qui coûte cher espace automatiquement les suivants (voir crpQueueScan).
+    const dt = performance.now() - t0;
+    const P = CRP.perf;
+    P.scans++; P.total += dt; P.last = dt; if (dt > P.max) P.max = dt;
+    crpHealthSchedule();
   }
   function crpQueueScan() {
-    // (v3.105.0) Front montant : un scan quasi immédiat après un calme (> 1 s), sinon la
-    // cadence débattue habituelle — les infos apparaissent dès que Crunchyroll dessine.
-    if (!CRP.timer) CRP.timer = setTimeout(crpScan, Date.now() - (CRP.lastScan || 0) > 1000 ? 16 : 250);
+    if (CRP.timer) return;
+    // Front montant : quasi immédiat après un calme (> 1 s) ; sinon débattu, et d'autant plus
+    // espacé que le dernier scan a coûté cher (jamais plus de ~10 % du temps en scans).
+    const idle = Date.now() - (CRP.lastScan || 0) > 1000;
+    const wait = idle ? 16 : Math.max(250, Math.min(2000, Math.round(CRP.perf.last * 10)));
+    CRP.timer = setTimeout(crpScan, wait);
   }
 
-  // ── (v3.101.0) Accueil : carrousel héros masquable, « Reprendre » en tête et épuré ──
+  // ═══════════ (v3.111.0) Surveillance : Crunchyroll a-t-il changé sa page ? ═══════════
+  // Contrôles PRUDENTS, lancés quand la page est stable (5 s sans nouveau scan) : chacun ne
+  // conclut à un changement que si la page est manifestement chargée (assez de contenu) ET
+  // que le repère attendu manque, pour ne jamais alerter sur un compte vide, un chargement
+  // lent ou une page où la fonction n'a pas lieu d'être. Une alerte disparaît d'elle-même
+  // dès que le repère est retrouvé.
+  function crpWarn(key, msg, feature) {
+    const prev = CRP.health.get(key);
+    if (prev && prev.msg === msg) return;
+    CRP.health.set(key, { msg, feature, ts: Date.now() });
+    // Historique persistant (réglages), 20 entrées max.
+    const H = APP_STATE.crHealth && typeof APP_STATE.crHealth === 'object' ? APP_STATE.crHealth : (APP_STATE.crHealth = {});
+    H[key] = { msg, feature, ts: Date.now(), page: location.pathname.replace(/\/(series|watch)\/[^/]+.*$/i, '/$1/…'), v: SCRIPT_VERSION };
+    const ks = Object.keys(H).sort((a, b) => H[b].ts - H[a].ts);
+    ks.slice(20).forEach((k) => delete H[k]);
+    crpHomeSave();                     // même sauvegarde différée que les rubriques (APP_STATE)
+    LOG('crp ⚠', key, msg);
+    crpWarnUi();
+  }
+  function crpWarnClear(key) {
+    if (CRP.health.delete(key)) crpWarnUi();
+  }
+  function crpWarnMuted(key) {
+    const D = APP_STATE.crWarnMute || {};
+    return CRP.sessionMute.has(key) || (D[key] && D[key] === SCRIPT_VERSION);
+  }
+  function crpWarnUi() {
+    if (!document.body) return;
+    let el = document.getElementById('crrav-crwarn');
+    const list = CFG.crPageEnhance && CFG.crWarnings
+      ? [...CRP.health.entries()].filter(([k]) => !crpWarnMuted(k)) : [];
+    if (!list.length) { if (el) el.remove(); return; }
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'crrav-crwarn';
+      document.body.appendChild(el);
+    }
+    const open = el.classList.contains('open');
+    const n = list.length;
+    const html = `<button type="button" class="crrav-crwarn-pill" data-crwarn="toggle" aria-expanded="${open}">⚠ Mon Crunchy · ${n} alerte${n > 1 ? 's' : ''}</button>
+      <div class="crrav-crwarn-box">
+        <p class="crrav-crwarn-h">Crunchyroll semble avoir changé sa page : ${n > 1 ? 'ces ajouts ne fonctionnent' : 'cet ajout ne fonctionne'} plus ici.</p>
+        ${list.map(([k, w]) => `<div class="crrav-crwarn-it"><b>${escapeHtml(w.feature || '')}</b><span>${escapeHtml(w.msg)}</span>
+          <button type="button" data-crwarn="mute" data-key="${escapeHtml(k)}" title="Ne plus afficher cette alerte (jusqu’à la prochaine version du script)">Ne plus signaler</button></div>`).join('')}
+        <div class="crrav-crwarn-foot"><button type="button" data-crwarn="hide">Masquer pour cette visite</button>
+          <span>Désactivable : Mon Crunchy › Réglages › 🍥 Crunchyroll</span></div>
+      </div>`;
+    if (el.dataset.html !== html) { el.dataset.html = html; el.innerHTML = html; }
+  }
+  function crpWarnClick(e) {
+    const b = e.target.closest && e.target.closest('[data-crwarn]');
+    if (!b) return false;
+    e.preventDefault();
+    e.stopPropagation();
+    const el = document.getElementById('crrav-crwarn');
+    const act = b.dataset.crwarn;
+    if (act === 'toggle' && el) { el.classList.toggle('open'); el.dataset.html = ''; crpWarnUi(); }
+    else if (act === 'hide') { for (const k of CRP.health.keys()) CRP.sessionMute.add(k); crpWarnUi(); }
+    else if (act === 'mute') {
+      APP_STATE.crWarnMute = APP_STATE.crWarnMute || {};
+      APP_STATE.crWarnMute[b.dataset.key] = SCRIPT_VERSION;
+      persistState(APP_STATE);
+      crpWarnUi();
+    }
+    return true;
+  }
+  function crpHealthSchedule() {
+    clearTimeout(CRP.healthT);
+    CRP.healthT = setTimeout(() => crpStep('health', crpHealthCheck, 'Surveillance'), 5000);
+  }
+  function crpPageKind() {
+    const p = location.pathname;
+    if (/^\/(?:[a-z]{2}(?:-[a-z]{2})?\/?)?$/i.test(p)) return 'home';
+    if (/\/series\/[A-Z0-9]+/i.test(p)) return 'series';
+    if (/\/watch\/[A-Z0-9]+/i.test(p)) return 'watch';
+    return 'other';
+  }
+  // Chaque sonde : { key, when (fonction activée ?), test → message si cassé, null sinon }.
+  function crpProbes(kind) {
+    const $ = (q, r) => (r || document).querySelector(q);
+    const $$ = (q, r) => (r || document).querySelectorAll(q).length;
+    const loaded = $$('a[href*="/series/"], a[href*="/watch/"]') >= 5;
+    const P = [];
+    if (kind === 'home' && loaded) {
+      const feed = $('.erc-feed .dynamic-feed-wrapper') || $('.dynamic-feed-wrapper');
+      const secs = feed ? feed.children.length : 0;
+      const homeFeat = CFG.crCwFirst || CFG.crHomeCustom || CFG.crHideHero || CFG.crCwStats || CFG.crCwHideDone || CFG.crCwOnlyLists;
+      P.push({ key: 'home:feed', feature: 'Accueil', on: homeFeat,
+        bad: !feed ? 'Structure du flux de l’accueil introuvable : Reprendre en tête, rubriques et bilan ne s’appliquent pas.' : null });
+      if (feed && secs >= 5) {
+        const hist = $('[data-t="history"], .erc-history-collection', feed);
+        const histHint = $('[data-t="view-history-btn"], a[href$="/history"]', feed);
+        const known = !!APP_STATE.crCwId;
+        P.push({ key: 'home:history', feature: 'Reprendre', on: CFG.crCwFirst || CFG.crCwStats || CFG.crCwHideDone || CFG.crCwOnlyLists,
+          bad: known && !hist && !histHint ? 'La section « Reprendre » n’est plus reconnue : elle ne remonte plus en tête et le bilan / masquage ne s’appliquent pas.' : null });
+        if (hist) {
+          const items = hist.children.length;
+          P.push({ key: 'home:cwcards', feature: 'Reprendre', on: true,
+            bad: items >= 2 && !$$(CRP_CARD, hist) ? 'Les cartes de « Reprendre » ne sont plus reconnues (infos, bilan, masquage inactifs).' : null });
+          const vc = safeCall(() => getComputedStyle(hist).getPropertyValue('--visible-count'), '', 'probe:vc');
+          P.push({ key: 'home:vcount', feature: 'Reprendre', on: CFG.crCwHideDone || CFG.crCwOnlyLists,
+            bad: !String(vc).trim() ? 'Le nombre de cartes visibles de « Reprendre » n’est plus lisible : masquer une série peut laisser une place vide au lieu de faire monter la suivante.' : null });
+        }
+        const withId = [...feed.children].filter((c) => c.getAttribute('data-id')).length;
+        P.push({ key: 'home:secid', feature: 'Rubriques de l’accueil', on: CFG.crHomeCustom,
+          bad: !withId ? 'Les rubriques de l’accueil ne sont plus identifiables : leur masquage et leur ordre ne s’appliquent plus.' : null });
+        P.push({ key: 'home:scards', feature: 'Masquage des séries', on: CFG.crHideIgnored || CFG.crHideDone || CFG.crHideGenres,
+          bad: !$$('[data-t^="series-card"]', feed) && $$('a[href*="/series/"]', feed) >= 10 ? 'Les cartes série de l’accueil ne sont plus reconnues : le masquage des séries est inactif.' : null });
+      }
+      const heroAny = $('.erc-feed [class*="hero-carousel"]');
+      P.push({ key: 'home:hero', feature: 'Carrousel', on: CFG.crHideHero,
+        bad: heroAny && !crpHeroWrap() ? 'Le carrousel d’accueil n’est plus reconnu : il ne peut plus être masqué.' : null });
+    }
+    if (kind === 'series' && $('h1') && loaded) {
+      const cards = $$(CRP_CARD);
+      const watch = $$('a[href*="/watch/"]');
+      P.push({ key: 'series:cards', feature: 'Fiche série', on: CFG.crCardInfo || CFG.crEpFilms || CFG.crEpDimSeen || CFG.crMarkUpTo || CFG.crHistoryDelete,
+        bad: watch >= 3 && !cards ? 'Les cartes épisode ne sont plus reconnues : infos, films, menus et suppression inactifs.' : null });
+      P.push({ key: 'series:eplist', feature: 'Liste d’épisodes', on: CFG.crEpFilms || CFG.crEpDimSeen,
+        bad: cards >= 3 && !$('.erc-season-episode-list, .erc-playable-collection') ? 'La liste d’épisodes n’est plus reconnue : films et épisodes vus ne sont plus signalés.' : null });
+      P.push({ key: 'series:body', feature: 'Tableau de bord', on: CFG.crPlanning,
+        bad: !$('.series-hero-wrapper, [data-t="series-hero-body"]') ? 'L’en-tête de la fiche série n’est plus reconnu : le tableau de bord ne peut plus s’afficher.' : null });
+      P.push({ key: 'series:more', feature: 'Suppression de l’historique', on: CFG.crHistoryDelete,
+        bad: !$('.erc-series-hero-more-button, .erc-season-more-options') ? 'Les menus « Plus » / « Options » de la fiche ne sont plus reconnus : suppression d’une série ou d’une saison indisponible.' : null });
+    }
+    if (kind !== 'watch') {
+      const cards = [...document.querySelectorAll(CRP_CARD)];
+      if (cards.length >= 3) {
+        const withIds = cards.filter((c) => crpIds(c).epId).length;
+        P.push({ key: 'cards:ids', feature: 'Cartes épisode', on: CFG.crCardInfo || CFG.crHistoryDelete || CFG.crOpenInApp,
+          bad: !withIds ? 'Les liens des cartes épisode ne sont plus reconnus : infos, menus et ouverture dans l’appli inactifs.' : null });
+        const trig = cards.filter((c) => c.querySelector('[aria-haspopup]')).length;
+        P.push({ key: 'cards:menu', feature: 'Menus ⋮', on: CFG.crHistoryDelete || CFG.crMarkUpTo,
+          bad: !trig ? 'Le menu ⋮ des cartes épisode n’est plus reconnu : « Supprimer de l’historique » / « Marquer jusqu’ici » indisponibles.' : null });
+      }
+    }
+    return P;
+  }
+  function crpHealthCheck() {
+    if (!CFG.crPageEnhance || document.hidden) return;
+    // Lecture de style coûteuse (force un recalcul) : faite ici, page stable, plutôt qu'à
+    // chaque scan.
+    if (CFG.crCwFirst) crpFeedLayoutCheck();
+    const kind = crpPageKind();
+    for (const pr of crpProbes(kind)) {
+      if (pr.on && pr.bad) crpWarn(pr.key, pr.bad, pr.feature);
+      else crpWarnClear(pr.key);
+    }
+  }
+  // Un menu ⋮ vient de s'ouvrir sur une carte épisode mais on n'a pas pu y ajouter nos
+  // actions : signe que la structure du menu a changé (appelé par crpDecorateMenu).
+  function crpMenuMiss(menu) {
+    if (!(CFG.crHistoryDelete || CFG.crMarkUpTo)) return;
+    if (!menu.querySelector('[role="menuitem"]')) {
+      crpWarn('menu:items', 'Les menus ⋮ n’ont plus d’entrées reconnaissables : nos actions ne peuvent plus y être ajoutées.', 'Menus ⋮');
+    }
+  }
+
+    // ── (v3.101.0) Accueil : carrousel héros masquable, « Reprendre » en tête et épuré ──
   // Aucun déplacement de nœud React : l'ordre passe par CSS (order:-1 dans un flex colonne,
   // repéré par :has — déjà exigé par Crunchyroll lui-même) et le masquage aussi. Les règles
   // « accueil » ne sont injectées que si crPageEnhance est actif ; celle du carrousel que si
@@ -19920,6 +20432,13 @@
       masquees: document.querySelectorAll('.crrav-cwdone').length,
       supportHas: hasSel(':has(a)'),
       cartesEpisode: document.querySelectorAll(CRP_CARD).length,
+      scans: CRP.perf.scans,
+      scanMoyenMs: CRP.perf.scans ? +(CRP.perf.total / CRP.perf.scans).toFixed(1) : 0,
+      scanMaxMs: +CRP.perf.max.toFixed(1),
+      seriesEnMemoire: CRP.info.size,
+      cacheBlocs: Object.keys(crpStore().s).length,
+      etapesSuspendues: Object.keys(CRP.off),
+      alertes: [...CRP.health.entries()].map(([k, w]) => `${k} : ${w.msg}`),
     };
   }
   // (v3.102.0) « Reprendre » remontait tard : la règle :has([data-t="history"]) ne s'applique
@@ -19947,8 +20466,9 @@
   function crpDoneRule() {
     const ids = crpStoreHiddenIds();
     if (!ids.length) return '';
-    const sel = ids.map((id) => `.erc-history-collection > .collection-item:has(a[href*="/series/${id}/"]):not(:has(.crrav-crgone)):not(.crrav-cwshow)`).join(',\n  ');
-    return `\n  ${sel}{display:none !important}`;
+    // UNE seule règle, :has limité aux cartes de Reprendre (≈ 20 éléments).
+    const links = ids.map((id) => `a[href*="/series/${id}/"]`).join(',');
+    return `\n  .erc-history-collection > .collection-item:has(${links}):not(.crrav-cwshow):not(.crrav-cwkeep){display:none !important}`;
   }
   function crpCssText() {
     let t = CRP_CSS;
@@ -19957,7 +20477,7 @@
     if (CFG.crCwFirst) t += CRP_ORDER_CSS + crpCwIdRule() + (CRP.feedFallback ? CRP_FEED_FALLBACK_CSS : '');
     t += crpDoneRule();
     t += crpHomeCss();
-    if (crpWantsCwRow()) t += CRP_RESERVE_CSS;
+    if (crpWantsCwRow()) t += crpReserveCss();
     if (CFG.crHideHero) t += CRP_HIDEHERO_CSS;
     return t;
   }
@@ -19966,6 +20486,8 @@
     const host = document.head;
     if (!host) return false;
     let st = document.getElementById('crrav-crp-css');
+    // (v3.112.0) Interrupteur général coupé : aucun style à nous dans la page.
+    if (!CFG.crPageEnhance) { if (st) st.remove(); return true; }
     if (!st) { st = document.createElement('style'); st.id = 'crrav-crp-css'; host.appendChild(st); }
     const t = crpCssText();
     if (st.textContent !== t) st.textContent = t;
@@ -19991,6 +20513,7 @@
   function crpHeroControls() {
     const wrap = crpHeroWrap();
     if (!wrap) return;
+    if (!wrap.hasAttribute('data-crrav-hero')) wrap.setAttribute('data-crrav-hero', '');
     const b = wrap.querySelector(':scope > .crrav-herohide');
     if (CFG.crHideHero) { if (b) b.remove(); return; }
     if (b) return;
@@ -20054,6 +20577,7 @@
         const item = card.closest('.collection-item') || card;
         // Une carte qu'on vient de retirer de l'historique reste visible (bandeau + bouton).
         const gone = card.classList.contains('crrav-crgone');
+        item.classList.toggle('crrav-cwkeep', gone);
         item.classList.toggle('crrav-cwdone', done && !gone);
         item.classList.toggle('crrav-cwnolist', out && !done && !gone);
       }
@@ -20068,16 +20592,20 @@
   function crpHistoryHeader(coll, bySeries, lists) {
     let section = coll;
     while (section.parentElement && !section.parentElement.classList.contains('dynamic-feed-wrapper')) section = section.parentElement;
-    if (section.parentElement) crpRememberCwId(section);
+    if (section.parentElement) {
+      crpRememberCwId(section);
+      if (!section.hasAttribute('data-crrav-cw')) section.setAttribute('data-crrav-cw', '');
+    }
     const h2 = section.querySelector('h2');
     if (!h2 || !h2.parentElement || h2.contains(coll)) return;
     let el = h2.parentElement.querySelector(':scope > .crrav-cwstats');
-    if (!crpWantsCwRow()) { if (el) el.remove(); return; }
+    if (!crpWantsCwRow()) { if (el) el.remove(); h2.parentElement.classList.remove('crrav-fhwrap'); return; }
     if (!el) {
       el = document.createElement('div');
       el.className = 'crrav-cwstats';
       h2.insertAdjacentElement('afterend', el);
     }
+    if (!h2.parentElement.classList.contains('crrav-fhwrap')) h2.parentElement.classList.add('crrav-fhwrap');
     const pl = (n, w) => `${n} ${w}${n > 1 ? 's' : ''}`;
     let total = 0, loaded = 0, upToDate = 0, eps = 0, sec = 0, films = 0, outN = 0;
     for (const sid of bySeries.keys()) {
@@ -20311,7 +20839,9 @@
   }
 
   function crpOnClick(e) {
-    if (!CFG.crPageEnhance || !e.target || !e.target.closest) return;
+    if (!e.target || !e.target.closest) return;
+    if (crpWarnClick(e)) return;
+    if (!CFG.crPageEnhance) return;
     if (safeCall(() => crpAppClick(e), false, 'crpAppClick')) return;
     const hero = e.target.closest('[data-crrav-hero]');
     if (hero) {
@@ -20353,7 +20883,7 @@
     // « Marquer comme vu / série vue / saison vue » natifs : on laisse Crunchyroll faire,
     // puis on rafraîchit nos infos.
     const mi = e.target.closest('[role="menuitem"]');
-    if (mi && /marquer/i.test(mi.textContent || '')) {
+    if (mi && !mi.hasAttribute('data-crrav-item') && /marquer|mark\b/i.test(mi.textContent || '')) {
       const card = crpItemCard(mi);
       const mp = /\/series\/([A-Z0-9]+)/i.exec(location.pathname);
       const seriesId = (card && crpIds(card).seriesId) || (mp && mp[1]);
@@ -20366,7 +20896,10 @@
      simple enfant de plus, se logeait dans la cellule du texte et le recouvrait. Quelle que
      soit la mise en page de Crunchyroll (grille ou flex), on le force sur sa propre ligne,
      pleine largeur, sous la vignette et le titre. */
-  [data-t^="episode-card"]:has(> .crrav-crinfo){flex-wrap:wrap;height:auto !important;max-height:none !important}
+  /* (v3.111.0) Plus aucun :has() « large » : mesuré dans Chromium sur l'accueil réel, ils
+     multipliaient par 5 le coût de chaque recalcul de style de la page (tout le flux est
+     réexaminé à chaque mutation). Remplacés par des marqueurs posés par le scan. */
+  .crrav-hasinfo{flex-wrap:wrap;height:auto !important;max-height:none !important}
   [data-t^="episode-card"] > .crrav-crinfo{grid-column:1/-1;grid-row:auto;flex:1 0 100%;width:100%;max-width:100%;order:99;
     align-self:stretch;position:relative;min-width:0}
   .crrav-crinfo{margin:10px 0 2px;padding:10px 12px 11px;border-radius:10px;box-sizing:border-box;
@@ -20399,6 +20932,17 @@
     animation:crrav-cri-pulse 1.6s ease-out infinite}
   .crrav-cri-chip.film{background:rgba(94,211,220,.15);color:#8fe6ec}
   .crrav-crdel.armed{color:#ff7b7b !important;font-weight:700 !important}
+  .crrav-hasinfo > [class*="hover-info"]{bottom:var(--crrav-crih,0px) !important}
+  .crrav-crinfo{position:relative;z-index:2}
+  .crrav-cri-next{display:flex;align-items:center;gap:7px;margin-top:9px;padding:8px 11px;border-radius:9px;min-width:0;
+    background:#ff640a;color:#1a0b02;text-decoration:none;font-size:12.5px;line-height:1.2;transition:filter .15s}
+  .crrav-cri-next:hover{filter:brightness(1.1)}
+  .crrav-cri-next.film{background:#5ed3dc;color:#07393d}
+  .crrav-cri-next-ico{flex:0 0 auto;display:inline-flex;font-size:11px}
+  .crrav-cri-next-ico svg{width:14px;height:14px}
+  .crrav-cri-next-v{flex:0 0 auto;font-weight:600}
+  .crrav-cri-next b{flex:0 0 auto;font-weight:800}
+  .crrav-cri-next-t{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.8;font-weight:600}
   .crrav-crdel[data-busy="1"]{opacity:.7;cursor:progress}
   .crrav-crdel{cursor:pointer}
   .crrav-crgone > :not(.crrav-crribbon){opacity:.4;filter:grayscale(.7);transition:opacity .4s,filter .4s}
@@ -20438,6 +20982,114 @@
   .crrav-plan-cd{font-style:normal;font-weight:700;color:#ff8a3d}
   .crrav-plan-bar{display:block;width:120px;height:5px;border-radius:3px;background:rgba(255,255,255,.14);overflow:hidden;margin-top:3px}
   .crrav-plan-bar i{display:block;height:100%;background:#ff640a;border-radius:3px}
+  /* (v3.112.0) fiche série : tableau de bord */
+  .crrav-dash{box-sizing:border-box;width:100%;max-width:84.375rem;margin:0 auto;padding:1.25rem 1.25rem .25rem;
+    color:#e8e8ec;font:500 13px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif}
+  @media (min-width:35.5em){.crrav-dash{padding:1.5rem 2.5rem .5rem}}
+  @media (min-width:64em){.crrav-dash{padding-inline:4rem}}
+  @media (min-width:107.5em){.crrav-dash{padding-inline:5rem}}
+  .crrav-dash.inbody{padding:1rem 0 0}
+  .crrav-dash-in{position:relative;border-radius:20px;padding:18px;overflow:hidden;isolation:isolate;
+    background:radial-gradient(120% 140% at 0% 0%,rgba(255,100,10,.22),transparent 55%),
+      linear-gradient(160deg,rgba(32,32,40,.96),rgba(16,16,20,.96));
+    border:1px solid rgba(255,140,60,.22);box-shadow:0 18px 50px -18px rgba(0,0,0,.8),inset 0 1px 0 rgba(255,255,255,.05);
+    display:grid;gap:16px;grid-template-columns:minmax(0,1fr)}
+  .crrav-dash.done .crrav-dash-in{background:radial-gradient(120% 140% at 0% 0%,rgba(111,207,127,.2),transparent 55%),
+      linear-gradient(160deg,rgba(32,32,40,.96),rgba(16,16,20,.96));border-color:rgba(111,207,127,.28)}
+  .crrav-dash-skel{height:150px;border-radius:12px;background:linear-gradient(90deg,rgba(255,255,255,.04),rgba(255,255,255,.1),rgba(255,255,255,.04));
+    background-size:200% 100%;animation:crrav-cri-shim 1.2s linear infinite}
+  .crrav-dash-main{display:grid;grid-template-columns:auto minmax(0,1fr);grid-template-rows:auto auto;column-gap:18px;row-gap:10px;
+    align-items:center;min-width:0}
+  .crrav-dash-ring{position:relative;grid-row:1 / span 2;width:108px;height:108px}
+  .crrav-dash-main > .crrav-dash-cta{grid-column:2;justify-self:start;margin-top:0}
+  .crrav-dash-main:not(:has(> .crrav-dash-cta)) > .crrav-dash-ring{grid-row:1}
+  .crrav-dash-ring svg{width:100%;height:100%;transform:rotate(-90deg)}
+  .crrav-dash-ring circle{fill:none;stroke-width:9;stroke-linecap:round}
+  .crrav-dash-ring .bg{stroke:rgba(255,255,255,.1)}
+  .crrav-dash-ring .fg{stroke:#ff640a;stroke-dashoffset:var(--c);filter:drop-shadow(0 0 6px rgba(255,100,10,.55));
+    transition:stroke-dashoffset 1.1s cubic-bezier(.2,.8,.2,1)}
+  .crrav-dash-ring .fg.done{stroke:#6fcf7f;filter:drop-shadow(0 0 6px rgba(111,207,127,.5))}
+  .crrav-dash.anim .crrav-dash-ring .fg{stroke-dashoffset:var(--off)}
+  .crrav-dash-ring .v{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;line-height:1}
+  .crrav-dash-ring .v b{font:800 26px/1 system-ui;color:#fff;letter-spacing:-.02em}
+  .crrav-dash-ring .v b small{font-size:13px;font-weight:700;color:#bbb;margin-left:1px}
+  .crrav-dash-ring .v span{margin-top:4px;font:600 11.5px/1 system-ui;color:#9a9aa4}
+  .crrav-dash-head{min-width:0;display:flex;flex-direction:column;align-items:flex-start;gap:6px}
+  .crrav-dash-head .kick{font:800 10.5px/1 system-ui;letter-spacing:.12em;text-transform:uppercase;color:#ff9a55}
+  .crrav-dash.done .crrav-dash-head .kick{color:#8fe09a}
+  .crrav-dash-head h3{margin:0;font:800 clamp(17px,2.2vw,24px)/1.2 system-ui;color:#fff;letter-spacing:-.01em}
+  .crrav-dash-head h3 em{font-style:normal;font-weight:700;color:#ff8a3d}
+  .crrav-dash-head h3 .ok{color:#8fe09a}
+  .crrav-dash.done .crrav-dash-head h3 em{color:#a9a9b3;font-weight:600}
+  .crrav-dash-head .sub{margin:0;color:#a9a9b3;font-weight:600;font-size:12.5px}
+  .crrav-dash-cta{margin-top:6px;display:inline-flex;align-items:center;gap:8px;max-width:100%;box-sizing:border-box;
+    padding:11px 18px;border-radius:12px;background:linear-gradient(135deg,#ff7a1f,#ff5500);color:#1a0b02;text-decoration:none;
+    font:600 14px/1.2 system-ui;box-shadow:0 10px 24px -8px rgba(255,100,10,.7);transition:transform .15s,box-shadow .15s,filter .15s}
+  .crrav-dash-cta:hover{transform:translateY(-1px);filter:brightness(1.06);box-shadow:0 14px 30px -8px rgba(255,100,10,.85)}
+  .crrav-dash-cta.film{background:linear-gradient(135deg,#6fe0e8,#3fc2cc);color:#063236;box-shadow:0 10px 24px -8px rgba(94,211,220,.6)}
+  .crrav-dash-cta .ico{display:inline-flex;font-size:12px}
+  .crrav-dash-cta .ico svg{width:16px;height:16px}
+  .crrav-dash-cta b{font-weight:800}
+  .crrav-dash-cta .t{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.8;font-weight:600}
+  .crrav-dash-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+  .crrav-dash-t{display:flex;flex-direction:column;gap:3px;min-width:0;padding:11px 13px;border-radius:13px;
+    background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.07)}
+  .crrav-dash-t .k{font:700 11px/1.2 system-ui;color:#9a9aa4;text-transform:uppercase;letter-spacing:.04em}
+  .crrav-dash-t b{font:800 17px/1.2 system-ui;color:#fff}
+  .crrav-dash-t small{color:#8f8f99;font-size:11.5px;font-weight:600;line-height:1.3}
+  .crrav-dash-seasons{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px 12px}
+  .crrav-dash-s{display:flex;align-items:center;gap:8px;min-width:0;font:700 12px/1 system-ui;color:#c9c9d1}
+  .crrav-dash-s .l{flex:0 0 auto;display:inline-flex;min-width:22px;color:#9a9aa4}
+  .crrav-dash-s .l svg{width:14px;height:14px;color:#5ed3dc}
+  .crrav-dash-s .b{flex:1;height:7px;border-radius:4px;background:rgba(255,255,255,.1);overflow:hidden}
+  .crrav-dash-s .b i{display:block;height:100%;border-radius:4px;background:#ff640a}
+  .crrav-dash-s.done .b i{background:#6fcf7f}
+  .crrav-dash-s.cur .b{box-shadow:0 0 0 1px rgba(255,120,40,.7),0 0 10px -2px rgba(255,100,10,.8)}
+  .crrav-dash-s .n{flex:0 0 auto;min-width:38px;text-align:right;font-variant-numeric:tabular-nums}
+  .crrav-dash-s.done .n{color:#8fe09a}
+  .crrav-dash-s.film .n{min-width:0;text-align:left;color:#8fe6ec}
+  .crrav-dash-s.film.done .n{color:#8fe09a}
+  .crrav-dash-air{padding:13px 14px;border-radius:14px;background:rgba(255,100,10,.1);border:1px solid rgba(255,140,60,.25)}
+  .crrav-dash-air .h{display:flex;align-items:center;gap:8px;margin-bottom:10px;font:800 11.5px/1 system-ui;letter-spacing:.06em;
+    text-transform:uppercase;color:#ffb27a}
+  .crrav-dash-air .dot{width:8px;height:8px;border-radius:50%;background:#ff640a;animation:crrav-cri-pulse 1.6s ease-out infinite}
+  .crrav-dash-air .src{margin-left:auto;font:600 10.5px/1 system-ui;letter-spacing:.03em;color:#8a8a94;text-transform:none}
+  .crrav-dash-air .row{display:flex;flex-wrap:wrap;gap:12px 28px}
+  .crrav-dash-air .c{display:flex;flex-direction:column;gap:3px;min-width:0}
+  .crrav-dash-air small{font:700 10.5px/1 system-ui;color:#9a9aa4;text-transform:uppercase;letter-spacing:.05em}
+  .crrav-dash-air b{font:800 15px/1.25 system-ui;color:#fff}
+  .crrav-dash-air b.dim{font-weight:600;font-size:13px;color:#a9a9b3}
+  .crrav-dash-air .bar{display:block;width:140px;max-width:100%;height:5px;border-radius:3px;background:rgba(255,255,255,.14);overflow:hidden;margin-top:3px}
+  .crrav-dash-air .bar i{display:block;height:100%;background:#ff640a;border-radius:3px}
+  .crrav-dash-tags{display:flex;flex-wrap:wrap;gap:6px}
+  .crrav-dash-tags span{padding:4px 10px;border-radius:999px;background:rgba(255,255,255,.06);color:#bdbdc6;font:600 11.5px/1.2 system-ui}
+  /* Grand écran : progression + bouton à gauche, tuiles à droite, le reste en pleine largeur. */
+  @media (min-width:64em){
+    .crrav-dash-in{grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);padding:22px 24px;gap:18px 26px}
+    .crrav-dash-main,.crrav-dash-grid{align-self:center}
+    .crrav-dash-seasons,.crrav-dash-air,.crrav-dash-tags{grid-column:1/-1}
+    .crrav-dash-ring{width:128px;height:128px}
+    .crrav-dash-ring .v b{font-size:30px}
+    .crrav-dash-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  }
+  @media (min-width:107.5em){.crrav-dash-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+  /* Téléphone : anneau compact, bouton pleine largeur, tuiles sur 2 colonnes. */
+  @media (max-width:35.49em){
+    .crrav-dash-in{padding:14px;border-radius:16px;gap:14px}
+    .crrav-dash-main{column-gap:13px;row-gap:12px}
+    .crrav-dash-ring{grid-row:1;width:76px;height:76px}
+    .crrav-dash-ring .v b{font-size:19px}
+    .crrav-dash-ring .v span{font-size:10.5px}
+    .crrav-dash-head h3{font-size:16.5px}
+    .crrav-dash-head h3 em{display:block;font-size:14px;margin-top:2px}
+    .crrav-dash-head h3 .sep{display:none}
+    .crrav-dash-main > .crrav-dash-cta{grid-column:1 / -1;justify-self:stretch;justify-content:center;padding:12px 14px}
+    .crrav-dash-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+    .crrav-dash-t{padding:9px 11px}
+    .crrav-dash-t b{font-size:15px}
+    .crrav-dash-seasons{grid-template-columns:minmax(0,1fr)}
+  }
+  @media (prefers-reduced-motion:reduce){.crrav-dash-ring .fg{transition:none}.crrav-dash-skel,.crrav-dash-air .dot{animation:none}}
   /* fiche série : liste d'épisodes */
   .crrav-epbadge{position:absolute;top:6px;left:6px;z-index:3;display:inline-flex;align-items:center;gap:4px;padding:3px 8px;
     border-radius:999px;background:#5ed3dc;color:#07393d;font:800 11px/1 system-ui,sans-serif;pointer-events:none}
@@ -20449,6 +21101,22 @@
     .crrav-plan{margin:14px 0 0;padding:12px 13px}
     .crrav-plan-c b{font-size:14px}
   }
+  #crrav-crwarn{position:fixed;left:max(12px,env(safe-area-inset-left));bottom:max(14px,calc(env(safe-area-inset-bottom) + 8px));
+    z-index:2147482998;max-width:min(420px,calc(100vw - 24px));font:500 12.5px/1.4 system-ui,sans-serif;color:#eee}
+  .crrav-crwarn-pill{border:1px solid rgba(255,190,80,.5);border-radius:999px;padding:7px 12px;cursor:pointer;
+    background:rgba(40,30,10,.92);color:#ffcf6e;font:700 12px/1 system-ui,sans-serif;box-shadow:0 6px 18px rgba(0,0,0,.5)}
+  .crrav-crwarn-box{display:none;margin-bottom:8px;padding:12px 13px;border-radius:12px;background:rgba(22,22,28,.97);
+    border:1px solid rgba(255,190,80,.35);box-shadow:0 14px 36px rgba(0,0,0,.6);max-height:60vh;overflow:auto}
+  #crrav-crwarn.open{display:flex;flex-direction:column-reverse}
+  #crrav-crwarn.open .crrav-crwarn-box{display:block}
+  .crrav-crwarn-h{margin:0 0 8px;font-weight:700;color:#ffcf6e}
+  .crrav-crwarn-it{display:grid;grid-template-columns:1fr auto;gap:2px 10px;padding:8px 0;border-top:1px solid rgba(255,255,255,.08)}
+  .crrav-crwarn-it b{grid-column:1/-1;font-size:11.5px;color:#fff}
+  .crrav-crwarn-it span{color:#c9c9d1}
+  .crrav-crwarn-it button,.crrav-crwarn-foot button{align-self:start;border:1px solid rgba(255,255,255,.18);border-radius:999px;
+    padding:4px 9px;background:none;color:#d6d6dc;font:600 11px/1.2 system-ui,sans-serif;cursor:pointer;white-space:nowrap}
+  .crrav-crwarn-foot{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:8px;padding-top:8px;
+    border-top:1px solid rgba(255,255,255,.08);font-size:11px;color:#8a8a94}
   #crrav-appbtn{position:fixed;left:50%;bottom:max(22px,calc(env(safe-area-inset-bottom) + 12px));transform:translateX(-50%);
     z-index:2147482999;display:inline-flex;align-items:center;gap:8px;padding:14px 22px;border-radius:999px;
     background:#ff640a;color:#1a0b02;font:800 15px/1 system-ui,sans-serif;text-decoration:none;white-space:nowrap;
@@ -20474,18 +21142,18 @@
   // Le flux (.erc-feed .dynamic-feed-wrapper) est une GRILLE chez Crunchyroll, avec ses
   // propres espacements (row-gap) : on n'y touche pas, order suffit à réordonner.
   const CRP_ORDER_CSS = `
-  .dynamic-feed-wrapper > :has([data-t="history"],.erc-history-collection,[data-t="view-history-btn"],a[href$="/history"]){order:-1}`;
+  .dynamic-feed-wrapper > [data-crrav-cw]{order:-1}`;
   const CRP_FEED_CSS = `
   .crrav-cwdone,.crrav-cwnolist{display:none !important}
   .crrav-cwshow{display:block !important}
-  .erc-feed > :has(${CRP_HERO_SEL}){position:relative}
+  [data-crrav-hero]{position:relative}
   .crrav-herohide{position:absolute;top:14px;right:16px;z-index:20;border:1px solid rgba(255,255,255,.22);
     border-radius:999px;padding:7px 13px;cursor:pointer;font:700 12px/1 system-ui,sans-serif;color:#f2f2f5;
     background:rgba(20,20,26,.72);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);opacity:.75;transition:opacity .2s}
   .crrav-herohide:hover,.crrav-herohide:focus-visible{opacity:1}
   /* Bilan : ligne à part entière sous « Reprendre ⋯ Voir l'historique » (leur en-tête est un
      flex qui passe à la ligne), aligné à gauche sur le titre. */
-  [class*="feed-header"]:has(> .crrav-cwstats){flex-wrap:wrap}
+  .crrav-fhwrap{flex-wrap:wrap}
   .crrav-cwstats{order:3;flex:1 0 100%;display:flex;align-items:center;flex-wrap:wrap;gap:6px;min-height:26px;margin:8px 0 0}
   .crrav-cwstat{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:999px;white-space:nowrap;
     background:rgba(255,255,255,.08);color:#d6d6dc;font:700 12px/1.2 system-ui,sans-serif}
@@ -20502,19 +21170,27 @@
   }`;
   // Place du bilan réservée tant qu'il n'est pas encore inséré (premier rendu de Crunchyroll,
   // avant notre premier scan) : même hauteur, donc aucun saut quand il apparaît.
-  const CRP_RESERVE_CSS = `
-  .dynamic-feed-wrapper > :has([data-t="history"],.erc-history-collection) [class*="feed-header"]:not(:has(> .crrav-cwstats)){flex-wrap:wrap}
-  .dynamic-feed-wrapper > :has([data-t="history"],.erc-history-collection) [class*="feed-header"]:not(:has(> .crrav-cwstats))::after{
-    content:"";order:3;flex:1 0 100%;height:34px}`;
+  function crpReserveCss() {
+    const id = APP_STATE && APP_STATE.crCwId;
+    if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{4,64}$/.test(id)) return '';
+    return `
+  .dynamic-feed-wrapper > [data-id="${id}"] [class*="feed-header--"]:not(.crrav-fhwrap){flex-wrap:wrap}
+  .dynamic-feed-wrapper > [data-id="${id}"] [class*="feed-header--"]:not(.crrav-fhwrap)::after{content:"";order:3;flex:1 0 100%;height:34px}`;
+  }
   const CRP_FEED_FALLBACK_CSS = `
   .dynamic-feed-wrapper{display:flex;flex-direction:column;row-gap:2.5rem}
   .dynamic-feed-wrapper > *{min-width:0;max-width:100%}`;
   // Carrousel masqué : un peu d'air sous l'en-tête du site, posé par CSS dès document-start
   // (plus d'élément ajouté après coup, donc plus de saut). Limité à un flux qui A un carrousel.
+  // :has() de PROFONDEUR BORNÉE (enfants directs seulement) pour le premier rendu — coût
+  // négligeable, contrairement à un :has(descendant) sur tout le flux — doublé du marqueur
+  // [data-crrav-hero] posé par le scan si la profondeur venait à changer.
   const CRP_HIDEHERO_CSS = `
-  .erc-feed > :has(${CRP_HERO_SEL}){display:none !important}
-  .erc-feed:has(> * ${CRP_HERO_SEL}) > .dynamic-feed-wrapper{padding-top:1.75rem}
-  @media (min-width:35.5em){.erc-feed:has(> * ${CRP_HERO_SEL}) > .dynamic-feed-wrapper{padding-top:2.75rem}}`;
+  .erc-feed > div:has(> div > [class*="hero-carousel--"]),.erc-feed > [data-crrav-hero]{display:none !important}
+  .erc-feed:has(> div > div > [class*="hero-carousel--"]) > .dynamic-feed-wrapper,
+  .erc-feed:has(> [data-crrav-hero]) > .dynamic-feed-wrapper{padding-top:1.75rem}
+  @media (min-width:35.5em){.erc-feed:has(> div > div > [class*="hero-carousel--"]) > .dynamic-feed-wrapper,
+  .erc-feed:has(> [data-crrav-hero]) > .dynamic-feed-wrapper{padding-top:2.75rem}}`;
 
   function initCrPage() {
     if (CRP.started || !document.body) return;
@@ -20533,7 +21209,10 @@
     }
     document.addEventListener('click', crpOnClick, true);
     // Le nombre de cartes Reprendre visibles dépend de la largeur (--visible-count).
-    window.addEventListener('resize', crpQueueScan, { passive: true });
+    window.addEventListener('resize', () => { CRP.resized = true; crpQueueScan(); }, { passive: true });
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && CRP.dirtyHidden) { CRP.dirtyHidden = false; crpQueueScan(); }
+    });
     window.addEventListener('popstate', crpQueueScan);
     setInterval(() => safeCall(crpTickCountdowns, undefined, 'crpTickCountdowns'), 30e3);
     document.addEventListener('keydown', (e) => {
@@ -20547,10 +21226,11 @@
       if (up) crpOnUpTo(up); else if (sc) crpOnScopeDelete(sc); else crpOnDelete(del);
     }, true);
     new MutationObserver((muts) => {
+      if (CRP.dormant && !CFG.crPageEnhance) return;   // tout coupé : on n'observe plus rien
       // Nos propres ajouts ne relancent pas de scan (évite une boucle d'observation).
       for (const m of muts) {
         const t = m.target;
-        if (t && t.nodeType === 1 && t.closest && t.closest('.crrav-crinfo, .crrav-crtoast, .crrav-overlay, .crrav-cwstats, .crrav-plan, .crrav-railhid')) continue;
+        if (t && t.nodeType === 1 && t.closest && t.closest('.crrav-crinfo, .crrav-crtoast, .crrav-overlay, .crrav-cwstats, .crrav-plan, .crrav-dash, .crrav-railhid, #crrav-crwarn')) continue;
         crpQueueScan();
         return;
       }
