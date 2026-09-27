@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.100.0
+// @version      3.101.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.100.0';
+  const SCRIPT_VERSION = '3.101.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -87,6 +87,8 @@
                                // Passe à true pour les masquer.
     crPageEnhance: true,       // (v3.100.0) infos + « Supprimer de l'historique » sur les cartes
                                // épisode des pages Crunchyroll (voir initCrPage)
+    crHideHero: false,         // (v3.101.0) masque le grand carrousel « héros » de l'accueil
+                               // Crunchyroll (bouton sur la page ; choix mémorisé)
     showHero: false,           // carte « à la une » (série bientôt finie) en haut de Reste à voir,
                                // masquée par défaut — activable dans les réglages.
 
@@ -715,7 +717,10 @@
     { key: 'hideMovies', label: 'Masquer les films et one-shots', type: 'bool',
       help: 'Crunchyroll range les films dans une « série » à 1 épisode.', impact: 'suivi' },
     { key: 'crPageEnhance', label: 'Enrichir les pages Crunchyroll', type: 'bool',
-      help: 'Sur le site lui-même : infos de la série (épisodes et temps restants, films, saison en diffusion, fin de saison, saisons restantes) sous la carte « Reprendre », et « Supprimer de l’historique » dans le menu ⋮ des épisodes.',
+      help: 'Sur le site lui-même : infos de la série (épisodes et temps restants, films, saison en diffusion, fin de saison, saisons restantes) sous la carte « Reprendre », et « Supprimer de l’historique » dans le menu ⋮ des épisodes. Sur l’accueil : « Reprendre » remonté en tête, séries entièrement vues retirées de « Reprendre », et bilan (séries à jour, épisodes restants) à côté du titre.',
+      impact: 'display' },
+    { key: 'crHideHero', label: 'Masquer le carrousel d’accueil Crunchyroll', type: 'bool',
+      help: 'Le grand bandeau défilant en haut de l’accueil prend beaucoup de place. Aussi pilotable directement sur la page (bouton « Masquer » sur le carrousel, « Afficher le carrousel » à côté de « Reprendre ») ; le choix est mémorisé.',
       impact: 'display' },
     { key: 'showHero', label: 'Carte « à la une » en haut de Reste à voir', type: 'bool',
       help: 'Met en avant, tout en haut, la série commencée la plus proche de la fin. Masquée par défaut pour aller droit à la liste.',
@@ -18769,7 +18774,8 @@
   // (getSeriesPanel, getEpisodes, getPlayheads, AniList), calcul paresseux (seulement
   // pour les cartes visibles), 2 séries en parallèle au plus, mémo 3 min par série.
   const CRP_CARD = '[data-t^="episode-card"]';
-  const CRP = { info: new Map(), TTL: 3 * 60e3, ver: 0, timer: 0, io: null, started: false, queue: [], active: 0 };
+  const CRP = { info: new Map(), TTL: 3 * 60e3, ver: 0, timer: 0, io: null, started: false, queue: [], active: 0,
+    cw: new Map(), cwPending: new Set() };   // (v3.101.0) bilan « Reprendre » : sid → { ver, m }
 
   function crpIds(card) {
     const w = card.querySelector('a[href*="/watch/"]');
@@ -18956,10 +18962,14 @@
 
   function crpScan() {
     CRP.timer = 0;
+    crpInjectCss();
     if (!CFG.crPageEnhance) {
-      document.querySelectorAll('.crrav-crinfo, [data-crrav-del], .crrav-crribbon').forEach((n) => n.remove());
+      document.querySelectorAll('.crrav-crinfo, [data-crrav-del], .crrav-crribbon, .crrav-cwstats, .crrav-herohide').forEach((n) => n.remove());
+      document.querySelectorAll('.crrav-cwdone').forEach((n) => n.classList.remove('crrav-cwdone'));
       return;
     }
+    safeCall(crpHeroControls, undefined, 'crpHeroControls');
+    safeCall(crpHistory, undefined, 'crpHistory');
     document.querySelectorAll(`${CRP_CARD} [role="menu"]`).forEach((m) => safeCall(() => crpDecorateMenu(m), undefined, 'crpDecorateMenu'));
     const firstOf = new Set();
     document.querySelectorAll(CRP_CARD).forEach((card) => {
@@ -18972,6 +18982,139 @@
   }
   function crpQueueScan() {
     if (!CRP.timer) CRP.timer = setTimeout(crpScan, 250);
+  }
+
+  // ── (v3.101.0) Accueil : carrousel héros masquable, « Reprendre » en tête et épuré ──
+  // Aucun déplacement de nœud React : l'ordre passe par CSS (order:-1 dans un flex colonne,
+  // repéré par :has — déjà exigé par Crunchyroll lui-même) et le masquage aussi. Les règles
+  // « accueil » ne sont injectées que si crPageEnhance est actif ; celle du carrousel que si
+  // crHideHero l'est — pas de classe posée sur <html> (géré par React/Next).
+  const CRP_HERO_SEL = '[class*="hero-carousel__cards"]';
+  const CRP_HIST_SEL = '.dynamic-feed-wrapper [data-t="history"]';
+  function crpCssText() {
+    let t = CRP_CSS;
+    if (CFG.crPageEnhance) t += CRP_FEED_CSS;
+    if (CFG.crPageEnhance && CFG.crHideHero) t += CRP_HIDEHERO_CSS;
+    return t;
+  }
+  function crpInjectCss() {
+    const host = document.head;
+    if (!host) return false;
+    let st = document.getElementById('crrav-crp-css');
+    if (!st) { st = document.createElement('style'); st.id = 'crrav-crp-css'; host.appendChild(st); }
+    const t = crpCssText();
+    if (st.textContent !== t) st.textContent = t;
+    return true;
+  }
+  // Au plus tôt (document-start) : évite que le carrousel masqué ne s'affiche une fraction
+  // de seconde avant d'être caché. Attend juste que <head> existe.
+  function crpEarlyCss() {
+    if (!CFG.crPageEnhance) return;
+    if (crpInjectCss()) return;
+    if (typeof MutationObserver !== 'function' || !document.documentElement) return;
+    const mo = new MutationObserver(() => { if (crpInjectCss()) mo.disconnect(); });
+    mo.observe(document.documentElement, { childList: true, subtree: true });
+    setTimeout(() => mo.disconnect(), 15000);
+  }
+
+  function crpHeroWrap() {
+    const cards = document.querySelector(`.erc-feed ${CRP_HERO_SEL}`);
+    if (!cards) return null;
+    for (const n of document.querySelectorAll('.erc-feed > *')) if (n.contains(cards)) return n;
+    return null;
+  }
+  function crpHeroControls() {
+    const wrap = crpHeroWrap();
+    if (!wrap) return;
+    const b = wrap.querySelector(':scope > .crrav-herohide');
+    if (CFG.crHideHero) { if (b) b.remove(); return; }
+    if (b) return;
+    const nb = document.createElement('button');
+    nb.type = 'button';
+    nb.className = 'crrav-herohide';
+    nb.dataset.crravHero = 'hide';
+    nb.title = 'Masquer ce carrousel (choix mémorisé — réaffichable à côté de « Reprendre » ou dans les réglages)';
+    nb.textContent = '\u2715 Masquer';
+    wrap.appendChild(nb);
+  }
+  function crpToggleHero(hide) {
+    saveSettings({ crHideHero: !!hide });
+    crpInjectCss();
+    crpQueueScan();
+    if (!hide) {
+      const w = crpHeroWrap();
+      if (w && w.scrollIntoView) setTimeout(() => w.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60);
+    }
+  }
+
+  // Série « entièrement vue » : plus aucun épisode ni film à voir (série terminée, ou en
+  // diffusion mais à jour). Retirée de Reprendre, comptée dans « à jour ».
+  function crpAllSeen(m) { return !!(m && !m.epLeft && !m.filmLeft); }
+
+  function crpHistory() {
+    const coll = document.querySelector(CRP_HIST_SEL);
+    if (!coll) return;
+    const bySeries = new Map();
+    coll.querySelectorAll(CRP_CARD).forEach((card) => {
+      const { seriesId, epId } = crpIds(card);
+      if (!seriesId || !epId) return;
+      if (!bySeries.has(seriesId)) bySeries.set(seriesId, []);
+      bySeries.get(seriesId).push(card);
+    });
+    for (const [sid, cards] of bySeries) {
+      const e = CRP.cw.get(sid);
+      // Toutes les séries de Reprendre, pas seulement les visibles : il faut le total pour
+      // le bilan, et le verdict « tout vu » pour masquer les cartes hors écran aussi.
+      if ((!e || e.ver !== CRP.ver) && !CRP.cwPending.has(sid)) {
+        const ver = CRP.ver;
+        CRP.cwPending.add(sid);
+        crpSchedule(() => crpGet(sid))
+          .then((data) => { CRP.cw.set(sid, { ver, m: data && data.s ? crpModel(data.s) : null }); },
+            (err) => { safeCall.log(err, 'crpHistory'); CRP.cw.set(sid, { ver, m: null }); })
+          .finally(() => { CRP.cwPending.delete(sid); crpQueueScan(); });
+      }
+      const done = crpAllSeen(e && e.m);
+      for (const card of cards) {
+        const item = card.closest('.collection-item') || card;
+        // Une carte qu'on vient de retirer de l'historique reste visible (bandeau + bouton).
+        item.classList.toggle('crrav-cwdone', done && !card.classList.contains('crrav-crgone'));
+      }
+    }
+    crpHistoryHeader(coll, bySeries);
+  }
+
+  function crpHistoryHeader(coll, bySeries) {
+    let section = coll;
+    while (section.parentElement && !section.parentElement.classList.contains('dynamic-feed-wrapper')) section = section.parentElement;
+    const h2 = section.querySelector('h2');
+    if (!h2 || !h2.parentElement || h2.contains(coll)) return;
+    let el = h2.parentElement.querySelector(':scope > .crrav-cwstats');
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'crrav-cwstats';
+      h2.insertAdjacentElement('afterend', el);
+    }
+    const pl = (n, w) => `${n} ${w}${n > 1 ? 's' : ''}`;
+    let total = 0, loaded = 0, upToDate = 0, eps = 0, sec = 0, films = 0;
+    for (const sid of bySeries.keys()) {
+      total++;
+      const e = CRP.cw.get(sid);
+      if (!e) continue;
+      loaded++;
+      if (!e.m) continue;
+      if (crpAllSeen(e.m)) upToDate++;
+      else { eps += e.m.epLeft; sec += e.m.secLeft; films += e.m.filmLeft; }
+    }
+    const parts = [];
+    if (loaded) {
+      parts.push(`<span class="crrav-cwstat ok" title="Tout est vu (série terminée, ou à jour d’une série en diffusion) — retirées de Reprendre">\u2713 ${pl(upToDate, 'série')} à jour</span>`);
+      parts.push(`<span class="crrav-cwstat" title="Total des épisodes restant à voir dans les séries de Reprendre">${pl(eps, 'épisode')} restant${eps > 1 ? 's' : ''}${sec ? ` · ${fmtDuration(sec)}` : ''}</span>`);
+      if (films) parts.push(`<span class="crrav-cwstat film">${TICK_MOVIE_ICO}${pl(films, 'film')}</span>`);
+    }
+    if (loaded < total) parts.push(`<span class="crrav-cwstat dim">${loaded}/${total}\u2026</span>`);
+    if (CFG.crHideHero) parts.push('<button type="button" class="crrav-cwstat btn" data-crrav-hero="show" title="Réafficher le grand carrousel en haut de l’accueil">Afficher le carrousel</button>');
+    const html = parts.join('');
+    if (el.dataset.html !== html) { el.dataset.html = html; el.innerHTML = html; }
   }
 
   // Invalide une série (après une action) et redessine ses blocs avec des données fraîches.
@@ -19068,6 +19211,13 @@
 
   function crpOnClick(e) {
     if (!CFG.crPageEnhance || !e.target || !e.target.closest) return;
+    const hero = e.target.closest('[data-crrav-hero]');
+    if (hero) {
+      e.preventDefault();
+      e.stopPropagation();
+      crpToggleHero(hero.dataset.crravHero === 'hide');
+      return;
+    }
     const del = e.target.closest('[data-crrav-del]');
     if (del) {
       e.preventDefault();
@@ -19116,7 +19266,11 @@
   .crrav-cri-chip.film{background:rgba(94,211,220,.15);color:#8fe6ec}
   .crrav-crdel.armed{color:#ff7b7b !important;font-weight:700 !important}
   .crrav-crgone > :not(.crrav-crribbon){opacity:.4;filter:grayscale(.7);transition:opacity .4s,filter .4s}
-  .crrav-crribbon{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:8px;font-size:12px;font-weight:700;color:#ffb27a}
+  /* (v3.101.0) Carte retirée de l'historique : l'aperçu au survol de Crunchyroll (qui recouvre
+     toute la carte, lien plein cadre compris) masquait le bandeau et rendait « Actualiser la
+     page » incliquable — on le coupe sur cette carte, et le bandeau passe au premier plan. */
+  .crrav-crgone > [class*="hover-info"],.crrav-crgone [data-t="hover-component"]{display:none !important}
+  .crrav-crribbon{position:relative;z-index:6;display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:8px;font-size:12px;font-weight:700;color:#ffb27a}
   .crrav-crribbon button,.crrav-crtoast button{border:0;border-radius:999px;padding:6px 12px;cursor:pointer;
     font:700 12px/1 inherit;background:#ff640a;color:#1a0b02}
   .crrav-crtoast{position:fixed;left:50%;bottom:max(18px,env(safe-area-inset-bottom));z-index:2147483000;
@@ -19141,12 +19295,37 @@
     .crrav-cri-chip.live::before,.crrav-cri-skel{animation:none}
   }`;
 
+  const CRP_FEED_CSS = `
+  .dynamic-feed-wrapper{display:flex;flex-direction:column}
+  .dynamic-feed-wrapper > *{min-width:0;max-width:100%}
+  .dynamic-feed-wrapper > :has([data-t="history"]){order:-1}
+  .crrav-cwdone{display:none !important}
+  .erc-feed > :has(${CRP_HERO_SEL}){position:relative}
+  .crrav-herohide{position:absolute;top:14px;right:16px;z-index:20;border:1px solid rgba(255,255,255,.22);
+    border-radius:999px;padding:7px 13px;cursor:pointer;font:700 12px/1 system-ui,sans-serif;color:#f2f2f5;
+    background:rgba(20,20,26,.72);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);opacity:.75;transition:opacity .2s}
+  .crrav-herohide:hover,.crrav-herohide:focus-visible{opacity:1}
+  .crrav-cwstats{display:inline-flex;align-items:center;flex-wrap:wrap;gap:6px;margin:0 auto 0 14px;vertical-align:middle}
+  .crrav-cwstat{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:999px;white-space:nowrap;
+    background:rgba(255,255,255,.08);color:#d6d6dc;font:700 12px/1.2 system-ui,sans-serif}
+  .crrav-cwstat.ok{background:rgba(111,207,127,.15);color:#8fe09a}
+  .crrav-cwstat.film{background:rgba(94,211,220,.15);color:#8fe6ec}
+  .crrav-cwstat.film svg{width:12px;height:12px}
+  .crrav-cwstat.dim{background:none;color:#8a8a94;font-weight:600}
+  .crrav-cwstat.btn{border:1px solid rgba(255,255,255,.18);cursor:pointer;background:none;color:#ffb27a}
+  .crrav-cwstat.btn:hover{background:rgba(255,100,10,.15)}
+  @media (max-width:559px){
+    .crrav-cwstats{margin:6px 0 0;flex-basis:100%}
+    .crrav-cwstat{font-size:11px;padding:3px 8px}
+    .crrav-herohide{top:10px;right:10px;padding:6px 10px}
+  }`;
+  const CRP_HIDEHERO_CSS = `
+  .erc-feed > :has(${CRP_HERO_SEL}){display:none !important}`;
+
   function initCrPage() {
     if (CRP.started || !document.body) return;
     CRP.started = true;
-    let st = document.getElementById('crrav-crp-css');
-    if (!st) { st = document.createElement('style'); st.id = 'crrav-crp-css'; document.head.appendChild(st); }
-    st.textContent = CRP_CSS;
+    crpInjectCss();
     if (typeof IntersectionObserver === 'function') {
       CRP.io = new IntersectionObserver((entries) => {
         for (const en of entries) {
@@ -19170,7 +19349,7 @@
       // Nos propres ajouts ne relancent pas de scan (évite une boucle d'observation).
       for (const m of muts) {
         const t = m.target;
-        if (t && t.nodeType === 1 && t.closest && t.closest('.crrav-crinfo, .crrav-crtoast, .crrav-overlay')) continue;
+        if (t && t.nodeType === 1 && t.closest && t.closest('.crrav-crinfo, .crrav-crtoast, .crrav-overlay, .crrav-cwstats')) continue;
         crpQueueScan();
         return;
       }
@@ -19539,6 +19718,7 @@
     });
   }, undefined, 'debug-api-init');
 
+  safeCall(crpEarlyCss, undefined, 'crpEarlyCss');   // (v3.101.0) carrousel masqué dès le 1er rendu
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', boot, { once: true });
     setTimeout(() => { if (!fab) boot(); }, 3000);
