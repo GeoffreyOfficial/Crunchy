@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.97.0
+// @version      3.98.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.97.0';
+  const SCRIPT_VERSION = '3.98.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -1258,14 +1258,51 @@
     return (APP_STATE.airsnap && typeof APP_STATE.airsnap === 'object') ? APP_STATE.airsnap : {};
   }
   let AIR_SNAP = loadAirSnapshot();
+  // (fix v3.98.0) Trois corrections du badge « Nouvel épisode » :
+  //  - Première rencontre : la série est inscrite TOUT DE SUITE dans l'empreinte (sans
+  //    badge cette fois-là). Avant, elle n'y entrait qu'à la fermeture explicite du
+  //    panneau (✕/Échap) — qu'on ne fait presque jamais (on touche une carte, on quitte la
+  //    page) : une série ajoutée n'avait donc JAMAIS de référence, et aucun de ses
+  //    nouveaux épisodes n'était signalé.
+  //  - Le badge exige un épisode NON VU sorti après l'empreinte : un épisode déjà regardé
+  //    ailleurs (appli, TV) ne déclenche plus « Nouvel épisode ».
+  //  - markNew() est aussi appliqué aux instantanés au chargement (isNew n'y est plus
+  //    sauvegardé) : plus d'ancien badge réaffiché le temps du scan.
+  // Un épisode sans date (`air` absent, ex. instantané d'avant v3.98.0) ne peut pas prouver
+  // qu'il est nouveau → pas de badge (le scan qui suit recalcule avec les vraies données).
   function markNew(list) {
+    let seeded = false;
     for (const s of list) {
       const prev = AIR_SNAP[s.id];
-      // Première rencontre : pas de pastille, sinon tout serait « nouveau » au premier lancement.
-      s.isNew = prev != null && s.maxAir != null && s.maxAir > prev;
+      if (prev == null) {
+        if (s.maxAir != null) { AIR_SNAP[s.id] = s.maxAir; seeded = true; }
+        s.isNew = false;
+        continue;
+      }
+      s.isNew = s.maxAir != null && s.maxAir > prev && Array.isArray(s.episodes)
+        && s.episodes.some((e) => !e.seen && e.air && e.air > prev);
+    }
+    if (seeded) {
+      APP_STATE.airsnap = AIR_SNAP;
+      persistState(APP_STATE);
     }
     return list;
   }
+  // (fix v3.98.0) Acquittement d'UNE série : appelé quand tu ouvres sa fiche/son épisode
+  // depuis une carte — ce geste quitte généralement la page sans passer par close().
+  function ackAirSnapshot(id) {
+    const s = STATE.series.find((x) => x.id === id) || STATE.orphan.series.find((x) => x.id === id);
+    if (!s || s.maxAir == null || AIR_SNAP[id] === s.maxAir) return;
+    AIR_SNAP = { ...AIR_SNAP, [id]: s.maxAir };
+    APP_STATE.airsnap = AIR_SNAP;
+    persistState(APP_STATE);
+  }
+  // (fix v3.98.0) Quitter la page (navigation, rechargement) panneau ouvert = fin de visite,
+  // au même titre que close(). Volontairement PAS sur un simple passage en arrière-plan
+  // (visibilitychange) : changer d'appli deux secondes ne doit pas effacer les badges.
+  window.addEventListener('pagehide', () => {
+    if (root && root.style.display !== 'none') safeCall(commitAirSnapshot, undefined, 'commitAirSnapshot:pagehide');
+  });
   function commitAirSnapshot() {
     const snap = { ...AIR_SNAP };
     for (const s of [...STATE.series, ...STATE.orphan.series]) {
@@ -2637,10 +2674,11 @@
   // audio (le gros du volume) ne servent qu'au calcul, jamais à l'affichage.
   function snapshotSave() {
     safeCall(() => {
-      cacheSet('snapshot', STATE.series.map((s) => ({
+      cacheSet('snapshot', STATE.series.map(({ isNew, ...s }) => ({   // (v3.98.0) isNew recalculé au chargement
         ...s,
         episodes: s.episodes.map((e) => ({
           n: e.n, season: e.season, title: e.title, dur: e.dur, seen: e.seen, started: e.started,
+          air: e.air,   // (v3.98.0) nécessaire à markNew() sur l'instantané
         })),
         next: s.next ? { id: s.next.id, season: s.next.season, n: s.next.n, dur: s.next.dur } : null,
       })));
@@ -2659,10 +2697,11 @@
   // raison de partager le même instantané.
   function orphanSnapshotSave() {
     safeCall(() => {
-      cacheSet('snapshotOrphan', STATE.orphan.series.map((s) => ({
+      cacheSet('snapshotOrphan', STATE.orphan.series.map(({ isNew, ...s }) => ({   // (v3.98.0) isNew recalculé au chargement
         ...s,
         episodes: s.episodes.map((e) => ({
           n: e.n, season: e.season, title: e.title, dur: e.dur, seen: e.seen, started: e.started,
+          air: e.air,   // (v3.98.0) nécessaire à markNew() sur l'instantané
         })),
         next: s.next ? { id: s.next.id, season: s.next.season, n: s.next.n, dur: s.next.dur } : null,
       })));
@@ -2679,7 +2718,7 @@
     if (STATE.orphan.series.length || STATE.orphan.loading) return;
     const snap = orphanSnapshotLoad();
     if (snap) {
-      STATE.orphan.series = snap;
+      STATE.orphan.series = markNew(snap);
       STATE.orphan.fromSnapshot = true;
       LOG(`Hors listes — instantané affiché : ${snap.length} séries — actualisation en arrière-plan`);
     }
@@ -17483,6 +17522,13 @@
           saveSessionNav(SESSION_NAV);
         }, 400);
       }, { passive: true });
+      // (fix v3.98.0) Ouvrir une série depuis sa carte (jaquette, titre, reprise) acquitte
+      // son badge « Nouvel épisode » — phase de capture, indépendant du gestionnaire principal.
+      root.addEventListener('click', (e) => {
+        const a = e.target.closest('a[href]');
+        const cardEl = a && a.closest('[data-cardid]');
+        if (cardEl) safeCall(() => ackAirSnapshot(cardEl.dataset.cardid), undefined, 'ackAirSnapshot');
+      }, true);
       root.addEventListener('click', (e) => {
         // (fix v3.49.0) Bouton « Annuler » du toast (voir showToast) — en premier dans la
         // chaîne : le toast est un enfant direct de root, hors du flux normal du contenu.
@@ -18360,7 +18406,7 @@
     if (!STATE.series.length && !STATE.loading) {
       const snap = snapshotLoad();
       if (snap) {
-        STATE.series = snap;
+        STATE.series = markNew(snap);
         STATE.fromSnapshot = true;
         LOG(`instantané affiché : ${snap.length} séries — actualisation en arrière-plan`);
       }
