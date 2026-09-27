@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.98.0
+// @version      3.100.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.98.0';
+  const SCRIPT_VERSION = '3.100.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -85,6 +85,8 @@
                                // (résultats identiques aux lots de 100, 5× moins de requêtes)
     hideMovies: false,         // Crunchyroll range les films dans une « série » à 1 épisode.
                                // Passe à true pour les masquer.
+    crPageEnhance: true,       // (v3.100.0) infos + « Supprimer de l'historique » sur les cartes
+                               // épisode des pages Crunchyroll (voir initCrPage)
     showHero: false,           // carte « à la une » (série bientôt finie) en haut de Reste à voir,
                                // masquée par défaut — activable dans les réglages.
 
@@ -712,6 +714,9 @@
       impact: 'display' },
     { key: 'hideMovies', label: 'Masquer les films et one-shots', type: 'bool',
       help: 'Crunchyroll range les films dans une « série » à 1 épisode.', impact: 'suivi' },
+    { key: 'crPageEnhance', label: 'Enrichir les pages Crunchyroll', type: 'bool',
+      help: 'Sur le site lui-même : infos de la série (épisodes et temps restants, films, saison en diffusion, fin de saison, saisons restantes) sous la carte « Reprendre », et « Supprimer de l’historique » dans le menu ⋮ des épisodes.',
+      impact: 'display' },
     { key: 'showHero', label: 'Carte « à la une » en haut de Reste à voir', type: 'bool',
       help: 'Met en avant, tout en haut, la série commencée la plus proche de la fin. Masquée par défaut pour aller droit à la liste.',
       impact: 'suivi' },
@@ -2679,6 +2684,7 @@
         episodes: s.episodes.map((e) => ({
           n: e.n, season: e.season, title: e.title, dur: e.dur, seen: e.seen, started: e.started,
           air: e.air,   // (v3.98.0) nécessaire à markNew() sur l'instantané
+          id: e.id,     // (v3.99.0) liens directs vers les films (bouton clap / menu)
         })),
         next: s.next ? { id: s.next.id, season: s.next.season, n: s.next.n, dur: s.next.dur } : null,
       })));
@@ -2702,6 +2708,7 @@
         episodes: s.episodes.map((e) => ({
           n: e.n, season: e.season, title: e.title, dur: e.dur, seen: e.seen, started: e.started,
           air: e.air,   // (v3.98.0) nécessaire à markNew() sur l'instantané
+          id: e.id,     // (v3.99.0) liens directs vers les films (bouton clap / menu)
         })),
         next: s.next ? { id: s.next.id, season: s.next.season, n: s.next.n, dur: s.next.dur } : null,
       })));
@@ -8359,7 +8366,64 @@
   const TICK_CHECK_ICO = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5 9.5 18 20 6"/></svg>';
   const TICK_MOVIE_ICO = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5 5 4h3L6 8.5M9 8.5 11 4h3L12 8.5M15 8.5 17 4h3L18 8.5"/><rect x="3" y="8.5" width="18" height="11.5" rx="1.5"/></svg>';
 
+  // (v3.99.0) Films séparés des épisodes. Détection INCHANGÉE (voir isMovie plus bas, v3.90.0) :
+  // un groupe « saison » Crunchyroll d'UN SEUL élément de 60 min ou plus est un film. Quand une
+  // série a des films ET des épisodes, la barre, le compteur « ép. » et le bouton principal ne
+  // parlent plus que des épisodes ; les films ont leur propre compteur (🎬 vus/total) et leur
+  // bouton clap (voir movieBtn / openMovieMenu). Une série faite uniquement de films (ou sans
+  // film) garde exactement l'affichage d'avant → null. s.total/s.seen/s.remaining (tri,
+  // sections, Stats, filtres) ne changent PAS : ils comptent toujours tout le contenu.
+  // Ordre des films = ordre des saisons Crunchyroll (celui de s.episodes), en pratique l'ordre
+  // de sortie.
+  const MOVIE_SPLIT_CACHE = new WeakMap();
+  function splitMovies(s) {
+    if (!s || !Array.isArray(s.episodes)) return null;
+    if (MOVIE_SPLIT_CACHE.has(s)) return MOVIE_SPLIT_CACHE.get(s);
+    const bySeason = new Map();
+    for (const e of s.episodes) {
+      if (!bySeason.has(e.season)) bySeason.set(e.season, []);
+      bySeason.get(e.season).push(e);
+    }
+    const movieSeasons = new Set([...bySeason].filter(([, g]) => g.length === 1 && g[0].dur >= 3600).map(([k]) => k));
+    const movies = s.episodes.filter((e) => movieSeasons.has(e.season));
+    const eps = s.episodes.filter((e) => !movieSeasons.has(e.season));
+    const res = (movies.length && eps.length) ? {
+      movies, eps,
+      epTotal: eps.length, epSeen: eps.filter((e) => e.seen).length,
+      filmTotal: movies.length, filmSeen: movies.filter((e) => e.seen).length,
+      epNext: eps.find((e) => e.started && !e.seen) || eps.find((e) => !e.seen) || null,
+      filmNext: movies.find((e) => e.started && !e.seen) || movies.find((e) => !e.seen) || null,
+    } : null;
+    MOVIE_SPLIT_CACHE.set(s, res);
+    return res;
+  }
+  const filmTitle = (e) => ((e && e.title) || '').trim() || 'Film';
+  // Libellé de gauche de la ligne d'infos : « 47/59 ép. » quand les films sont séparés.
+  function seenLabel(s) {
+    const sp = splitMovies(s);
+    return sp ? `${sp.epSeen}/${sp.epTotal} ép.${plannedTotalHint(s)}` : `${s.seen}/${s.total} vus${plannedTotalHint(s)}`;
+  }
+  // Compteur films « 🎬 1/3 » (vus/total). En vue liste c'est aussi le bouton qui ouvre le menu.
+  function filmCount(s, asButton) {
+    const sp = splitMovies(s);
+    if (!sp) return '';
+    const label = `${sp.filmSeen}/${sp.filmTotal}`;
+    const title = `${sp.filmSeen} film${sp.filmSeen > 1 ? 's' : ''} vu${sp.filmSeen > 1 ? 's' : ''} sur ${sp.filmTotal}`;
+    return asButton
+      ? `<button type="button" class="crrav-filmcount crrav-filmcount-btn" data-movies="${s.id}" title="${title}" aria-label="${title}">${TICK_MOVIE_ICO}${label}</button>`
+      : `<span class="crrav-filmcount" title="${title}">${TICK_MOVIE_ICO}${label}</span>`;
+  }
   function ticks(s) {
+    const sp = splitMovies(s);
+    if (!sp) return ticksCore(s);
+    const view = {
+      ...s, episodes: sp.eps, total: sp.epTotal, seen: sp.epSeen, remaining: sp.epTotal - sp.epSeen,
+      pct: Math.round((sp.epSeen / sp.epTotal) * 100),
+      targetSeason: sp.epNext ? sp.epNext.season : s.targetSeason,
+    };
+    return ticksCore(view);
+  }
+  function ticksCore(s) {
     if (s.total > 120) {
       // (4) dégradé animé tant qu'il reste des épisodes à voir (pct < 100).
       return `<div class="crrav-bar${s.pct < 100 ? ' crrav-bar-active' : ''}"><i style="width:${s.pct}%"></i></div>`;
@@ -8649,8 +8713,13 @@
         <a class="crrav-hero-title" href="${seriesUrl}">${favStar(s, 'crrav-favstar')}${escapeHtml(s.title)}</a>
         <div class="crrav-hero-meta">
           ${s.rating != null ? `<span class="crrav-hero-star">★ ${s.rating.toFixed(1)}</span>` : ''}
-          <span>${s.seen}/${s.total} vus${plannedTotalHint(s)}</span>
-          <span class="crrav-hero-left">${s.remaining} épisode${s.remaining > 1 ? 's' : ''} · ${fmtDuration(s.secLeft)}</span>
+          <span>${seenLabel(s)}</span>
+          <span class="crrav-hero-left">${(() => {
+            // (v3.99.0) films séparés : on compte les épisodes restants, les films à part (🎬)
+            const sp = splitMovies(s);
+            const n = sp ? sp.epTotal - sp.epSeen : s.remaining;
+            return `${n ? `${n} épisode${n > 1 ? 's' : ''}` : ''}${sp && sp.filmTotal > sp.filmSeen ? `${n ? ' + ' : ''}${sp.filmTotal - sp.filmSeen} film${sp.filmTotal - sp.filmSeen > 1 ? 's' : ''}` : ''} · ${fmtDuration(s.secLeft)}`;
+          })()}</span>
         </div>
         ${ticks(s)}
         ${resumeLink(s, 'crrav-hero-btn')}
@@ -8781,6 +8850,23 @@
   }
 
   function resumeLink(s, cls) {
+    // (v3.99.0) Films séparés : le bouton vise le prochain ÉPISODE ; un film seulement quand
+    // tous les épisodes sont vus (« ▶ Film · Titre »). Instantané d'avant v3.99.0 sans id
+    // d'épisode → retombe sur l'ancien comportement (s.next garde toujours son id).
+    const sp = splitMovies(s);
+    const tgt = sp ? (sp.epNext || sp.filmNext) : null;
+    if (sp && !tgt) return '';
+    if (tgt && tgt.id) {
+      const isFilm = !sp.epNext;
+      const verb = isFilm ? (tgt.started ? 'Reprendre' : 'Film')
+        : sp.epSeen === 0 && !tgt.started ? 'Commencer' : tgt.started ? 'Reprendre' : 'Suivant';
+      const what = isFilm ? filmTitle(tgt) : `S${tgt.season} E${tgt.n}`;
+      const full = `▶ ${verb} · ${what}`;
+      // Verbe dans son propre span : masqué sur carte téléphone quand le clap prend de la
+      // place dans la rangée (voir .crrav-rverb) — il reste « ▶ S1 E9 », le détail complet
+      // demeurant dans title/aria-label.
+      return `<a class="${cls}${isFilm ? ' movie' : ''}" href="${crWatchUrl(tgt.id)}" title="${escapeHtml(full)}" aria-label="${escapeHtml(full)}">▶ <span class="crrav-rverb">${verb} · </span>${escapeHtml(what)}</a>`;
+    }
     if (!s.next) return '';
     // (fix v3.94.0) « Épisode suivant » raccourci en « Suivant » : sur une carte étroite
     // (mobile), le libellé complet forçait le bouton sur 2 lignes (retour direct, capture
@@ -8794,6 +8880,24 @@
     // masque tout texte visible (icône seule) — sans ça, plus aucun moyen de connaître
     // l'épisode ciblé sans cliquer, ni pour un lecteur d'écran de savoir où mène le lien.
     return `<a class="${cls}" href="${crWatchUrl(s.next.id)}" title="${escapeHtml(full)}" aria-label="${escapeHtml(full)}">${full}</a>`;
+  }
+
+  // (v3.99.0) Bouton clap des films (cartes, à côté de la baguette). Badge = films restants
+  // (commencés compris), coche verte quand tout est vu. Un seul film, pas encore vu → lien
+  // direct vers lui ; sinon il ouvre la liste des films (openMovieMenu).
+  function movieBtn(s) {
+    const sp = splitMovies(s);
+    if (!sp) return '';
+    const left = sp.filmTotal - sp.filmSeen;
+    const badge = left ? `<span class="crrav-moviebadge">${left}</span>`
+      : '<span class="crrav-moviebadge">✓</span>';
+    const one = sp.filmTotal === 1 && left === 1 && sp.movies[0].id ? sp.movies[0] : null;
+    if (one) {
+      const t = `Film : ${filmTitle(one)} · ${fmtDuration(one.dur)}`;
+      return `<a class="crrav-moviebtn" href="${crWatchUrl(one.id)}" title="${escapeHtml(t)}" aria-label="${escapeHtml(t)}">${TICK_MOVIE_ICO}${badge}</a>`;
+    }
+    const t = left ? `${left} film${left > 1 ? 's' : ''} à voir sur ${sp.filmTotal}` : `Films : tous vus (${sp.filmTotal})`;
+    return `<button type="button" class="crrav-moviebtn${left ? '' : ' done'}" data-movies="${s.id}" title="${t}" aria-label="${t}">${TICK_MOVIE_ICO}${badge}</button>`;
   }
 
   // Bouton « séries similaires » : présent sur les cartes Reste à voir / Hors listes.
@@ -8884,11 +8988,12 @@
         <a class="crrav-title" href="${seriesUrl}">${favStar(s, 'crrav-favstar')}${escapeHtml(s.title)}</a>
         ${ticks(s)}
         <div class="crrav-meta">
-          <span>${s.seen}/${s.total} vus${plannedTotalHint(s)}</span>
-          <span class="crrav-left">${done ? '' : fmtDuration(s.secLeft)}</span>
+          <span>${seenLabel(s)}</span>
+          ${splitMovies(s) ? filmCount(s, false) : `<span class="crrav-left">${done ? '' : fmtDuration(s.secLeft)}</span>`}
         </div>
         <div class="crrav-actrow">
           ${resumeLink(s, 'crrav-resume')}
+          ${movieBtn(s)}
           ${similarBtn(s)}
         </div>
         ${pinfo}
@@ -8933,8 +9038,8 @@
         </div>
         ${ticks(s)}
         <div class="crrav-meta">
-          <span class="crrav-lseen">${s.seen}/${s.total} vus${plannedTotalHint(s)}</span>
-          <span class="crrav-left">${done ? '' : `${s.remaining} restants · ${fmtDuration(s.secLeft)}`}</span>
+          <span class="crrav-lseen">${seenLabel(s)}${splitMovies(s) ? ` · ${filmCount(s, true)}` : ''}</span>
+          <span class="crrav-left">${done ? '' : splitMovies(s) ? fmtDuration(s.secLeft) : `${s.remaining} restants · ${fmtDuration(s.secLeft)}`}</span>
         </div>
         <div class="crrav-lplanned">${pinfo}</div>
       </div>
@@ -10509,6 +10614,62 @@
      exacte de .crrav-resume (padding 7px×2 + font 11.5px × line-height 1.2), pour garder
      le même gabarit avec ou sans voisin. */
   .crrav-actrow .crrav-similar{min-height:calc(11.5px * 1.2 + 14px)}
+  /* (v3.99.0) Films séparés des épisodes : bouton clap, compteur 🎬, bouton principal film,
+     menu des films (popover ≥560px, panneau bas sur téléphone). Turquoise = même teinte que
+     les blocs film de ticks() (.season-block.movie / .movie-pending). */
+  .crrav-moviebtn{flex:0 0 auto;width:36px;min-height:calc(11.5px * 1.2 + 14px);box-sizing:border-box;
+    border-radius:9px;border:1px solid rgba(94,211,220,.42);background:rgba(94,211,220,.14);
+    color:#5ed3dc;display:inline-flex;align-items:center;justify-content:center;position:relative;
+    cursor:pointer;padding:0;text-decoration:none;-webkit-tap-highlight-color:transparent;
+    transition:transform .15s ease,background .15s ease}
+  .crrav-moviebtn:hover{background:rgba(94,211,220,.24)}
+  .crrav-moviebtn:active{transform:scale(.94)}
+  .crrav-moviebtn svg{width:17px;height:17px}
+  .crrav-moviebtn.done{border-color:rgba(255,255,255,.12);background:rgba(255,255,255,.05);color:#7a7a84}
+  .crrav-moviebadge{position:absolute;top:-6px;right:-6px;min-width:15px;height:15px;padding:0 4px;
+    box-sizing:border-box;border-radius:999px;background:#e8f8f9;color:#0b4a4f;
+    font:700 10px/15px system-ui;text-align:center;pointer-events:none}
+  .crrav-moviebtn.done .crrav-moviebadge{background:#6fcf7f;color:#0d3a15}
+  .crrav-filmcount{display:inline-flex;align-items:center;gap:3px;color:#8fe6ec;white-space:nowrap}
+  .crrav-filmcount svg{width:12px;height:12px;flex:0 0 12px}
+  .crrav-filmcount-btn{background:none;border:0;padding:0;font:inherit;cursor:pointer;text-decoration:underline dotted}
+  .crrav-resume.movie,.crrav-hero-btn.movie,.crrav-lresume.movie{background:#5ed3dc;color:#07393d}
+  /* Carte téléphone : reprendre + clap + baguette sur ~150px — boutons carrés resserrés et
+     verbe du bouton principal masqué (« ▶ S1 E9 ») pour que la cible reste lisible. */
+  @media (max-width:559px){
+    .crrav-actrow:has(.crrav-moviebtn){gap:4px}
+    .crrav-actrow:has(.crrav-moviebtn) .crrav-moviebtn,
+    .crrav-actrow:has(.crrav-moviebtn) .crrav-similar{width:30px}
+    .crrav-actrow:has(.crrav-moviebtn) .crrav-rverb{display:none}
+  }
+  .crrav-mm{position:fixed;inset:0;z-index:85}
+  .crrav-mm-bd{position:absolute;inset:0;background:transparent}
+  .crrav-mm-panel{position:absolute;width:290px;max-width:calc(100vw - 16px);box-sizing:border-box;
+    max-height:min(70vh,440px);overflow:auto;background:#1c1c23;border:1px solid rgba(255,255,255,.1);
+    border-radius:12px;padding:8px;color:#eee;font:500 12.5px/1.3 system-ui;
+    box-shadow:0 14px 36px rgba(0,0,0,.55)}
+  .crrav-mm.sheet .crrav-mm-bd{background:rgba(6,6,8,.6)}
+  .crrav-mm.sheet .crrav-mm-panel{left:0;right:0;bottom:0;width:auto;max-width:none;max-height:75vh;
+    border-radius:16px 16px 0 0;border-bottom:0;padding:6px 12px max(14px,env(safe-area-inset-bottom))}
+  .crrav-mm-grab{display:none;width:36px;height:4px;border-radius:2px;background:#444;margin:4px auto 8px}
+  .crrav-mm.sheet .crrav-mm-grab{display:block}
+  .crrav-mm-head{display:flex;justify-content:space-between;align-items:center;gap:8px;
+    padding:2px 4px 6px;color:#8fe6ec;font-weight:700}
+  .crrav-mm-x{background:none;border:0;color:#9a9aa6;font:600 15px/1 system-ui;cursor:pointer;padding:6px}
+  .crrav-mm-it{display:flex;align-items:center;gap:10px;padding:8px 6px;border-radius:8px}
+  .crrav-mm.sheet .crrav-mm-it{padding:11px 4px}
+  .crrav-mm-it:hover{background:rgba(255,255,255,.05)}
+  .crrav-mm-st{width:18px;height:18px;flex:0 0 18px;border-radius:50%;box-sizing:border-box;
+    display:flex;align-items:center;justify-content:center;font:700 11px/1 system-ui}
+  .crrav-mm-st.seen{background:rgba(111,207,127,.2);color:#6fcf7f}
+  .crrav-mm-st.half{border:2px solid #5ed3dc;background:linear-gradient(90deg,#5ed3dc 50%,transparent 50%)}
+  .crrav-mm-st.todo{border:2px solid #5ed3dc}
+  .crrav-mm-n{flex:1;min-width:0}
+  .crrav-mm-n b{display:block;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .crrav-mm-n small{color:#9a9aa6;font-size:11px}
+  .crrav-mm-ac{flex:0 0 auto;text-decoration:none;border-radius:999px;padding:6px 11px;
+    font:700 11px/1 system-ui;background:#5ed3dc;color:#07393d}
+  .crrav-mm-ac.again{background:rgba(255,255,255,.08);color:#c9c9d2}
 
   /* (fix v3.90.0) plus de hauteur/overflow fixes ici : un bloc fusionné « libellé »
      (voir .season-block.labeled) est plus haut que la ligne de cases (6px) et doit
@@ -17529,6 +17690,14 @@
         const cardEl = a && a.closest('[data-cardid]');
         if (cardEl) safeCall(() => ackAirSnapshot(cardEl.dataset.cardid), undefined, 'ackAirSnapshot');
       }, true);
+      // (v3.99.0) Bouton clap / compteur 🎬 → menu des films (capture : rien d'autre à faire).
+      root.addEventListener('click', (e) => {
+        const b = e.target.closest('[data-movies]');
+        if (!b) return;
+        e.preventDefault();
+        e.stopPropagation();
+        safeCall(() => openMovieMenu(b.dataset.movies, b), undefined, 'openMovieMenu');
+      }, true);
       root.addEventListener('click', (e) => {
         // (fix v3.49.0) Bouton « Annuler » du toast (voir showToast) — en premier dans la
         // chaîne : le toast est un enfant direct de root, hors du flux normal du contenu.
@@ -18488,7 +18657,71 @@
     }, Math.max(1, CFG.refreshMinutes) * 60e3);
   }
 
+  // (v3.99.0) Menu des films d'une série (bouton clap / compteur 🎬 de la vue liste). Nœud
+  // posé directement sur `root` (comme le toast) : hors de .crrav-content, donc jamais effacé
+  // par un re-rendu, et les liens profitent du gestionnaire de clic de root (liens appli CR).
+  // Popover ancré au bouton sur grand écran, panneau qui monte du bas sur téléphone (<560px).
+  function closeMovieMenu() {
+    const el = root && root.querySelector('#crrav-moviemenu');
+    if (el) el.remove();
+  }
+  function openMovieMenu(id, anchor) {
+    closeMovieMenu();
+    const s = STATE.series.find((x) => x.id === id) || STATE.orphan.series.find((x) => x.id === id);
+    const sp = splitMovies(s);
+    if (!root || !sp) return;
+    const items = sp.movies.map((m) => {
+      const year = m.air ? new Date(m.air).getFullYear() : null;
+      const st = m.seen ? 'vu' : m.started ? 'commencé' : '';
+      const info = [year, fmtDuration(m.dur), st].filter(Boolean).join(' · ');
+      const href = m.id ? crWatchUrl(m.id) : crSeriesUrl(s.id, s.slug);
+      const act = m.seen ? 'Revoir' : m.started ? 'Reprendre' : 'Regarder';
+      return `<div class="crrav-mm-it">
+        <span class="crrav-mm-st ${m.seen ? 'seen' : m.started ? 'half' : 'todo'}">${m.seen ? '✓' : ''}</span>
+        <div class="crrav-mm-n"><b title="${escapeHtml(filmTitle(m))}">${escapeHtml(filmTitle(m))}</b><small>${escapeHtml(info)}</small></div>
+        <a class="crrav-mm-ac${m.seen ? ' again' : ''}" href="${href}" data-mm-go>${act}</a>
+      </div>`;
+    }).join('');
+    const sheet = window.matchMedia ? window.matchMedia('(max-width:559px)').matches : window.innerWidth < 560;
+    const el = document.createElement('div');
+    el.id = 'crrav-moviemenu';
+    el.className = `crrav-mm${sheet ? ' sheet' : ''}`;
+    el.innerHTML = `<div class="crrav-mm-bd" data-mm-close></div>
+      <div class="crrav-mm-panel" role="dialog" aria-label="Films de ${escapeHtml(s.title)}">
+        <div class="crrav-mm-grab"></div>
+        <div class="crrav-mm-head"><span>Films · ${sp.filmSeen}/${sp.filmTotal} vus</span>
+          <button type="button" class="crrav-mm-x" data-mm-close aria-label="Fermer">✕</button></div>
+        ${items}
+      </div>`;
+    el.addEventListener('click', (e) => {
+      if (e.target.closest('[data-mm-close]')) { e.preventDefault(); closeMovieMenu(); return; }
+      // Le lien suit son cours (gestionnaire de root compris) ; le menu se referme derrière.
+      if (e.target.closest('[data-mm-go]')) setTimeout(closeMovieMenu, 0);
+    });
+    root.appendChild(el);
+    if (!sheet && anchor) {
+      const panel = el.querySelector('.crrav-mm-panel');
+      const r = anchor.getBoundingClientRect();
+      const w = panel.offsetWidth, h = panel.offsetHeight;
+      const left = Math.max(8, Math.min(r.right - w, window.innerWidth - w - 8));
+      let top = r.bottom + 6;
+      if (top + h > window.innerHeight - 8) top = Math.max(8, r.top - 6 - h);
+      panel.style.left = `${left}px`;
+      panel.style.top = `${top}px`;
+    }
+    const first = el.querySelector('.crrav-mm-ac');
+    if (first && !sheet) first.focus({ preventScroll: true });
+  }
+  // Échap ferme d'abord le menu des films, sans fermer tout le panneau (phase de capture).
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || !root || !root.querySelector('#crrav-moviemenu')) return;
+    e.stopImmediatePropagation();
+    closeMovieMenu();
+  }, true);
+
   function close() {
+    closeMovieMenu();
+    if (typeof crpQueueScan === 'function') crpQueueScan();   // réglage « pages Crunchyroll » pris en compte tout de suite
     if (root) root.style.display = 'none';
     document.documentElement.style.overflow = '';
     // (7) c'est ici, et seulement ici, qu'on considère la visite terminée :
@@ -18516,6 +18749,435 @@
     return true;
   }
 
+  // ─────────────────────────────────────────────────────────────
+  //  7. Pages Crunchyroll : cartes épisode enrichies (v3.100.0)
+  // ─────────────────────────────────────────────────────────────
+  // Travaille DIRECTEMENT sur les pages du site, hors du panneau Mon Crunchy :
+  //  • menu ⋮ d'une carte épisode : ajoute « Supprimer de l'historique » (en 2 temps) à côté
+  //    du « Marquer comme vu » de Crunchyroll, qui reste intact ;
+  //  • sous la PREMIÈRE carte épisode de chaque série d'une page (carte « Reprendre » de la
+  //    fiche série, « Continuer à regarder » de l'accueil, historique…) : bloc d'infos —
+  //    épisodes et temps restants, films à part, saison en cours de diffusion, date du
+  //    dernier épisode de la saison, prochain épisode, saisons restantes.
+  // Robustesse : le DOM Crunchyroll (React) est redessiné en permanence et ses classes sont
+  // hachées (playable-card--GnRbX…). On ne s'accroche donc qu'à des repères stables — les
+  // attributs data-t (episode-card, dropdown-section), role="menu"/"menuitem", et les liens
+  // /watch/ID et /series/ID. Un MutationObserver (débattu) réapplique nos ajouts, de façon
+  // idempotente ; si un repère disparaît après une mise à jour du site, l'ajout ne
+  // s'affiche simplement plus, sans rien casser. Désactivable dans les réglages
+  // (crPageEnhance). Données : mêmes fonctions et mêmes caches que Mon Crunchy
+  // (getSeriesPanel, getEpisodes, getPlayheads, AniList), calcul paresseux (seulement
+  // pour les cartes visibles), 2 séries en parallèle au plus, mémo 3 min par série.
+  const CRP_CARD = '[data-t^="episode-card"]';
+  const CRP = { info: new Map(), TTL: 3 * 60e3, ver: 0, timer: 0, io: null, started: false, queue: [], active: 0 };
+
+  function crpIds(card) {
+    const w = card.querySelector('a[href*="/watch/"]');
+    const me = w && /\/watch\/([A-Z0-9]+)/i.exec(w.getAttribute('href') || '');
+    const sl = card.querySelector('a[href*="/series/"]');
+    const ms = sl && /\/series\/([A-Z0-9]+)/i.exec(sl.getAttribute('href') || '');
+    const mp = /\/series\/([A-Z0-9]+)/i.exec(location.pathname);
+    return { epId: me ? me[1] : null, seriesId: ms ? ms[1] : mp ? mp[1] : null };
+  }
+
+  // Données d'une série : entrée au même format que Reste à voir (buildSeriesEntry) + la
+  // table des progressions (utile pour la suppression, qui vise les versions réellement vues).
+  function crpGet(seriesId, force) {
+    const c = CRP.info.get(seriesId);
+    if (!force && c && (c.promise || Date.now() - c.ts < CRP.TTL)) return c.promise || Promise.resolve(c.data);
+    const promise = (async () => {
+      const panel = await getSeriesPanel(seriesId);
+      if (!panel) return null;
+      const eps = await getEpisodes(seriesId);
+      if (!eps || !Array.isArray(eps.episodes) || !eps.episodes.length) return null;
+      const acct = await getAccountId();
+      const ids = [...new Set(eps.episodes.flatMap((e) => e.ids || [e.id]))];
+      const ph = ids.length ? await getPlayheads(acct, ids) : new Map();
+      let s = buildSeriesEntry(panel, eps.episodes, eps.maxAir, null, 0, ph, null);
+      // Planning AniList (fin de saison, prochain épisode) : seulement pour une série en
+      // diffusion dont le cache est à refaire, et jamais en concurrence d'un passage déjà lancé.
+      if (s.airing && CFG.anilistSchedule && anilistNeedsFetch(s.id) && !anilistPassRunning) {
+        try { await enrichAnilistSchedule([s]); } catch (_) { /* AniList indisponible : on s'en passe */ }
+        s = buildSeriesEntry(panel, eps.episodes, eps.maxAir, null, 0, ph, null);
+      }
+      return { s, ph };
+    })();
+    CRP.info.set(seriesId, { promise, ts: Date.now() });
+    promise.then((data) => CRP.info.set(seriesId, { data, ts: Date.now() }),
+      () => CRP.info.delete(seriesId));
+    return promise;
+  }
+  // File d'attente : 2 séries à la fois au plus (une page d'accueil peut en montrer 20).
+  function crpSchedule(fn) {
+    return new Promise((resolve, reject) => {
+      CRP.queue.push({ fn, resolve, reject });
+      crpPump();
+    });
+  }
+  function crpPump() {
+    while (CRP.active < 2 && CRP.queue.length) {
+      const { fn, resolve, reject } = CRP.queue.shift();
+      CRP.active++;
+      Promise.resolve().then(fn).then(resolve, reject).finally(() => { CRP.active--; crpPump(); });
+    }
+  }
+
+  // Modèle d'affichage — pur calcul sur l'entrée série, aucune requête.
+  function crpModel(s) {
+    const sp = splitMovies(s);
+    const eps = sp ? sp.eps : s.episodes;
+    const movies = sp ? sp.movies : [];
+    const left = eps.filter((e) => !e.seen);
+    const secLeft = left.reduce((a, e) => a + (e.dur || 0), 0);
+    const filmsLeft = movies.filter((e) => !e.seen);
+    const filmSec = filmsLeft.reduce((a, e) => a + (e.dur || 0), 0);
+    const seasons = [...new Set(eps.map((e) => e.season))];
+    const next = eps.find((e) => e.started && !e.seen) || eps.find((e) => !e.seen) || null;
+    const cur = next ? next.season : seasons[seasons.length - 1];
+    const curIdx = seasons.indexOf(cur);
+    const curEps = eps.filter((e) => e.season === cur);
+    const lastSeason = seasons[seasons.length - 1];
+    const seasonMaxAir = (k) => eps.filter((e) => e.season === k && e.air).reduce((m, e) => Math.max(m, e.air), 0);
+    const curAiring = isAiring(seasonMaxAir(cur));
+    const lastAiring = isAiring(seasonMaxAir(lastSeason));
+    // Les données AniList (total prévu, fin de saison, prochain épisode) décrivent la saison
+    // en diffusion — on ne les rattache à la saison courante que si c'est bien elle.
+    const aniOk = curAiring && cur === lastSeason;
+    const now = Date.now();
+    return {
+      seasons: seasons.map((k) => {
+        const g = eps.filter((e) => e.season === k);
+        return { k, n: g.length, seen: g.filter((e) => e.seen).length };
+      }),
+      movies: movies.map((m) => ({ seen: m.seen })),
+      epTotal: eps.length, epLeft: left.length, secLeft,
+      filmTotal: movies.length, filmLeft: filmsLeft.length, filmSec,
+      pct: eps.length ? Math.round(((eps.length - left.length) / eps.length) * 100) : 0,
+      next, cur, curPos: curIdx + 1, seasonCount: seasons.length,
+      curSeen: curEps.filter((e) => e.seen).length, curCount: curEps.length,
+      seasonsAfter: seasons.slice(curIdx + 1).filter((k) => eps.some((e) => e.season === k && !e.seen)).length,
+      isLastSeason: cur === lastSeason,
+      curAiring, lastAiring,
+      planned: aniOk && s.plannedTotal ? s.plannedTotal : null,
+      endTs: aniOk && s.seasonEndTs && s.seasonEndTs > now - DAY ? s.seasonEndTs : null,
+      endApprox: !!s.plannedApprox,
+      nextTs: aniOk && s.aniNextTs && s.aniNextTs > now ? s.aniNextTs : null,
+      nextNum: aniOk ? s.aniNextNum : null,
+    };
+  }
+
+  function crpDate(ts, withTime) {
+    const d = new Date(ts);
+    const o = { weekday: 'short', day: 'numeric', month: 'short' };
+    const txt = d.toLocaleDateString('fr-FR', o);
+    return withTime ? `${txt} · ${d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}` : txt;
+  }
+
+  function crpBlockHtml(m) {
+    const segs = m.seasons.map((g) => {
+      const w = g.n ? Math.round((g.seen / g.n) * 1000) / 10 : 0;
+      const cls = `crrav-cri-seg${g.k === m.cur && m.epLeft ? ' cur' : ''}${g.seen === g.n ? ' done' : ''}`;
+      return `<span class="${cls}" style="--n:${g.n}" title="Saison ${m.seasons.indexOf(g) + 1} · ${g.seen}/${g.n} vus"><i data-w="${w}"></i></span>`;
+    }).join('') + m.movies.map((f) => `<span class="crrav-cri-film${f.seen ? ' on' : ''}" title="Film${f.seen ? ' vu' : ''}"></span>`).join('');
+    const chips = [];
+    if (m.curAiring) {
+      const sortis = m.planned ? ` · ${m.curCount}/${m.planned} sortis` : '';
+      chips.push(`<span class="crrav-cri-chip live">Saison en diffusion${sortis}</span>`);
+      if (m.endTs) chips.push(`<span class="crrav-cri-chip" title="Source AniList">Dernier ép. ${m.endApprox ? '~' : 'le '}${crpDate(m.endTs)}</span>`);
+      if (m.nextTs) chips.push(`<span class="crrav-cri-chip" title="Source AniList">Prochain${m.nextNum ? ` : E${m.nextNum}` : ''} · ${crpDate(m.nextTs, true)}</span>`);
+    } else if (m.epLeft && m.lastAiring && !m.isLastSeason) {
+      chips.push(`<span class="crrav-cri-chip live">Saison ${m.seasonCount} en diffusion</span>`);
+    }
+    if (m.seasonCount > 1 && m.epLeft) {
+      chips.push(`<span class="crrav-cri-chip">Saison ${m.curPos}/${m.seasonCount}${
+        m.seasonsAfter ? ` · encore ${m.seasonsAfter} saison${m.seasonsAfter > 1 ? 's' : ''} après` : ' · dernière'}</span>`);
+    }
+    if (m.filmTotal) {
+      chips.push(`<span class="crrav-cri-chip film">${TICK_MOVIE_ICO}${m.filmLeft
+        ? `${m.filmLeft} film${m.filmLeft > 1 ? 's' : ''} à voir · ${fmtDuration(m.filmSec)}` : `${m.filmTotal} film${m.filmTotal > 1 ? 's' : ''} vu${m.filmTotal > 1 ? 's' : ''}`}</span>`);
+    }
+    let head;
+    if (m.epLeft) {
+      head = `<b>Reste ${m.epLeft} épisode${m.epLeft > 1 ? 's' : ''}</b><span class="crrav-cri-time">${fmtDuration(m.secLeft)}</span>`;
+    } else if (m.curAiring) {
+      head = '<b>À jour</b><span class="crrav-cri-time">en attente du prochain épisode</span>';
+    } else {
+      head = '<b>Série terminée</b><span class="crrav-cri-time ok">✓ tout est vu</span>';
+    }
+    return `<div class="crrav-cri-bar">${segs}</div>
+      <div class="crrav-cri-top">${head}<em>${m.pct} %</em></div>
+      ${chips.length ? `<div class="crrav-cri-chips">${chips.join('')}</div>` : ''}`;
+  }
+
+  function crpFillBars(el) {
+    const run = () => el.querySelectorAll('.crrav-cri-seg > i[data-w]').forEach((i) => { i.style.width = `${i.dataset.w}%`; });
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => requestAnimationFrame(run)); else run();
+  }
+
+  function crpRenderBlock(card, seriesId, epId) {
+    let el = card.querySelector(':scope > .crrav-crinfo');
+    const key = `${seriesId}|${epId}|${CRP.ver}`;
+    if (el && el.dataset.key === key) return;
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'crrav-crinfo loading';
+      el.innerHTML = '<div class="crrav-cri-skel"></div>';
+      card.appendChild(el);
+    }
+    el.dataset.key = key;
+    const load = () => crpSchedule(() => crpGet(seriesId)).then((data) => {
+      if (el.dataset.key !== key) return;                  // carte réutilisée entre-temps
+      if (!data || !data.s) { el.remove(); return; }
+      el.classList.remove('loading');
+      el.innerHTML = crpBlockHtml(crpModel(data.s));
+      crpFillBars(el);
+    }).catch((e) => { safeCall.log(e, 'crpRenderBlock'); if (el.dataset.key === key) el.remove(); });
+    // Paresseux : on attend que la carte soit (presque) visible avant de lancer les requêtes.
+    if (CRP.io) {
+      el._crpLoad = load;
+      CRP.io.observe(el);
+    } else load();
+  }
+
+  function crpDecorateMenu(menu) {
+    const card = menu.closest(CRP_CARD);
+    if (!card || menu.querySelector('[data-crrav-del]')) return;
+    const tpl = menu.querySelector('[role="menuitem"]');
+    const { epId } = crpIds(card);
+    if (!tpl || !epId || !tpl.parentElement) return;
+    const item = document.createElement(tpl.tagName.toLowerCase());
+    item.className = `${tpl.className} crrav-crdel`;
+    item.setAttribute('role', 'menuitem');
+    item.setAttribute('tabindex', '0');
+    item.dataset.crravDel = epId;
+    item.textContent = 'Supprimer de l\u2019historique';
+    tpl.parentElement.appendChild(item);
+  }
+
+  function crpScan() {
+    CRP.timer = 0;
+    if (!CFG.crPageEnhance) {
+      document.querySelectorAll('.crrav-crinfo, [data-crrav-del], .crrav-crribbon').forEach((n) => n.remove());
+      return;
+    }
+    document.querySelectorAll(`${CRP_CARD} [role="menu"]`).forEach((m) => safeCall(() => crpDecorateMenu(m), undefined, 'crpDecorateMenu'));
+    const firstOf = new Set();
+    document.querySelectorAll(CRP_CARD).forEach((card) => {
+      const { epId, seriesId } = crpIds(card);
+      const own = card.querySelector(':scope > .crrav-crinfo');
+      if (!seriesId || !epId || firstOf.has(seriesId)) { if (own) own.remove(); return; }
+      firstOf.add(seriesId);
+      safeCall(() => crpRenderBlock(card, seriesId, epId), undefined, 'crpRenderBlock');
+    });
+  }
+  function crpQueueScan() {
+    if (!CRP.timer) CRP.timer = setTimeout(crpScan, 250);
+  }
+
+  // Invalide une série (après une action) et redessine ses blocs avec des données fraîches.
+  function crpRefreshSeries(seriesId, ids) {
+    (ids || []).forEach((id) => PH_MEMO.delete(id));
+    if (seriesId) CRP.info.delete(seriesId);
+    CRP.ver++;
+    crpQueueScan();
+  }
+
+  async function crpDeleteFromHistory(epId, seriesId) {
+    const acct = await getAccountId();
+    let ids = [epId];
+    let data = null;
+    if (seriesId) { try { data = await crpGet(seriesId); } catch (_) { /* on supprime au moins l'id de la carte */ } }
+    const ep = data && data.s.episodes.find((e) => e.id === epId || (e.ids || []).includes(epId));
+    // Un épisode compte comme vu dès qu'UNE de ses versions (VOSTFR, VF…) l'est : on vise
+    // toutes les versions qui ont une progression, en plus de celle de la carte.
+    if (ep) ids = [...new Set([epId, ...(ep.ids || []).filter((id) => data.ph.has(id))])];
+    await apiWrite(`/content/v2/${acct}/watch-history/${ids.join(',')}`, null, 0, 'DELETE', 20000);
+    ids.forEach((id) => PH_MEMO.delete(id));
+    // Vérification : si Crunchyroll garde une progression malgré la suppression, on la remet
+    // à zéro — sinon l'épisode resterait « vu »/« commencé » et reviendrait dans Reprendre.
+    const ph = await getPlayheads(acct, ids);
+    const still = ids.filter((id) => { const x = ph.get(id); return x && (x.p > 0 || x.full); });
+    for (const id of still) await apiWrite(`/content/v2/${acct}/playheads`, { content_id: id, playhead: 0 }, 0, 'POST', 20000);
+    crpRefreshSeries(seriesId, ids);
+    clearPlayheadMemo();     // Mon Crunchy repartira aussi de données fraîches
+    return ep;
+  }
+
+  function crpToast(msg, tone, action) {
+    let t = document.getElementById('crrav-crtoast');
+    if (t) t.remove();
+    t = document.createElement('div');
+    t.id = 'crrav-crtoast';
+    t.className = `crrav-crtoast ${tone || 'ok'}`;
+    t.innerHTML = `<span></span>${action ? `<button type="button">${action.label}</button>` : ''}`;
+    t.firstChild.textContent = msg;
+    if (action) t.querySelector('button').addEventListener('click', action.run);
+    document.body.appendChild(t);
+    setTimeout(() => { t.classList.add('out'); setTimeout(() => t.remove(), 300); }, action ? 7000 : 3500);
+  }
+
+  function crpCloseMenu(card) {
+    const trig = card && card.querySelector('[aria-haspopup][aria-expanded="true"]');
+    if (trig) trig.click();
+  }
+
+  async function crpOnDelete(item) {
+    if (item.dataset.busy === '1') return;
+    if (item.dataset.armed !== '1') {
+      item.dataset.armed = '1';
+      item.classList.add('armed');
+      item.textContent = 'Confirmer la suppression';
+      clearTimeout(item._crpT);
+      item._crpT = setTimeout(() => {
+        if (!item.isConnected) return;
+        item.dataset.armed = '';
+        item.classList.remove('armed');
+        item.textContent = 'Supprimer de l\u2019historique';
+      }, 4000);
+      return;
+    }
+    clearTimeout(item._crpT);
+    item.dataset.busy = '1';
+    item.textContent = 'Suppression…';
+    const card = item.closest(CRP_CARD);
+    const { epId, seriesId } = crpIds(card);
+    try {
+      const ep = await crpDeleteFromHistory(epId, seriesId);
+      crpCloseMenu(card);
+      if (card && card.isConnected) {
+        card.classList.add('crrav-crgone');
+        if (!card.querySelector(':scope > .crrav-crribbon')) {
+          const r = document.createElement('div');
+          r.className = 'crrav-crribbon';
+          r.innerHTML = '<span>Retiré de l\u2019historique</span><button type="button">Actualiser la page</button>';
+          r.querySelector('button').addEventListener('click', () => location.reload());
+          card.appendChild(r);
+        }
+      }
+      const label = ep ? `S${ep.season} E${ep.n}` : 'L\u2019épisode';
+      crpToast(`${label} supprimé de l\u2019historique`, 'ok', { label: 'Actualiser', run: () => location.reload() });
+    } catch (e) {
+      safeCall.log(e, 'crpDeleteFromHistory');
+      item.dataset.busy = '';
+      item.dataset.armed = '';
+      item.classList.remove('armed');
+      item.textContent = 'Supprimer de l\u2019historique';
+      crpToast(`Suppression impossible${e && e.status ? ` (${e.status})` : ''} — réessaie`, 'err');
+    }
+  }
+
+  function crpOnClick(e) {
+    if (!CFG.crPageEnhance || !e.target || !e.target.closest) return;
+    const del = e.target.closest('[data-crrav-del]');
+    if (del) {
+      e.preventDefault();
+      e.stopPropagation();
+      crpOnDelete(del);
+      return;
+    }
+    // « Marquer comme vu » natif : on laisse Crunchyroll faire, puis on rafraîchit nos infos.
+    const mi = e.target.closest('[role="menuitem"]');
+    if (mi && /marquer comme vu/i.test(mi.textContent || '')) {
+      const card = mi.closest(CRP_CARD);
+      const { seriesId } = card ? crpIds(card) : {};
+      if (seriesId) setTimeout(() => { clearPlayheadMemo(); crpRefreshSeries(seriesId); }, 1500);
+    }
+  }
+
+  const CRP_CSS = `
+  .crrav-crinfo{margin:10px 0 2px;padding:10px 12px 11px;border-radius:10px;box-sizing:border-box;
+    background:linear-gradient(135deg,rgba(255,100,10,.13),rgba(255,255,255,.03) 60%);
+    border:1px solid rgba(255,255,255,.09);color:#d6d6dc;font-family:inherit;font-size:12px;line-height:1.35;
+    animation:crrav-cri-in .38s cubic-bezier(.2,.8,.2,1) both}
+  .crrav-crinfo.loading{animation:none}
+  .crrav-cri-skel{height:38px;border-radius:7px;background:linear-gradient(90deg,rgba(255,255,255,.04),rgba(255,255,255,.11),rgba(255,255,255,.04));
+    background-size:200% 100%;animation:crrav-cri-shim 1.2s linear infinite}
+  .crrav-cri-bar{display:flex;align-items:center;gap:3px;height:7px;margin-bottom:9px}
+  .crrav-cri-seg{position:relative;flex:var(--n) 1 0;min-width:5px;height:6px;border-radius:3px;overflow:hidden;background:rgba(255,255,255,.13)}
+  .crrav-cri-seg>i{position:absolute;left:0;top:0;bottom:0;width:0;border-radius:3px;background:#ff640a;
+    transition:width 1s cubic-bezier(.2,.8,.2,1)}
+  .crrav-cri-seg.done>i{background:#6fcf7f}
+  .crrav-cri-seg.cur{height:7px;box-shadow:0 0 0 1px rgba(255,120,40,.7),0 0 10px -2px rgba(255,100,10,.8)}
+  .crrav-cri-film{flex:0 0 7px;width:7px;height:7px;border-radius:50%;box-sizing:border-box;border:1.5px solid #5ed3dc}
+  .crrav-cri-film.on{background:#5ed3dc}
+  .crrav-cri-top{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+  .crrav-cri-top b{font-size:14px;font-weight:700;color:#fff}
+  .crrav-cri-time{color:#ff8a3d;font-weight:700}
+  .crrav-cri-time.ok{color:#8fe09a}
+  .crrav-cri-top em{margin-left:auto;font-style:normal;color:#9a9aa4;font-variant-numeric:tabular-nums}
+  .crrav-cri-chips{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}
+  .crrav-cri-chip{display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:999px;
+    background:rgba(255,255,255,.08);color:#d0d0d6;font-size:11.5px;font-weight:600;white-space:nowrap;max-width:100%;
+    overflow:hidden;text-overflow:ellipsis}
+  .crrav-cri-chip svg{width:12px;height:12px;flex:0 0 12px}
+  .crrav-cri-chip.live{background:rgba(255,100,10,.18);color:#ffb27a}
+  .crrav-cri-chip.live::before{content:'';width:7px;height:7px;flex:0 0 7px;border-radius:50%;background:#ff640a;
+    animation:crrav-cri-pulse 1.6s ease-out infinite}
+  .crrav-cri-chip.film{background:rgba(94,211,220,.15);color:#8fe6ec}
+  .crrav-crdel.armed{color:#ff7b7b !important;font-weight:700 !important}
+  .crrav-crgone > :not(.crrav-crribbon){opacity:.4;filter:grayscale(.7);transition:opacity .4s,filter .4s}
+  .crrav-crribbon{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:8px;font-size:12px;font-weight:700;color:#ffb27a}
+  .crrav-crribbon button,.crrav-crtoast button{border:0;border-radius:999px;padding:6px 12px;cursor:pointer;
+    font:700 12px/1 inherit;background:#ff640a;color:#1a0b02}
+  .crrav-crtoast{position:fixed;left:50%;bottom:max(18px,env(safe-area-inset-bottom));z-index:2147483000;
+    transform:translateX(-50%);display:flex;align-items:center;gap:12px;max-width:calc(100vw - 24px);box-sizing:border-box;
+    padding:11px 12px 11px 16px;border-radius:14px;background:rgba(24,24,30,.94);border:1px solid rgba(255,255,255,.12);
+    color:#f2f2f5;font:600 13px/1.3 system-ui,sans-serif;box-shadow:0 14px 36px rgba(0,0,0,.55);
+    -webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);animation:crrav-crtoast-in .34s cubic-bezier(.34,1.56,.64,1) both}
+  .crrav-crtoast.err{border-color:rgba(255,110,110,.45)}
+  .crrav-crtoast.out{opacity:0;transform:translateX(-50%) translateY(10px);transition:opacity .25s,transform .25s}
+  @keyframes crrav-cri-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+  @keyframes crrav-cri-shim{from{background-position:200% 0}to{background-position:-200% 0}}
+  @keyframes crrav-cri-pulse{0%{box-shadow:0 0 0 0 rgba(255,100,10,.7)}100%{box-shadow:0 0 0 7px rgba(255,100,10,0)}}
+  @keyframes crrav-crtoast-in{from{opacity:0;transform:translateX(-50%) translateY(16px)}to{opacity:1;transform:translateX(-50%)}}
+  @media (max-width:559px){
+    .crrav-crinfo{padding:9px 10px 10px}
+    .crrav-cri-top b{font-size:13.5px}
+    .crrav-cri-chip{font-size:11px;padding:3px 8px}
+  }
+  @media (prefers-reduced-motion:reduce){
+    .crrav-crinfo,.crrav-crtoast{animation:none}
+    .crrav-cri-seg>i{transition:none}
+    .crrav-cri-chip.live::before,.crrav-cri-skel{animation:none}
+  }`;
+
+  function initCrPage() {
+    if (CRP.started || !document.body) return;
+    CRP.started = true;
+    let st = document.getElementById('crrav-crp-css');
+    if (!st) { st = document.createElement('style'); st.id = 'crrav-crp-css'; document.head.appendChild(st); }
+    st.textContent = CRP_CSS;
+    if (typeof IntersectionObserver === 'function') {
+      CRP.io = new IntersectionObserver((entries) => {
+        for (const en of entries) {
+          if (!en.isIntersecting) continue;
+          CRP.io.unobserve(en.target);
+          const fn = en.target._crpLoad;
+          en.target._crpLoad = null;
+          if (fn) fn();
+        }
+      }, { rootMargin: '300px' });
+    }
+    document.addEventListener('click', crpOnClick, true);
+    document.addEventListener('keydown', (e) => {
+      if ((e.key === 'Enter' || e.key === ' ') && e.target && e.target.closest && e.target.closest('[data-crrav-del]')) {
+        e.preventDefault();
+        e.stopPropagation();
+        crpOnDelete(e.target.closest('[data-crrav-del]'));
+      }
+    }, true);
+    new MutationObserver((muts) => {
+      // Nos propres ajouts ne relancent pas de scan (évite une boucle d'observation).
+      for (const m of muts) {
+        const t = m.target;
+        if (t && t.nodeType === 1 && t.closest && t.closest('.crrav-crinfo, .crrav-crtoast, .crrav-overlay')) continue;
+        crpQueueScan();
+        return;
+      }
+    }).observe(document.body, { childList: true, subtree: true });
+    crpQueueScan();
+  }
+
   function boot() {
     // Idempotent : le fallback « if (!fab) boot() » à 3 s peut rappeler boot() après un
     // premier passage où addFab a échoué. Sans ce garde-fou on doublait les intervalles
@@ -18527,6 +19189,7 @@
     safeCall(migrateSlimPanels, undefined, 'migrateSlimPanels');   // récupère l'espace des vieux panels gonflés
     try { addFab(); } catch (e) { console.error('[reste-à-voir] échec du bouton', e); }
     setInterval(() => safeCall(addFab, undefined, 'addFab:interval'), 2000);
+    safeCall(initCrPage, undefined, 'initCrPage');   // (v3.100.0) cartes épisode du site enrichies
     scheduleAutoRefresh();   // reprogrammable si tu changes le délai dans les réglages
     let hiddenAt = 0;
     document.addEventListener('visibilitychange', () => {
