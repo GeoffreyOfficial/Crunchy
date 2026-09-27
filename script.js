@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.105.0
+// @version      3.106.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.105.0';
+  const SCRIPT_VERSION = '3.106.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -717,7 +717,7 @@
     { key: 'hideMovies', label: 'Masquer les films et one-shots', type: 'bool',
       help: 'Crunchyroll range les films dans une « série » à 1 épisode.', impact: 'suivi' },
     { key: 'crPageEnhance', label: 'Enrichir les pages Crunchyroll', type: 'bool',
-      help: 'Sur le site lui-même : infos de la série (épisodes et temps restants, films, saison en diffusion, fin de saison, saisons restantes) sous la carte « Reprendre », et « Supprimer de l’historique » dans le menu ⋮ des épisodes. Sur l’accueil : « Reprendre » remonté en tête, séries entièrement vues retirées de « Reprendre », et bilan (séries à jour, épisodes restants) à côté du titre.',
+      help: 'Sur le site lui-même : infos de la série (épisodes et temps restants, films, saison en diffusion, fin de saison, saisons restantes) sous la carte « Reprendre », et « Supprimer de l’historique » dans le menu ⋮ des épisodes (et pour toute une saison ou série dans les menus « Options » / « Plus » de la fiche série). Sur l’accueil : « Reprendre » remonté en tête, séries entièrement vues retirées de « Reprendre », et bilan (séries à jour, épisodes restants) à côté du titre.',
       impact: 'display' },
     { key: 'crHideHero', label: 'Masquer le carrousel d’accueil Crunchyroll', type: 'bool',
       help: 'Le grand bandeau défilant en haut de l’accueil prend beaucoup de place. Aussi pilotable directement sur la page (bouton « Masquer » sur le carrousel, « Afficher le carrousel » à côté de « Reprendre ») ; le choix est mémorisé.',
@@ -19001,19 +19001,94 @@
     } else load();
   }
 
-  function crpDecorateMenu(menu) {
-    const card = menu.closest(CRP_CARD);
-    if (!card || menu.querySelector('[data-crrav-del]')) return;
-    const tpl = menu.querySelector('[role="menuitem"]');
-    const { epId } = crpIds(card);
-    if (!tpl || !epId || !tpl.parentElement) return;
+  // (v3.106.0) Propriétaire d'un menu ⋮. Sur téléphone, Crunchyroll rend le contenu du menu
+  // HORS de la carte (feuille en bas d'écran, « portail ») : menu.closest(carte) ne trouvait
+  // rien, d'où l'absence de « Supprimer de l'historique » sur mobile. Le seul lien stable
+  // entre les deux est l'accessibilité : le déclencheur porte aria-controls = id du menu.
+  function crpMenuTrigger(menu) {
+    const inner = menu.parentElement && menu.parentElement.querySelector(':scope > [aria-haspopup]');
+    if (inner) return inner;
+    if (!menu.id) return null;
+    const esc = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(menu.id) : menu.id.replace(/["\\]/g, '\\$&');
+    return document.querySelector(`[aria-controls="${esc}"]`);
+  }
+  // Nature du menu : carte épisode, fiche série (bouton « Plus » du bandeau) ou saison
+  // (« Options » au-dessus de la liste d'épisodes). Classes non hachées d'abord
+  // (erc-series-hero-more-button / erc-season-more-options), libellé natif en repli.
+  function crpMenuContext(menu) {
+    const trig = crpMenuTrigger(menu);
+    const card = menu.closest(CRP_CARD) || (trig && trig.closest(CRP_CARD));
+    if (card) return { kind: 'episode', card, trig };
+    const own = (sel) => menu.closest(sel) || (trig && trig.closest(sel));
+    // Repli sur le libellé des items natifs (« Marquer la série vue » / « Marquer saison vue »)
+    // — volontairement étroit, pour ne jamais s'inviter dans un autre menu de la page.
+    const txt = [...menu.querySelectorAll('[role="menuitem"]:not([data-crrav-item])')].map((n) => n.textContent || '').join(' | ').toLowerCase();
+    const mp = /\/series\/([A-Z0-9]+)/i.exec(location.pathname);
+    if (!mp) return null;
+    if (own('.erc-season-more-options') || (!own('.erc-series-hero-more-button') && /marquer[^|]*saison|mark[^|]*season/.test(txt))) {
+      return { kind: 'season', seriesId: mp[1], trig };
+    }
+    if (own('.erc-series-hero-more-button') || /marquer[^|]*série|mark[^|]*series/.test(txt)) return { kind: 'series', seriesId: mp[1], trig };
+    return null;
+  }
+  // Épisodes affichés sous le menu de saison : on remonte depuis le déclencheur jusqu'au
+  // premier ancêtre qui contient des cartes épisode — c'est la liste de la saison affichée.
+  function crpSeasonEpIds(trig) {
+    let n = trig;
+    for (let i = 0; n && i < 12; i++, n = n.parentElement) {
+      const links = n.querySelectorAll(`${CRP_CARD} a[href*="/watch/"]`);
+      if (links.length) {
+        return [...new Set([...links].map((a) => (/\/watch\/([A-Z0-9]+)/i.exec(a.getAttribute('href') || '') || [])[1]).filter(Boolean))];
+      }
+    }
+    return [];
+  }
+  function crpNewMenuItem(menu, cls, label) {
+    const tpl = menu.querySelector('[role="menuitem"]:not([data-crrav-item])');
+    if (!tpl || !tpl.parentElement) return null;
     const item = document.createElement(tpl.tagName.toLowerCase());
-    item.className = `${tpl.className} crrav-crdel`;
+    item.className = `${tpl.className} crrav-crdel ${cls}`.trim();   // même apparence que l'item natif
     item.setAttribute('role', 'menuitem');
     item.setAttribute('tabindex', '0');
-    item.dataset.crravDel = epId;
-    item.textContent = 'Supprimer de l\u2019historique';
+    item.dataset.crravItem = '1';
+    item.textContent = label;
     tpl.parentElement.appendChild(item);
+    return item;
+  }
+  const CRP_LBL = {
+    episode: 'Supprimer de l\u2019historique',
+    season: 'Supprimer la saison de l\u2019historique',
+    series: 'Supprimer la série de l\u2019historique',
+  };
+  function crpDecorateMenu(menu) {
+    if (menu.querySelector('[data-crrav-item]')) return;
+    const ctx = crpMenuContext(menu);
+    if (!ctx) return;
+    if (ctx.kind === 'episode') {
+      const { epId, seriesId } = crpIds(ctx.card);
+      if (!epId) return;
+      const item = crpNewMenuItem(menu, '', CRP_LBL.episode);
+      if (!item) return;
+      item.dataset.crravDel = epId;
+      if (seriesId) item.dataset.crravSid = seriesId;
+      return;
+    }
+    const item = crpNewMenuItem(menu, 'crrav-crdel-scope', CRP_LBL[ctx.kind]);
+    if (!item) return;
+    item.dataset.crravScope = ctx.kind;
+    item.dataset.crravSid = ctx.seriesId;
+    if (ctx.kind === 'season') item.dataset.crravEps = crpSeasonEpIds(ctx.trig).slice(0, 12).join(',');
+  }
+  // Carte épisode d'un item de menu (menu dans la carte, ou en portail sur téléphone).
+  function crpItemCard(item) {
+    const menu = item.closest('[role="menu"]');
+    const trig = menu && crpMenuTrigger(menu);
+    return item.closest(CRP_CARD) || (trig && trig.closest(CRP_CARD)) || null;
+  }
+  function crpCloseMenuOf(item) {
+    const menu = item.closest('[role="menu"]');
+    const trig = menu && crpMenuTrigger(menu);
+    if (trig && trig.getAttribute('aria-expanded') === 'true') trig.click();
   }
 
   function crpScan() {
@@ -19028,7 +19103,7 @@
     safeCall(crpFeedLayoutCheck, undefined, 'crpFeedLayoutCheck');
     safeCall(crpHeroControls, undefined, 'crpHeroControls');
     safeCall(crpHistory, undefined, 'crpHistory');
-    document.querySelectorAll(`${CRP_CARD} [role="menu"]`).forEach((m) => safeCall(() => crpDecorateMenu(m), undefined, 'crpDecorateMenu'));
+    document.querySelectorAll('[role="menu"]').forEach((m) => safeCall(() => crpDecorateMenu(m), undefined, 'crpDecorateMenu'));
     const firstOf = new Set();
     document.querySelectorAll(CRP_CARD).forEach((card) => {
       const { epId, seriesId } = crpIds(card);
@@ -19290,8 +19365,41 @@
     crpQueueScan();
   }
 
-  async function crpDeleteFromHistory(epId, seriesId) {
+  // Efface l'historique d'une liste de GUID : DELETE par lots (URL raisonnable), puis
+  // vérification — toute progression que Crunchyroll garderait est remise à zéro, sinon
+  // l'épisode resterait « vu »/« commencé » et reviendrait dans Reprendre.
+  async function crpWipeIds(ids, onProgress) {
     const acct = await getAccountId();
+    const CH = 40;
+    let done = 0;
+    for (let i = 0; i < ids.length; i += CH) {
+      const part = ids.slice(i, i + CH);
+      await apiWrite(`/content/v2/${acct}/watch-history/${part.join(',')}`, null, 0, 'DELETE', 20000);
+      part.forEach((id) => PH_MEMO.delete(id));
+      done += part.length;
+      if (onProgress) onProgress(done, ids.length, 'del');
+    }
+    const ph = await getPlayheads(acct, ids);
+    const still = ids.filter((id) => { const x = ph.get(id); return x && (x.p > 0 || x.full); });
+    let k = 0;
+    for (const id of still) {
+      await apiWrite(`/content/v2/${acct}/playheads`, { content_id: id, playhead: 0 }, 0, 'POST', 20000);
+      if (onProgress) onProgress(++k, still.length, 'reset');
+    }
+    ids.forEach((id) => PH_MEMO.delete(id));
+  }
+  // GUID réellement vus/commencés (toutes versions : VOSTFR, VF…) d'un ensemble d'épisodes.
+  function crpWatchedIds(eps, ph) {
+    const out = [];
+    let n = 0;
+    for (const e of eps) {
+      const got = (e.ids || [e.id]).filter((id) => { const x = ph.get(id); return x && (x.p > 0 || x.full); });
+      if (got.length) { n++; out.push(...got); }
+    }
+    return { ids: [...new Set(out)], epCount: n };
+  }
+
+  async function crpDeleteFromHistory(epId, seriesId) {
     let ids = [epId];
     let data = null;
     if (seriesId) { try { data = await crpGet(seriesId); } catch (_) { /* on supprime au moins l'id de la carte */ } }
@@ -19299,16 +19407,93 @@
     // Un épisode compte comme vu dès qu'UNE de ses versions (VOSTFR, VF…) l'est : on vise
     // toutes les versions qui ont une progression, en plus de celle de la carte.
     if (ep) ids = [...new Set([epId, ...(ep.ids || []).filter((id) => data.ph.has(id))])];
-    await apiWrite(`/content/v2/${acct}/watch-history/${ids.join(',')}`, null, 0, 'DELETE', 20000);
-    ids.forEach((id) => PH_MEMO.delete(id));
-    // Vérification : si Crunchyroll garde une progression malgré la suppression, on la remet
-    // à zéro — sinon l'épisode resterait « vu »/« commencé » et reviendrait dans Reprendre.
-    const ph = await getPlayheads(acct, ids);
-    const still = ids.filter((id) => { const x = ph.get(id); return x && (x.p > 0 || x.full); });
-    for (const id of still) await apiWrite(`/content/v2/${acct}/playheads`, { content_id: id, playhead: 0 }, 0, 'POST', 20000);
+    await crpWipeIds(ids);
     crpRefreshSeries(seriesId, ids);
     clearPlayheadMemo();     // Mon Crunchy repartira aussi de données fraîches
     return ep;
+  }
+
+  // (v3.106.0) Portée « série » ou « saison » : liste FRAÎCHE des épisodes vus (progressions
+  // relues, pas le mémo), pour que la confirmation annonce le vrai nombre.
+  async function crpScopePlan(item) {
+    const sid = item.dataset.crravSid;
+    clearPlayheadMemo();
+    const data = await crpGet(sid, true);
+    if (!data || !data.s) throw new Error('série introuvable');
+    const all = data.s.episodes;
+    let eps = all;
+    let label = 'la série';
+    if (item.dataset.crravScope === 'season') {
+      const shown = (item.dataset.crravEps || '').split(',').filter(Boolean);
+      const count = new Map();
+      for (const id of shown) {
+        const e = all.find((x) => x.id === id || (x.ids || []).includes(id));
+        if (e) count.set(e.season, (count.get(e.season) || 0) + 1);
+      }
+      if (!count.size) throw new Error('saison affichée non reconnue');
+      const season = [...count.entries()].sort((a, b) => b[1] - a[1])[0][0];
+      eps = all.filter((e) => e.season === season);
+      const order = [...new Set(all.map((e) => e.season))];
+      label = `la saison ${order.indexOf(season) + 1}`;
+    }
+    return { sid, label, ...crpWatchedIds(eps, data.ph) };
+  }
+
+  async function crpOnScopeDelete(item) {
+    if (item.dataset.busy === '1') return;
+    const reset = (txt) => {
+      item.dataset.busy = '';
+      item.dataset.armed = '';
+      item.classList.remove('armed');
+      item._crpPlan = null;
+      item.textContent = txt || CRP_LBL[item.dataset.crravScope];
+    };
+    if (item.dataset.armed !== '1') {
+      item.dataset.busy = '1';
+      item.textContent = 'Vérification\u2026';
+      let plan;
+      try { plan = await crpScopePlan(item); } catch (e) {
+        safeCall.log(e, 'crpScopePlan');
+        reset();
+        crpToast(`Impossible de préparer la suppression${e && e.status ? ` (${e.status})` : ''} — réessaie`, 'err');
+        return;
+      }
+      if (!item.isConnected) return;
+      item.dataset.busy = '';
+      if (!plan.ids.length) {
+        item.textContent = `Rien à supprimer dans ${plan.label}`;
+        clearTimeout(item._crpT);
+        item._crpT = setTimeout(() => { if (item.isConnected) reset(); }, 2500);
+        return;
+      }
+      item._crpPlan = plan;
+      item.dataset.armed = '1';
+      item.classList.add('armed');
+      item.textContent = `Confirmer : oublier ${plan.epCount} épisode${plan.epCount > 1 ? 's' : ''} vu${plan.epCount > 1 ? 's' : ''}`;
+      clearTimeout(item._crpT);
+      item._crpT = setTimeout(() => { if (item.isConnected && item.dataset.busy !== '1') reset(); }, 6000);
+      return;
+    }
+    clearTimeout(item._crpT);
+    const plan = item._crpPlan;
+    if (!plan) { reset(); return; }
+    item.dataset.busy = '1';
+    item.textContent = 'Suppression\u2026';
+    try {
+      await crpWipeIds(plan.ids, (d, t, phase) => {
+        if (item.isConnected) item.textContent = phase === 'del' ? `Suppression\u2026 ${d}/${t}` : `Vérification\u2026 ${d}/${t}`;
+      });
+      crpRefreshSeries(plan.sid, plan.ids);
+      clearPlayheadMemo();
+      crpCloseMenuOf(item);
+      reset();
+      const n = plan.epCount;
+      crpToast(`Historique de ${plan.label} effacé (${n} épisode${n > 1 ? 's' : ''})`, 'ok', { label: 'Actualiser', run: () => location.reload() });
+    } catch (e) {
+      safeCall.log(e, 'crpOnScopeDelete');
+      reset();
+      crpToast(`Suppression interrompue${e && e.status ? ` (${e.status})` : ''} — relance pour finir`, 'err');
+    }
   }
 
   function crpToast(msg, tone, action) {
@@ -19347,10 +19532,13 @@
     clearTimeout(item._crpT);
     item.dataset.busy = '1';
     item.textContent = 'Suppression…';
-    const card = item.closest(CRP_CARD);
-    const { epId, seriesId } = crpIds(card);
+    const card = crpItemCard(item);
+    const fromCard = card ? crpIds(card) : {};
+    const epId = item.dataset.crravDel || fromCard.epId;
+    const seriesId = item.dataset.crravSid || fromCard.seriesId;
     try {
       const ep = await crpDeleteFromHistory(epId, seriesId);
+      crpCloseMenuOf(item);
       crpCloseMenu(card);
       if (card && card.isConnected) {
         card.classList.add('crrav-crgone');
@@ -19383,6 +19571,13 @@
       crpToggleHero(hero.dataset.crravHero === 'hide');
       return;
     }
+    const scope = e.target.closest('[data-crrav-scope]');
+    if (scope) {
+      e.preventDefault();
+      e.stopPropagation();
+      crpOnScopeDelete(scope);
+      return;
+    }
     const del = e.target.closest('[data-crrav-del]');
     if (del) {
       e.preventDefault();
@@ -19390,11 +19585,13 @@
       crpOnDelete(del);
       return;
     }
-    // « Marquer comme vu » natif : on laisse Crunchyroll faire, puis on rafraîchit nos infos.
+    // « Marquer comme vu / série vue / saison vue » natifs : on laisse Crunchyroll faire,
+    // puis on rafraîchit nos infos.
     const mi = e.target.closest('[role="menuitem"]');
-    if (mi && /marquer comme vu/i.test(mi.textContent || '')) {
-      const card = mi.closest(CRP_CARD);
-      const { seriesId } = card ? crpIds(card) : {};
+    if (mi && /marquer/i.test(mi.textContent || '')) {
+      const card = crpItemCard(mi);
+      const mp = /\/series\/([A-Z0-9]+)/i.exec(location.pathname);
+      const seriesId = (card && crpIds(card).seriesId) || (mp && mp[1]);
       if (seriesId) setTimeout(() => { clearPlayheadMemo(); crpRefreshSeries(seriesId); }, 1500);
     }
   }
@@ -19437,6 +19634,8 @@
     animation:crrav-cri-pulse 1.6s ease-out infinite}
   .crrav-cri-chip.film{background:rgba(94,211,220,.15);color:#8fe6ec}
   .crrav-crdel.armed{color:#ff7b7b !important;font-weight:700 !important}
+  .crrav-crdel[data-busy="1"]{opacity:.7;cursor:progress}
+  .crrav-crdel{cursor:pointer}
   .crrav-crgone > :not(.crrav-crribbon){opacity:.4;filter:grayscale(.7);transition:opacity .4s,filter .4s}
   /* (v3.101.0) Carte retirée de l'historique : l'aperçu au survol de Crunchyroll (qui recouvre
      toute la carte, lien plein cadre compris) masquait le bandeau et rendait « Actualiser la
@@ -19532,11 +19731,13 @@
     // Le nombre de cartes Reprendre visibles dépend de la largeur (--visible-count).
     window.addEventListener('resize', crpQueueScan, { passive: true });
     document.addEventListener('keydown', (e) => {
-      if ((e.key === 'Enter' || e.key === ' ') && e.target && e.target.closest && e.target.closest('[data-crrav-del]')) {
-        e.preventDefault();
-        e.stopPropagation();
-        crpOnDelete(e.target.closest('[data-crrav-del]'));
-      }
+      if ((e.key !== 'Enter' && e.key !== ' ') || !e.target || !e.target.closest) return;
+      const sc = e.target.closest('[data-crrav-scope]');
+      const del = !sc && e.target.closest('[data-crrav-del]');
+      if (!sc && !del) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (sc) crpOnScopeDelete(sc); else crpOnDelete(del);
     }, true);
     new MutationObserver((muts) => {
       // Nos propres ajouts ne relancent pas de scan (évite une boucle d'observation).
