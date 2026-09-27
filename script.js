@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.96.0
+// @version      3.97.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.96.0';
+  const SCRIPT_VERSION = '3.97.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -8835,9 +8835,8 @@
           ${s.poster ? `<img loading="lazy" crossorigin="anonymous" src="${s.poster}" alt="" onerror="this.removeAttribute(&quot;crossorigin&quot;);this.src=this.src">` : ''}
         </a>
         ${ring(s)}
-        ${rating}
-        ${state}
-        ${s.isNew ? '<span class="crrav-newdot">Nouvel épisode</span>' : ''}
+        ${(s.isNew || rating || state) ? `<div class="crrav-tlstack">${
+          s.isNew ? '<span class="crrav-newdot">Nouvel épisode</span>' : ''}${rating}${state}</div>` : ''}
         ${ignoreBtn(s, source)}
         ${source === 'watchlist' ? removeListBtn(s) : source === 'orphan' ? addListBtn(s, true) : ''}
         ${synopsisBlock(s)}
@@ -10605,7 +10604,18 @@
   .crrav-card.isnew,.crrav-lrow.isnew{border-color:#9fd6ff;box-shadow:0 0 0 1px rgba(159,214,255,.35)}
   .crrav-newdot{position:absolute;top:6px;left:6px;background:#9fd6ff;color:#08131c;
     border-radius:6px;padding:3px 6px;font:800 9.5px/1 system-ui;letter-spacing:.03em}
-  .crrav-card.isnew .crrav-rating{top:26px}
+  /* (fix v3.97.0) Badges du coin haut-gauche de la jaquette (Nouvel épisode / note / En
+     diffusion·À jour) empilés dans UN conteneur flex en colonne plutôt que positionnés chacun
+     avec un top: codé en dur. Avant : la note descendait à top:26px quand « Nouvel épisode »
+     était présent, mais le badge diffusion restait à top:38px → chevauchement de ~10px (pire
+     sur mobile/TV où la note grossit : en mode TV elle recouvrait le badge même SANS
+     « Nouvel épisode »), et sans note le badge flottait seul à 38px avec un trou au-dessus.
+     Chaque badge prend désormais sa hauteur réelle, quelle que soit la taille de police. Les
+     cartes Découverte (autre gabarit, pas de conteneur) gardent leur .crrav-rating absolu. */
+  .crrav-tlstack{position:absolute;top:8px;left:8px;display:flex;flex-direction:column;
+    align-items:flex-start;gap:4px}
+  .crrav-tlstack>.crrav-rating,.crrav-tlstack>.crrav-airing,.crrav-tlstack>.crrav-newdot{
+    position:static}
 
   /* (8) ignorer une série */
   .crrav-ignore{position:absolute;left:8px;bottom:8px;z-index:2;width:32px;height:32px;border-radius:50%;
