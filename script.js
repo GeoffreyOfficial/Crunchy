@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.101.0
+// @version      3.102.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.101.0';
+  const SCRIPT_VERSION = '3.102.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -18991,9 +18991,27 @@
   // crHideHero l'est — pas de classe posée sur <html> (géré par React/Next).
   const CRP_HERO_SEL = '[class*="hero-carousel__cards"]';
   const CRP_HIST_SEL = '.dynamic-feed-wrapper [data-t="history"]';
+  // (v3.102.0) « Reprendre » remontait tard : la règle :has([data-t="history"]) ne s'applique
+  // qu'une fois les cartes de l'historique chargées (requête côté client de Crunchyroll),
+  // alors que le conteneur de la section, lui, est rendu bien avant. On retient donc
+  // l'identifiant stable de cette section (data-id du bloc du flux) dès qu'on l'a vue une
+  // fois, et on le cible directement dès le premier rendu des visites suivantes. Repères
+  // secondaires aussi présents plus tôt : le lien « Voir l'historique ».
+  function crpCwIdRule() {
+    const id = APP_STATE && APP_STATE.crCwId;
+    return (typeof id === 'string' && /^[A-Za-z0-9_-]{4,64}$/.test(id))
+      ? `\n  .dynamic-feed-wrapper > [data-id="${id}"]{order:-1}` : '';
+  }
+  function crpRememberCwId(section) {
+    const id = section && section.getAttribute && section.getAttribute('data-id');
+    if (!id || !/^[A-Za-z0-9_-]{4,64}$/.test(id) || APP_STATE.crCwId === id) return;
+    APP_STATE.crCwId = id;
+    persistState(APP_STATE);
+    crpInjectCss();
+  }
   function crpCssText() {
     let t = CRP_CSS;
-    if (CFG.crPageEnhance) t += CRP_FEED_CSS;
+    if (CFG.crPageEnhance) t += CRP_FEED_CSS + crpCwIdRule();
     if (CFG.crPageEnhance && CFG.crHideHero) t += CRP_HIDEHERO_CSS;
     return t;
   }
@@ -19086,6 +19104,7 @@
   function crpHistoryHeader(coll, bySeries) {
     let section = coll;
     while (section.parentElement && !section.parentElement.classList.contains('dynamic-feed-wrapper')) section = section.parentElement;
+    if (section.parentElement) crpRememberCwId(section);
     const h2 = section.querySelector('h2');
     if (!h2 || !h2.parentElement || h2.contains(coll)) return;
     let el = h2.parentElement.querySelector(':scope > .crrav-cwstats');
@@ -19298,7 +19317,7 @@
   const CRP_FEED_CSS = `
   .dynamic-feed-wrapper{display:flex;flex-direction:column}
   .dynamic-feed-wrapper > *{min-width:0;max-width:100%}
-  .dynamic-feed-wrapper > :has([data-t="history"]){order:-1}
+  .dynamic-feed-wrapper > :has([data-t="history"],[data-t="view-history-btn"],a[href$="/history"]){order:-1}
   .crrav-cwdone{display:none !important}
   .erc-feed > :has(${CRP_HERO_SEL}){position:relative}
   .crrav-herohide{position:absolute;top:14px;right:16px;z-index:20;border:1px solid rgba(255,255,255,.22);
