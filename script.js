@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.117.0
+// @version      3.118.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.117.0';
+  const SCRIPT_VERSION = '3.118.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -19516,6 +19516,20 @@
   function crpEnsureMenuClose(menu) {
     const cs = getComputedStyle(menu);
     if (cs.position !== 'fixed') { const x = menu.querySelector(':scope .crrav-menuclose'); if (x) x.remove(); return; }
+    // (fix v3.118.0) Sur Firefox Android, dès que la page déborde un peu en largeur, la
+    // « fenêtre de mise en page » s'élargit et la feuille plein écran (inset:0) avec elle :
+    // sa croix partait hors écran, à droite (il fallait faire défiler pour la voir). On
+    // recale la feuille sur la zone réellement visible de l'écran.
+    const vv = window.visualViewport;
+    const vw = vv ? vv.width : document.documentElement.clientWidth;
+    const mr = menu.getBoundingClientRect();
+    if (vw && (mr.width > vw + 1 || mr.left < -1 || mr.right > vw + 1)) {
+      menu.style.setProperty('left', `${Math.round(vv ? vv.offsetLeft : 0)}px`, 'important');
+      menu.style.setProperty('right', 'auto', 'important');
+      menu.style.setProperty('width', `${Math.round(vw)}px`, 'important');
+      menu.style.setProperty('max-width', `${Math.round(vw)}px`, 'important');
+      menu.dataset.crravFit = '1';
+    }
     const theirs = menu.querySelector('[data-t="mobile-header-close-svg"], [class*="close-icon"]');
     const r = theirs && theirs.getBoundingClientRect();
     const visible = !!(r && r.width > 4 && r.height > 4 && r.right <= window.innerWidth + 1 && getComputedStyle(theirs).visibility !== 'hidden');
@@ -20579,6 +20593,12 @@
       P.push({ key: 'series:more', feature: 'Suppression de l’historique', on: CFG.crHistoryDelete,
         bad: !$('.erc-series-hero-more-button, .erc-season-more-options') ? 'Les menus « Plus » / « Options » de la fiche ne sont plus reconnus : suppression d’une série ou d’une saison indisponible.' : null });
     }
+    // Page plus large que l'écran à cause d'un de NOS ajouts : c'est ce qui décale les feuilles
+    // plein écran de Crunchyroll sur téléphone. (Un débordement venant de Crunchyroll seul
+    // n'est pas signalé : on n'y peut rien.)
+    const ovf = safeCall(() => crpOverflowCulprits(4).filter((x) => x.ours), [], 'probe:overflow');
+    P.push({ key: 'layout:overflow', feature: 'Mise en page', on: true,
+      bad: ovf.length ? `Un ajout de Mon Crunchy dépasse la largeur de l’écran (${ovf.map((x) => x.label).join(', ')}) : la page défile de côté.` : null });
     if (kind !== 'watch') {
       const cards = [...document.querySelectorAll(CRP_CARD)];
       if (cards.length >= 3) {
@@ -20652,6 +20672,27 @@
     }
     CRP.visibleCount = known ? n : null;
   }
+  // Éléments qui font déborder la page en largeur (non contenus par un ascendant qui coupe) :
+  // première piste quand une feuille plein écran ou un bouton fixe part hors écran.
+  function crpOverflowCulprits(limit) {
+    const iw = document.documentElement.clientWidth;
+    if (document.documentElement.scrollWidth <= iw + 2) return [];
+    const out = [];
+    for (const n of document.querySelectorAll('body *')) {
+      const r = n.getBoundingClientRect();
+      if (r.right <= iw + 2 || !r.width) continue;
+      let p = n.parentElement, clipped = false;
+      while (p && p !== document.body) {
+        const cs = getComputedStyle(p);
+        if (cs.overflowX !== 'visible' || cs.position === 'fixed') { clipped = true; break; }
+        p = p.parentElement;
+      }
+      if (clipped || getComputedStyle(n).position === 'fixed') continue;
+      out.push({ el: n, ours: !!n.closest('[class*="crrav-"], [id^="crrav-"]'), label: `${n.tagName.toLowerCase()}.${String(n.className || '').split(/\s+/)[0]}`, right: Math.round(r.right) });
+      if (out.length >= (limit || 6)) break;
+    }
+    return out;
+  }
   function crpCheck() {
     const coll = document.querySelector(CRP_HIST_SEL);
     const hasSel = (q) => { try { return typeof CSS !== 'undefined' && CSS.supports ? CSS.supports(`selector(${q})`) : null; } catch (_) { return null; } };
@@ -20673,6 +20714,7 @@
       seriesEnMemoire: CRP.info.size,
       cacheBlocs: Object.keys(crpStore().s).length,
       etapesSuspendues: Object.keys(CRP.off),
+      debordementLargeur: crpOverflowCulprits(8).map((x) => `${x.ours ? '[Mon Crunchy] ' : ''}${x.label} → ${x.right}px`),
       alertes: [...CRP.health.entries()].map(([k, w]) => `${k} : ${w.msg}`),
     };
   }
@@ -21292,7 +21334,9 @@
   .crrav-plan-bar{display:block;width:120px;height:5px;border-radius:3px;background:rgba(255,255,255,.14);overflow:hidden;margin-top:3px}
   .crrav-plan-bar i{display:block;height:100%;background:#ff640a;border-radius:3px}
   /* (v3.115.0) accueil : Prochaines sorties */
-  .crrav-calsec{min-width:0}
+  .crrav-calsec{min-width:0;max-width:100%;overflow-x:hidden;overflow-x:clip}
+  .crrav-crinfo,.crrav-cwstats,.crrav-dash,.crrav-cri-next{max-width:100%}
+  .crrav-dash{overflow-x:hidden;overflow-x:clip}
   /* Avec la classe de conteneur de Crunchyroll (reprise de « Reprendre »), ce sont LEURS
      marges et largeur max qui s'appliquent — les nôtres ne servent que de repli. */
   .crrav-cal-in:not([class*="container--"]){box-sizing:border-box;width:100%;max-width:84.375rem;margin-inline:auto;padding-inline:1.25rem}
@@ -21346,7 +21390,7 @@
   .crrav-cal-ev .bd.q{color:#9a9aa4}
   .crrav-cal-empty{padding:18px;border-radius:14px;background:rgba(255,255,255,.04);color:#a9a9b3;font:600 13px/1.4 system-ui,sans-serif}
   @media (max-width:35.49em){
-    .crrav-cal-days{grid-auto-columns:84%;gap:10px;margin-inline:-1.25rem;padding-inline:1.25rem;scroll-padding-inline:1.25rem}
+    .crrav-cal-days{grid-auto-columns:86%;gap:10px}
     .crrav-cal-sum{order:3;flex-basis:100%}
     .crrav-cal-ev{grid-template-columns:44px minmax(0,1fr);gap:10px}
     .crrav-cal-ev .po{width:44px;height:62px}
