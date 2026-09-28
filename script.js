@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.118.0
+// @version      3.119.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.118.0';
+  const SCRIPT_VERSION = '3.119.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -20438,6 +20438,9 @@
       const remeasure = CRP.resized;
       CRP.resized = false;
       document.querySelectorAll('.crrav-hasinfo').forEach((c) => { if (!c.querySelector(':scope > .crrav-crinfo')) c.classList.remove('crrav-hasinfo'); });
+      // Et l'inverse : un bloc présent dont la carte a perdu le marqueur (classe réécrite par
+      // Crunchyroll) le récupère.
+      document.querySelectorAll(`${CRP_CARD} > .crrav-crinfo`).forEach((b) => { if (!b.parentElement.classList.contains('crrav-hasinfo')) b.parentElement.classList.add('crrav-hasinfo'); });
       const firstOf = new Set();
       document.querySelectorAll(CRP_CARD).forEach((card) => {
         const { epId, seriesId } = crpIds(card);
@@ -21228,7 +21231,11 @@
   /* (v3.111.0) Plus aucun :has() « large » : mesuré dans Chromium sur l'accueil réel, ils
      multipliaient par 5 le coût de chaque recalcul de style de la page (tout le flux est
      réexaminé à chaque mutation). Remplacés par des marqueurs posés par le scan. */
-  .crrav-hasinfo{flex-wrap:wrap;height:auto !important;max-height:none !important}
+  /* (fix v3.119.0) Double sécurité : le marqueur .crrav-hasinfo (posé par le scan) PLUS un
+     :has() limité aux enfants directs d'une carte épisode — si Crunchyroll réécrit la classe
+     de la carte, le bloc repasse quand même sous la vignette au lieu de déborder à droite
+     (et de recouvrir le menu ⋮) sur téléphone. */
+  .crrav-hasinfo,[data-t^="episode-card"]:has(> .crrav-crinfo){flex-wrap:wrap !important;height:auto !important;max-height:none !important}
   /* (fix v3.116.0) Hauteur égale dans Reprendre : on NE touche PLUS à la mise en page de la
      carte Crunchyroll (la passer en flex écrasait la vignette à 0 px de haut). Seul NOTRE
      bloc s'allonge (hauteur minimale calculée en JS, rangée par rangée — crpEqualize), en
