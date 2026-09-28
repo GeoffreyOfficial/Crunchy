@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      4.0.0
+// @version      4.2.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '4.0.0';
+  const SCRIPT_VERSION = '4.2.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -757,7 +757,7 @@
     { key: 'crHistoryDelete', label: '« Supprimer de l’historique » dans les menus', type: 'bool', impact: 'crsite', crsub: 'cards',
       help: 'Menu ⋮ d’un épisode, « Options » d’une saison, « Plus » d’une série.' },
     { key: 'crCalendar', label: 'Accueil : « Prochaines sorties » de tes séries', type: 'bool', impact: 'crsite', crsub: 'home',
-      help: 'Juste après Reprendre : les prochains épisodes des séries de tes listes, jour par jour (date, heure, saison, épisode, retard éventuel). Heures exactes d’AniList quand elles sont connues, sinon estimées au rythme hebdomadaire.' },
+      help: 'Juste après Reprendre : les prochains épisodes des séries de tes listes, jour par jour (date, heure, saison, épisode, retard éventuel). Uniquement les sorties confirmées par AniList, plus les épisodes déjà sortis aujourd’hui — aucune estimation.' },
     { key: 'crHomeCustom', label: 'Accueil : rubriques masquables et réordonnables', type: 'bool', impact: 'crsite', crsub: 'home',
       help: 'Applique tes choix de la liste « Rubriques de l’accueil » ci-dessous. Désactivé, l’accueil reprend l’ordre de Crunchyroll.' },
     { key: 'crHideIgnored', label: 'Masquer les séries ignorées dans Mon Crunchy', type: 'bool', impact: 'crsite', crsub: 'hide',
@@ -13484,18 +13484,13 @@
         seasonMayEnd = r.seasonMayEnd; exactTime = r.hasTime;
       }
       return { r, whenTs, source, nextN, nextRank, seasonMayEnd, hasTime: exactTime };
-    }).sort((a, b) => a.whenTs - b.whenTs);
-
-    if (!events.length) {
-      return `<div class="crrav-statswrap"><div class="crrav-statsection">
-        <h2 class="crrav-stath2">Prochains épisodes</h2>
-        <div class="crrav-msg"><h3>Rien de prévu</h3>
-          <p>Aucune série en diffusion détectée en ce moment. Le calendrier se remplit
-          dès que tu suis un simulcast en cours.</p></div>
-      </div>
-      ${renderNewPremieresSection()}
-      </div>`;
-    }
+    })
+      // (v4.2.0) Uniquement du CERTAIN : prochain épisode annoncé par AniList (date +
+      // numéro), jamais la projection hebdomadaire — elle annonçait par exemple un « E13 »
+      // pour des saisons terminées à 12. Numéro au-delà du total prévu : écarté aussi.
+      .filter((e) => e.source === 'anilist' && !(e.r.s.plannedTotal && e.nextN > e.r.s.plannedTotal))
+      .sort((a, b) => a.whenTs - b.whenTs);
+    const unconfirmed = est.length - events.length;
 
     // Sorti aujourd'hui : dernier épisode paru dans la journée en cours, toutes séries
     // de tes listes confondues (pas seulement celles en diffusion). Zéro requête : la
@@ -13531,10 +13526,23 @@
         </a>`;
       }).join('')}` : '';
 
+    if (!events.length) {
+      const ap0 = STATE.anilistProgress;
+      return `<div class="crrav-statswrap"><div class="crrav-statsection">
+        <h2 class="crrav-stath2">Prochains épisodes</h2>
+        ${todayBlock ? `<div class="crrav-sched">${todayBlock}</div>` : ''}
+        <div class="crrav-msg"><h3>Aucune date confirmée</h3>
+          <p>${ap0 ? `Recherche AniList en cours (${ap0.done}/${ap0.total})… les dates apparaîtront ici dès qu’elles sont connues.`
+            : unconfirmed ? `${unconfirmed} série${unconfirmed > 1 ? 's' : ''} en diffusion, mais AniList n’a pas encore annoncé leur prochain épisode.`
+            : 'Aucune série en diffusion détectée en ce moment. Le calendrier se remplit dès que tu suis un simulcast en cours.'}</p></div>
+      </div>
+      ${renderNewPremieresSection()}
+      </div>`;
+    }
     const in7 = events.filter((e) => e.whenTs - now < 7 * DAY).length;
     const behindTotal = events.reduce((a, e) => a + (e.r.s.remaining || 0), 0);
     const weekBar = `<div class="crrav-calweek">
-      <div class="crrav-calweekstat"><b data-countup="${events.length}" data-countup-key="cal-events">${events.length}</b><small>séries en cours</small></div>
+      <div class="crrav-calweekstat"><b data-countup="${events.length}" data-countup-key="cal-events">${events.length}</b><small>sorties confirmées</small></div>
       <div class="crrav-calweekstat"><b data-countup="${in7}" data-countup-key="cal-in7">${in7}</b><small>cette semaine</small></div>
       ${behindTotal ? `<div class="crrav-calweekstat hot"><b data-countup="${behindTotal}" data-countup-key="cal-behind">${behindTotal}</b><small>épisodes de retard</small></div>` : ''}
     </div>`;
@@ -13622,11 +13630,7 @@
         ${evs.map(rowHtml).join('')}`;
     }).join('');
 
-    const aniCount = events.filter((e) => e.source === 'anilist').length;
-    const headBadge = !aniCount ? '<span class="crrav-estim">estimation</span>'
-      : aniCount === events.length
-        ? '<span class="crrav-estim" style="color:#5ce6a0;border-color:rgba(92,230,160,.4)">AniList</span>'
-        : '<span class="crrav-estim">AniList + estimé</span>';
+    const headBadge = '<span class="crrav-estim" style="color:#5ce6a0;border-color:rgba(92,230,160,.4)">AniList</span>';
     // Recherche AniList en cours en tâche de fond (voir enrichAnilistSchedule) : sans ce
     // badge, rien ne distinguait « pas encore trouvé » de « en train d'être recherché » —
     // une série passait de « estimé » à « AniList » sans qu'on sache qu'un travail était
@@ -13639,8 +13643,8 @@
     return `<div class="crrav-statswrap">
       <div class="crrav-statsection">
         <h2 class="crrav-stath2">Prochains épisodes ${headBadge}${progressBadge}</h2>
-        <p class="crrav-schedhint">Date exacte du prochain épisode via AniList quand la série y est reconnue ;
-          sinon, jour et heure déduits du rythme hebdomadaire.</p>
+        <p class="crrav-schedhint">Uniquement les sorties confirmées par AniList (date et numéro d’épisode)${unconfirmed
+          ? ` — ${unconfirmed} autre${unconfirmed > 1 ? 's' : ''} série${unconfirmed > 1 ? 's' : ''} en diffusion sans date annoncée pour l’instant` : ''}.</p>
         ${weekBar}
         <div class="crrav-sched">${todayBlock}${sections}</div>
       </div>
@@ -20203,7 +20207,12 @@
       const seen = (x.episodes || []).some((e) => e.id === la.id && e.seen);
       return { s: x, ts: t, n: la.n, season: seasons.indexOf(la.season) + 1, seasons: seasons.length, out: true, seen, exact: true, hasTime: true };
     }).filter(Boolean);
-    return { ev: [...out, ...ev].sort((a, b) => a.ts - b.ts), ts, live };
+    // (fix v4.1.0) Uniquement du CERTAIN : prochain épisode annoncé par AniList (date et
+    // numéro), et épisodes réellement sortis aujourd'hui. Les projections hebdomadaires
+    // annonçaient à tort un « E13 » pour des saisons terminées à 12 épisodes.
+    const sure = ev.filter((e) => e.exact && e.ts > now && e.n
+      && !(e.s.plannedTotal && e.n > e.s.plannedTotal));
+    return { ev: [...out, ...sure].sort((a, b) => a.ts - b.ts), ts, live };
   }
   function crpCalDayKey(ts) { const d = new Date(ts); d.setHours(0, 0, 0, 0); return d.getTime(); }
   function crpCalDayLabel(k) {
@@ -20271,7 +20280,7 @@
       </div>`;
     const body = ev.length
       ? `<div class="crrav-cal-days" role="list">${cols.join('')}</div>`
-      : `<div class="crrav-cal-empty">${ts || live ? 'Aucune série de tes listes n’est en diffusion en ce moment.' : 'Ouvre une fois Mon Crunchy (« Reste à voir ») pour que tes prochaines sorties apparaissent ici.'}</div>`;
+      : `<div class="crrav-cal-empty">${ts || live ? 'Aucune date de sortie confirmée par AniList pour les séries de tes listes en ce moment.' : 'Ouvre une fois Mon Crunchy (« Reste à voir ») pour que tes prochaines sorties apparaissent ici.'}</div>`;
     return `<div class="${escapeHtml(cls.container || '')} crrav-cal-in">${head}${body}</div>`;
   }
   function crpCalendar() {
