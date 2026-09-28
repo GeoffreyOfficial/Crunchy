@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.116.0
+// @version      3.117.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.116.0';
+  const SCRIPT_VERSION = '3.117.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -19360,10 +19360,18 @@
   // L'aperçu au survol de Crunchyroll (position:absolute; inset:0 sur la carte) recouvrait
   // notre bloc — boutons inclickables, lien de l'ancien épisode par-dessus. On lui retire la
   // hauteur du bloc par le bas (variable CSS posée sur la carte, que React ne gère pas).
+  // (v3.117.0) L'aperçu au survol couvre toute la carte, SAUF la bande de notre bouton
+  // « Lire la suite » quand il existe : leur « Reprendre Ex » (souvent l'épisode déjà vu)
+  // vient alors se poser juste au-dessus au lieu de se superposer à notre bouton.
   function crpSizeHover(card, el) {
     if (!card || !el || !el.isConnected) return;
-    const cs = getComputedStyle(el);
-    const h = Math.ceil(el.offsetHeight + (parseFloat(cs.marginTop) || 0) + (parseFloat(cs.marginBottom) || 0));
+    const btn = el.querySelector('.crrav-cri-next');
+    let h = 0;
+    if (btn) {
+      const cr = card.getBoundingClientRect();
+      const br = btn.getBoundingClientRect();
+      if (br.height) h = Math.max(0, Math.ceil(cr.bottom - br.top + 6));
+    }
     const v = `${h}px`;
     if (card.style.getPropertyValue('--crrav-crih') !== v) card.style.setProperty('--crrav-crih', v);
   }
@@ -20515,7 +20523,10 @@
   }
   function crpPageKind() {
     const p = location.pathname;
-    if (/^\/(?:[a-z]{2}(?:-[a-z]{2})?\/?)?$/i.test(p)) return 'home';
+    // (fix v3.117.0) L'accueil de Crunchyroll est aussi servi sous /fr/discover (lien du
+    // logo) : l'ancien test ne reconnaissait que /fr — pas de « Prochaines sorties » ni de
+    // contrôles de santé sur cette adresse. Le repère de page (.erc-home) fait foi.
+    if (document.querySelector('.erc-home') || /^\/(?:[a-z]{2}(?:-[a-z]{2})?)?(?:\/discover)?\/?$/i.test(p)) return 'home';
     if (/\/series\/[A-Z0-9]+/i.test(p)) return 'series';
     if (/\/watch\/[A-Z0-9]+/i.test(p)) return 'watch';
     return 'other';
@@ -21220,8 +21231,18 @@
   .crrav-menuclose{margin-left:auto;flex:0 0 auto;width:40px;height:40px;border:0;border-radius:50%;background:rgba(255,255,255,.08);
     color:#fff;font:700 18px/40px system-ui,sans-serif;text-align:center;cursor:pointer;padding:0}
   [role="menu"] > .crrav-menuclose{position:absolute;top:10px;right:12px;z-index:2}
+  /* (v3.117.0) Survol : l'aperçu de Crunchyroll recouvre de nouveau TOUTE la carte (son
+     « Reprendre Ex » retombe en bas, comme d'origine) ; notre bloc s'efface pendant le
+     survol et laisse passer les clics, sauf notre bouton « Lire la suite » qui reste au
+     premier plan et cliquable. */
   .crrav-hasinfo > [class*="hover-info"]{bottom:var(--crrav-crih,0px) !important}
-  .crrav-crinfo{position:relative;z-index:2}
+  .crrav-crinfo{position:relative;z-index:2;pointer-events:none;transition:background-color .15s,border-color .15s,box-shadow .15s}
+  .crrav-crinfo .crrav-cri-next,.crrav-crinfo a,.crrav-crinfo button{pointer-events:auto}
+  .crrav-crinfo > *{transition:opacity .15s}
+  @media (hover:hover){
+    .crrav-hasinfo:hover > .crrav-crinfo{background:transparent !important;border-color:transparent !important;box-shadow:none !important}
+    .crrav-hasinfo:hover > .crrav-crinfo > :not(.crrav-cri-next){opacity:0}
+  }
   .crrav-cri-next{display:flex;align-items:center;gap:7px;margin-top:9px;padding:8px 11px;border-radius:9px;min-width:0;
     background:#ff640a;color:#1a0b02;text-decoration:none;font-size:12.5px;line-height:1.2;transition:filter .15s}
   .crrav-cri-next:hover{filter:brightness(1.1)}
