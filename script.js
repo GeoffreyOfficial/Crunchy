@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.119.0
+// @version      4.0.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.119.0';
+  const SCRIPT_VERSION = '4.0.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -108,6 +108,7 @@
     crHomeCustom: true,        // accueil : rubriques masquables / réordonnables
     crWarnings: true,          // (v3.111.0) alertes si Crunchyroll change sa page
     crCalendar: true,          // (v3.115.0) accueil : section « Prochaines sorties »
+    crAnimations: true,        // (v4.0.0) animations des ajouts sur le site
     showHero: false,           // carte « à la une » (série bientôt finie) en haut de Reste à voir,
                                // masquée par défaut — activable dans les réglages.
 
@@ -773,6 +774,8 @@
       help: 'Pour que la suite saute aux yeux. Retrouvent leur éclat au survol.' },
     { key: 'crMarkUpTo', label: 'Menu ⋮ : « Marquer comme vu jusqu’ici »', type: 'bool', impact: 'crsite', crsub: 'series',
       help: 'Sur une fiche série : marque vus cet épisode et tous ceux d’avant (saisons précédentes comprises), en deux temps.' },
+    { key: 'crAnimations', label: 'Animations', type: 'bool', impact: 'crsite', crsub: 'maint',
+      help: 'Apparitions en cascade, compteurs qui défilent, reflets sur les boutons, jour courant qui respire… Toujours coupées si ton appareil demande de réduire les animations.' },
     { key: 'crWarnings', label: 'M’avertir si Crunchyroll change et qu’un ajout ne fonctionne plus', type: 'bool', impact: 'crsite', crsub: 'maint',
       help: 'Petite pastille ⚠ en bas à gauche du site, avec le détail. Chaque alerte peut être masquée (le temps de la visite) ou ignorée définitivement. Les détections restent visibles ci-dessous même désactivé.' },
     { key: 'crOpenInApp', label: 'Android : lancer les vidéos dans l’appli Crunchyroll', type: 'bool', impact: 'crsite', crsub: 'mobile',
@@ -19419,12 +19422,14 @@
     const paint = (m) => {
       const html = crpBlockHtml(m, epId);
       if (el.dataset.html === html) return;
+      const first = !el.dataset.html;
       el.dataset.html = html;
       el.classList.remove('loading');
       el.innerHTML = html;
       crpFillBars(el);
       crpSizeHover(card, el);
       crpQueueEqualize();
+      if (first) crpFresh(el, '.crrav-cri-chip, .crrav-cri-next');
     };
     if (!el) {
       el = document.createElement('div');
@@ -19821,7 +19826,7 @@
     const genres = (d.genres || []).length ? `<div class="crrav-dash-tags">${d.genres.map((g) => `<span>${escapeHtml(g)}</span>`).join('')}</div>` : '';
     return `<div class="crrav-dash-in">
       <div class="crrav-dash-main">
-        <div class="crrav-dash-ring">${crpRing(m.pct, doneAll)}<div class="v"><b>${m.pct}<small>%</small></b><span>${seenTotal}/${m.epTotal}</span></div></div>
+        <div class="crrav-dash-ring">${crpRing(m.pct, doneAll)}<div class="v"><b><span data-crrav-count="pct">${m.pct}</span><small>%</small></b><span>${seenTotal}/${m.epTotal}</span></div></div>
         <div class="crrav-dash-head">
           <span class="kick">Ta progression</span>
           <h3>${title}</h3>
@@ -19866,13 +19871,23 @@
       if (!el.classList.contains('loading')) { el.classList.add('loading'); el.dataset.html = ''; el.innerHTML = '<div class="crrav-dash-in"><div class="crrav-dash-skel"></div></div>'; }
       return;
     }
-    const html = crpDashHtml(m, sid);
+    // (v4.0.0) Même gouttière que le contenu de la fiche : on reprend la classe de conteneur
+    // de Crunchyroll (celle des « Détails de la série ») — aligné sur le reste de la page à
+    // toutes les largeurs, y compris très grand écran. Repli : nos propres marges.
+    const ref = document.querySelector('.erc-series-details-section, .erc-season-episode-list');
+    const refCont = ref && ref.closest('[class*="container--"]');
+    const contCls = refCont && !host.inBody ? refCont.className : '';
+    el.classList.toggle('native', !!contCls);
+    const html = contCls ? `<div class="${escapeHtml(contCls)} crrav-dash-wrap">${crpDashHtml(m, sid)}</div>` : crpDashHtml(m, sid);
     if (el.dataset.html === html) return;
     const first = el.classList.contains('loading') || !el.dataset.html;
+    if (first) setTimeout(() => crpFresh(el, '.crrav-dash-t, .crrav-dash-s, .crrav-dash-tags span'), 0);
     el.classList.remove('loading');
     el.classList.toggle('done', !(m.epLeft + m.filmLeft));
     el.dataset.html = html;
     el.innerHTML = html;
+    if (first && crpMotionOk()) { el._crpCounts = { pct: 0 }; }
+    crpCountUp(el);
     if (first) {
       el.classList.remove('anim');
       const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (f) => setTimeout(f, 16);
@@ -20282,7 +20297,12 @@
     if (el.dataset.key === key) return;
     el.dataset.key = key;
     const html = crpCalHtml(cls);
-    if (el.dataset.html !== html) { el.dataset.html = html; el.innerHTML = html; }
+    if (el.dataset.html !== html) {
+      const first = !el.dataset.html;
+      el.dataset.html = html;
+      el.innerHTML = html;
+      if (first) crpFresh(el, '.crrav-cal-day');
+    }
   }
 
   // (v3.108.0) Android : le site Crunchyroll refuse la lecture dans le navigateur (« Regardez
@@ -20364,6 +20384,48 @@
       openCrunchyrollApp(href);
     }
     return true;
+  }
+
+  // ═══════════ (v4.0.0) Animations ═══════════
+  // Principes : uniquement opacity/transform (rien qui recalcule la mise en page), jouées à
+  // la PREMIÈRE apparition d'un bloc (classe .crrav-fresh, retirée ensuite) — une simple mise
+  // à jour de contenu ne rejoue pas l'entrée, pas de clignotement. Coupées par le réglage
+  // crAnimations ET par la préférence système « réduire les animations ».
+  function crpMotionOk() {
+    if (!CFG.crAnimations) return false;
+    try { return !(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (_) { return true; }
+  }
+  function crpFresh(el, sel) {
+    if (!el || !crpMotionOk()) return;
+    if (sel) el.querySelectorAll(sel).forEach((c, i) => c.style.setProperty('--i', String(Math.min(i, 14))));
+    el.classList.add('crrav-fresh');
+    clearTimeout(el._crpFreshT);
+    el._crpFreshT = setTimeout(() => el.classList.remove('crrav-fresh'), 1800);
+  }
+  // Compteurs qui défilent : chaque [data-crrav-count="clé"] passe de son ancienne valeur à la
+  // nouvelle (entiers), au lieu de sauter. Mémoire des valeurs sur le conteneur.
+  function crpCountUp(root) {
+    if (!root) return;
+    const prev = root._crpCounts || (root._crpCounts = {});
+    root.querySelectorAll('[data-crrav-count]').forEach((n) => {
+      const k = n.dataset.crravCount;
+      const to = parseInt(n.textContent.replace(/\D/g, ''), 10);
+      if (!Number.isFinite(to)) return;
+      const from = prev[k];
+      prev[k] = to;
+      if (from == null || from === to || !crpMotionOk()) return;
+      const t0 = performance.now(), dur = 650;
+      const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (f) => setTimeout(() => f(performance.now()), 16);
+      const step = (t) => {
+        if (!n.isConnected) return;
+        const p = Math.min(1, (t - t0) / dur);
+        const e = 1 - Math.pow(1 - p, 3);
+        n.textContent = String(Math.round(from + (to - from) * e));
+        if (p < 1) raf(step);
+      };
+      n.textContent = String(from);
+      raf(step);
+    });
   }
 
   // (v3.111.0) Chaque étape du scan passe par un disjoncteur : une étape qui plante 5 fois
@@ -20760,6 +20822,7 @@
     if (CFG.crCalendar) t += crpCalOrderCss();
     if (crpWantsCwRow()) t += crpReserveCss();
     if (CFG.crHideHero) t += CRP_HIDEHERO_CSS;
+    if (!CFG.crAnimations) t += `\n  [class*="crrav-"],[class*="crrav-"]::after,[class*="crrav-"] *,#crrav-crwarn{animation:none !important;transition:none !important}`;
     return t;
   }
   function crpWantsCwRow() { return !!(CFG.crPageEnhance && CFG.crCwStats); }
@@ -20807,6 +20870,22 @@
     wrap.appendChild(nb);
   }
   function crpToggleHero(hide) {
+    const w0 = crpHeroWrap();
+    if (hide && w0 && crpMotionOk() && !w0._crpOut) {
+      // Sortie en fondu/glissé avant de masquer pour de bon (transform/opacity seulement).
+      w0._crpOut = true;
+      w0.classList.add('crrav-hero-out');
+      setTimeout(() => { w0.classList.remove('crrav-hero-out'); crpToggleHeroNow(true); w0._crpOut = false; }, 280);
+      return;
+    }
+    crpToggleHeroNow(hide);
+  }
+  function crpToggleHeroNow(hide) {
+    const w0 = crpHeroWrap();
+    if (!hide && w0 && crpMotionOk()) {
+      w0.classList.add('crrav-hero-in');
+      setTimeout(() => w0.classList.remove('crrav-hero-in'), 700);
+    }
     saveSettings({ crHideHero: !!hide });
     crpInjectCss();
     crpQueueScan();
@@ -20935,15 +21014,21 @@
     const parts = [];
     if (CFG.crCwStats) {
       if (loaded) {
-        parts.push(`<span class="crrav-cwstat ok" title="Tout est vu (série terminée, ou à jour d’une série en diffusion)${CFG.crCwHideDone ? ' — retirées de Reprendre' : ''}">\u2713 ${pl(upToDate, 'série')} à jour</span>`);
-        parts.push(`<span class="crrav-cwstat" title="Total des épisodes restant à voir dans les séries de Reprendre">${pl(eps, 'épisode')} restant${eps > 1 ? 's' : ''}${sec ? ` · ${fmtDuration(sec)}` : ''}</span>`);
+        parts.push(`<span class="crrav-cwstat ok" title="Tout est vu (série terminée, ou à jour d’une série en diffusion)${CFG.crCwHideDone ? ' — retirées de Reprendre' : ''}">\u2713 <b data-crrav-count="upd">${upToDate}</b> série${upToDate > 1 ? 's' : ''} à jour</span>`);
+        parts.push(`<span class="crrav-cwstat" title="Total des épisodes restant à voir dans les séries de Reprendre"><b data-crrav-count="eps">${eps}</b> épisode${eps > 1 ? 's' : ''} restant${eps > 1 ? 's' : ''}${sec ? ` · ${fmtDuration(sec)}` : ''}</span>`);
         if (films) parts.push(`<span class="crrav-cwstat film">${TICK_MOVIE_ICO}${pl(films, 'film')}</span>`);
       }
       if (outN) parts.push(`<span class="crrav-cwstat dim" title="Séries lancées mais absentes de ta watchlist et de tes Crunchylists — masquées (réglable dans Mon Crunchy › Réglages › Crunchyroll)">${outN} hors listes masquée${outN > 1 ? 's' : ''}</span>`);
       if (loaded < total) parts.push(`<span class="crrav-cwstat dim">${loaded}/${total}\u2026</span>`);
     }
     const html = parts.join('');
-    if (el.dataset.html !== html) { el.dataset.html = html; el.innerHTML = html; }
+    if (el.dataset.html !== html) {
+      const first = !el.dataset.html;
+      el.dataset.html = html;
+      el.innerHTML = html;
+      crpCountUp(el);
+      if (first) crpFresh(el, '.crrav-cwstat');
+    }
   }
 
   // Invalide une série (après une action) et redessine ses blocs avec des données fraîches.
@@ -21411,6 +21496,8 @@
   @media (min-width:64em){.crrav-dash{padding-inline:4rem}}
   @media (min-width:107.5em){.crrav-dash{padding-inline:5rem}}
   .crrav-dash.inbody{padding:1rem 0 0}
+  .crrav-dash.native{max-width:none;padding:1.25rem 0 .25rem}
+  @media (min-width:35.5em){.crrav-dash.native{padding:1.5rem 0 .5rem}}
   .crrav-dash-in{position:relative;border-radius:20px;padding:18px;overflow:hidden;isolation:isolate;
     background:radial-gradient(120% 140% at 0% 0%,rgba(255,100,10,.22),transparent 55%),
       linear-gradient(160deg,rgba(32,32,40,.96),rgba(16,16,20,.96));
@@ -21435,7 +21522,7 @@
   .crrav-dash-ring .v{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;line-height:1}
   .crrav-dash-ring .v b{font:800 26px/1 system-ui;color:#fff;letter-spacing:-.02em}
   .crrav-dash-ring .v b small{font-size:13px;font-weight:700;color:#bbb;margin-left:1px}
-  .crrav-dash-ring .v span{margin-top:4px;font:600 11.5px/1 system-ui;color:#9a9aa4}
+  .crrav-dash-ring .v > span{margin-top:4px;font:600 11.5px/1 system-ui;color:#9a9aa4}
   .crrav-dash-head{min-width:0;display:flex;flex-direction:column;align-items:flex-start;gap:6px}
   .crrav-dash-head .kick{font:800 10.5px/1 system-ui;letter-spacing:.12em;text-transform:uppercase;color:#ff9a55}
   .crrav-dash.done .crrav-dash-head .kick{color:#8fe09a}
@@ -21501,7 +21588,7 @@
     .crrav-dash-main{column-gap:13px;row-gap:12px}
     .crrav-dash-ring{grid-row:1;width:76px;height:76px}
     .crrav-dash-ring .v b{font-size:19px}
-    .crrav-dash-ring .v span{font-size:10.5px}
+    .crrav-dash-ring .v > span{font-size:10.5px}
     .crrav-dash-head h3{font-size:16.5px}
     .crrav-dash-head h3 em{display:block;font-size:14px;margin-top:2px}
     .crrav-dash-head h3 .sep{display:none}
@@ -21545,6 +21632,38 @@
     box-shadow:0 12px 30px rgba(255,100,10,.45),0 4px 12px rgba(0,0,0,.5)}
   .crrav-crtoast.out{opacity:0;transform:translateX(-50%) translateY(10px);transition:opacity .25s,transform .25s}
   @keyframes crrav-cri-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+  /* ═══ (v4.0.0) Animations ═══ */
+  @keyframes crrav-up{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+  @keyframes crrav-pop{0%{opacity:0;transform:scale(.8)}65%{opacity:1;transform:scale(1.05)}100%{opacity:1;transform:none}}
+  @keyframes crrav-shine{0%{transform:translateX(-130%) skewX(-18deg)}100%{transform:translateX(230%) skewX(-18deg)}}
+  @keyframes crrav-breathe{0%,100%{box-shadow:0 10px 30px -14px rgba(255,100,10,.5)}50%{box-shadow:0 12px 38px -10px rgba(255,100,10,.9)}}
+  @keyframes crrav-heroout{to{opacity:0;transform:translateY(-14px) scale(.985)}}
+  @keyframes crrav-heroin{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:none}}
+  .crrav-fresh .crrav-cri-chip,.crrav-fresh .crrav-cwstat,.crrav-fresh .crrav-dash-tags span{
+    animation:crrav-pop .42s cubic-bezier(.2,.8,.2,1) both;animation-delay:calc(var(--i,0) * 55ms + 140ms)}
+  .crrav-fresh .crrav-cri-next,.crrav-fresh .crrav-cal-day,.crrav-fresh .crrav-dash-t,.crrav-fresh .crrav-dash-s{
+    animation:crrav-up .5s cubic-bezier(.2,.8,.2,1) both;animation-delay:calc(var(--i,0) * 60ms + 120ms)}
+  /* Reflet qui balaie les boutons principaux : une fois à l'apparition, puis au survol. */
+  .crrav-cri-next,.crrav-dash-cta{position:relative;overflow:hidden;isolation:isolate}
+  .crrav-cri-next::after,.crrav-dash-cta::after{content:"";position:absolute;inset:-20% auto -20% 0;width:40%;pointer-events:none;
+    background:linear-gradient(90deg,transparent,rgba(255,255,255,.45),transparent);transform:translateX(-130%) skewX(-18deg);z-index:1}
+  .crrav-cri-next:hover::after,.crrav-dash-cta:hover::after,.crrav-fresh .crrav-cri-next::after,.crrav-dash.anim .crrav-dash-cta::after{
+    animation:crrav-shine .9s cubic-bezier(.3,.6,.3,1) .35s 1 both}
+  .crrav-cri-next:active,.crrav-dash-cta:active{transform:scale(.97)}
+  .crrav-cri-next{transition:filter .15s,transform .12s}
+  /* Jour courant des Prochaines sorties : il « respire ». */
+  .crrav-cal-day.today{animation:crrav-breathe 3.2s ease-in-out 1.2s infinite}
+  .crrav-cal-ev .bd.new{animation:crrav-pop .5s cubic-bezier(.2,.8,.2,1) .3s both}
+  /* Pastilles et alertes */
+  #crrav-crwarn{animation:crrav-up .45s cubic-bezier(.2,.8,.2,1) both}
+  .crrav-railhid,.crrav-cwhero{animation:crrav-pop .38s cubic-bezier(.2,.8,.2,1) both}
+  .crrav-hero-out{animation:crrav-heroout .28s ease-in forwards !important}
+  .crrav-hero-in{animation:crrav-heroin .55s cubic-bezier(.2,.8,.2,1) both}
+  .crrav-dash-s .b i,.crrav-dash-air .bar i{transition:width 1s cubic-bezier(.2,.8,.2,1)}
+  /* Garde-fous : jamais d'animation si l'appareil demande à les réduire. */
+  @media (prefers-reduced-motion:reduce){
+    [class*="crrav-"],[class*="crrav-"]::after,[class*="crrav-"] *,#crrav-crwarn,#crrav-appbtn{animation:none !important;transition:none !important}
+  }
   @keyframes crrav-cri-shim{from{background-position:200% 0}to{background-position:-200% 0}}
   @keyframes crrav-cri-pulse{0%{box-shadow:0 0 0 0 rgba(255,100,10,.7)}100%{box-shadow:0 0 0 7px rgba(255,100,10,0)}}
   @keyframes crrav-crtoast-in{from{opacity:0;transform:translateX(-50%) translateY(16px)}to{opacity:1;transform:translateX(-50%)}}
