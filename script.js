@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.115.0
+// @version      3.116.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.115.0';
+  const SCRIPT_VERSION = '3.116.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -19367,6 +19367,41 @@
     const v = `${h}px`;
     if (card.style.getPropertyValue('--crrav-crih') !== v) card.style.setProperty('--crrav-crih', v);
   }
+  // Blocs d'infos de Reprendre alignés : dans chaque rangée, chaque bloc reçoit une hauteur
+  // minimale qui le fait finir au même niveau que le plus bas de la rangée. Une lecture de
+  // mise en page groupée, puis une écriture groupée ; relancé après un rendu ou un
+  // redimensionnement (jamais en boucle : on ne relit que des hauteurs naturelles).
+  function crpEqualize() {
+    const coll = document.querySelector(CRP_HIST_SEL);
+    const blocks = coll ? [...coll.querySelectorAll('.crrav-crinfo')] : [];
+    const wide = window.matchMedia && window.matchMedia('(min-width:35.5em)').matches;
+    blocks.forEach((b) => { if (b.style.minHeight) b.style.minHeight = ''; });
+    if (!wide || blocks.length < 2) return;
+    const rows = new Map();
+    for (const b of blocks) {
+      if (b.classList.contains('loading') || !b.offsetParent) continue;
+      const r = b.getBoundingClientRect();
+      const card = b.parentElement;
+      const key = Math.round(card.getBoundingClientRect().top / 8);
+      if (!rows.has(key)) rows.set(key, []);
+      rows.get(key).push({ b, top: r.top, bottom: r.bottom, card });
+    }
+    for (const list of rows.values()) {
+      if (list.length < 2) continue;
+      const maxB = Math.max(...list.map((x) => x.bottom));
+      for (const x of list) {
+        const h = Math.ceil(maxB - x.top);
+        if (h > x.bottom - x.top + 1) x.b.style.minHeight = `${h}px`;
+      }
+    }
+    for (const list of rows.values()) for (const x of list) crpSizeHover(x.card, x.b);
+  }
+  function crpQueueEqualize() {
+    if (CRP.eqT) return;
+    const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (f) => setTimeout(f, 16);
+    CRP.eqT = 1;
+    raf(() => { CRP.eqT = 0; safeCall(crpEqualize, undefined, 'crpEqualize'); });
+  }
   function crpRenderBlock(card, seriesId, epId) {
     let el = card.querySelector(':scope > .crrav-crinfo');
     const key = `${seriesId}|${epId}|${CRP.ver}`;
@@ -19381,6 +19416,7 @@
       el.innerHTML = html;
       crpFillBars(el);
       crpSizeHover(card, el);
+      crpQueueEqualize();
     };
     if (!el) {
       el = document.createElement('div');
@@ -20792,6 +20828,8 @@
     }
     crpHistoryVisible(coll);
     crpHistoryHeader(coll, bySeries, lists);
+    const sig = [...coll.children].map((c) => (c.classList.contains('crrav-cwdone') || c.classList.contains('crrav-cwnolist') ? 0 : 1)).join('');
+    if (sig !== CRP.eqSig) { CRP.eqSig = sig; crpQueueEqualize(); }
   }
 
   // (v3.107.0) Bilan : toujours sur SA PROPRE ligne sous « Reprendre / Voir l'historique »,
@@ -21138,14 +21176,14 @@
      multipliaient par 5 le coût de chaque recalcul de style de la page (tout le flux est
      réexaminé à chaque mutation). Remplacés par des marqueurs posés par le scan. */
   .crrav-hasinfo{flex-wrap:wrap;height:auto !important;max-height:none !important}
-  /* (v3.115.0) Reprendre sur ordinateur/tablette : cartes d'une même rangée à hauteur égale —
-     la carte remplit sa cellule de grille, le bloc d'infos s'étire, et le bouton « Lire la
-     suite » est calé en bas : toutes les boîtes finissent à la même ligne. */
+  /* (fix v3.116.0) Hauteur égale dans Reprendre : on NE touche PLUS à la mise en page de la
+     carte Crunchyroll (la passer en flex écrasait la vignette à 0 px de haut). Seul NOTRE
+     bloc s'allonge (hauteur minimale calculée en JS, rangée par rangée — crpEqualize), en
+     colonne, bouton « Lire la suite » calé en bas. */
   @media (min-width:35.5em){
-    .erc-history-collection > .collection-item > .crrav-hasinfo{display:flex !important;flex-direction:column;flex-wrap:nowrap;height:100% !important}
-    .erc-history-collection > .collection-item > .crrav-hasinfo > .crrav-crinfo{flex:1 0 auto;display:flex;flex-direction:column}
-    .erc-history-collection > .collection-item > .crrav-hasinfo > .crrav-crinfo > .crrav-cri-next{margin-top:auto}
-    .erc-history-collection > .collection-item > .crrav-hasinfo > .crrav-crinfo > .crrav-cri-chips{margin-bottom:9px}
+    .erc-history-collection .crrav-crinfo{display:flex;flex-direction:column}
+    .erc-history-collection .crrav-crinfo > .crrav-cri-next{margin-top:auto}
+    .erc-history-collection .crrav-crinfo > .crrav-cri-chips{margin-bottom:9px}
   }
   [data-t^="episode-card"] > .crrav-crinfo{grid-column:1/-1;grid-row:auto;flex:1 0 100%;width:100%;max-width:100%;order:99;
     align-self:stretch;position:relative;min-width:0}
@@ -21234,10 +21272,12 @@
   .crrav-plan-bar i{display:block;height:100%;background:#ff640a;border-radius:3px}
   /* (v3.115.0) accueil : Prochaines sorties */
   .crrav-calsec{min-width:0}
-  .crrav-cal-in{box-sizing:border-box;width:100%;max-width:84.375rem;margin-inline:auto;padding-inline:1.25rem}
-  @media (min-width:35.5em){.crrav-cal-in{padding-inline:2.5rem}}
-  @media (min-width:64em){.crrav-cal-in{padding-inline:4rem}}
-  @media (min-width:107.5em){.crrav-cal-in{padding-inline:5rem}}
+  /* Avec la classe de conteneur de Crunchyroll (reprise de « Reprendre »), ce sont LEURS
+     marges et largeur max qui s'appliquent — les nôtres ne servent que de repli. */
+  .crrav-cal-in:not([class*="container--"]){box-sizing:border-box;width:100%;max-width:84.375rem;margin-inline:auto;padding-inline:1.25rem}
+  @media (min-width:35.5em){.crrav-cal-in:not([class*="container--"]){padding-inline:2.5rem}}
+  @media (min-width:64em){.crrav-cal-in:not([class*="container--"]){padding-inline:4rem}}
+  @media (min-width:107.5em){.crrav-cal-in:not([class*="container--"]){padding-inline:5rem}}
   .crrav-cal-head{display:flex;align-items:center;flex-wrap:wrap;gap:6px 12px;margin-bottom:14px}
   .crrav-cal-h2{margin:0;flex:0 1 auto}
   .crrav-cal-h2:not([class*="heading--"]){font:800 1.5rem/1.2 system-ui,sans-serif;color:#fff}
@@ -21523,7 +21563,7 @@
     }
     document.addEventListener('click', crpOnClick, true);
     // Le nombre de cartes Reprendre visibles dépend de la largeur (--visible-count).
-    window.addEventListener('resize', () => { CRP.resized = true; crpQueueScan(); }, { passive: true });
+    window.addEventListener('resize', () => { CRP.resized = true; crpQueueScan(); crpQueueEqualize(); }, { passive: true });
     document.addEventListener('visibilitychange', () => {
       if (!document.hidden && CRP.dirtyHidden) { CRP.dirtyHidden = false; crpQueueScan(); }
     });
