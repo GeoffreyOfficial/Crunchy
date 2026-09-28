@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      3.112.0
+// @version      3.113.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '3.112.0';
+  const SCRIPT_VERSION = '3.113.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -19253,7 +19253,7 @@
         const film = movies.includes(nx);
         const pos = seasons.indexOf(nx.season) + 1;
         return {
-          id: nx.id, n: nx.n, title: nx.title || '', film, started: !!nx.started,
+          id: nx.id, ids: (nx.ids || [nx.id]).slice(0, 16), n: nx.n, title: nx.title || '', film, started: !!nx.started,
           label: film ? 'Film' : (seasons.length > 1 && pos > 0 ? `S${pos} E${nx.n}` : `E${nx.n}`),
         };
       })(),
@@ -19286,7 +19286,10 @@
   // déjà le prochain élément à voir, on propose celui-ci directement.
   function crpNextHtml(m, cardEpId) {
     const nx = m && m.nextEp;
-    if (!nx || !nx.id || nx.id === cardEpId) return '';
+    // (fix v3.113.0) La carte peut montrer une AUTRE VERSION (VF, VOSTFR…) du même épisode :
+    // on compare sur toutes ses versions — sinon « Reprendre E3 » doublonnait une carte qui
+    // propose déjà E3.
+    if (!nx || !nx.id || nx.id === cardEpId || (nx.ids || []).includes(cardEpId)) return '';
     const verb = nx.started ? 'Reprendre' : 'Lire la suite';
     const full = `${nx.label}${nx.title ? ` \u2013 ${nx.title}` : ''}`;
     return `<a class="crrav-cri-next${nx.film ? ' film' : ''}" href="${crpLocalePrefix()}/watch/${escapeHtml(nx.id)}" title="${escapeHtml(`${verb} : ${full}`)}">`
@@ -19444,7 +19447,31 @@
     season: 'Supprimer la saison de l\u2019historique',
     series: 'Supprimer la série de l\u2019historique',
   };
+  // (v3.113.0) Sur téléphone, le menu ⋮ s'ouvre en plein écran ; sa croix de fermeture
+  // pouvait manquer (ou rester invisible), laissant la feuille impossible à refermer. On
+  // garantit une croix — la nôtre seulement si celle de Crunchyroll n'est pas visible —
+  // qui referme via le déclencheur du menu, comme leur propre bouton.
+  function crpEnsureMenuClose(menu) {
+    const cs = getComputedStyle(menu);
+    if (cs.position !== 'fixed') { const x = menu.querySelector(':scope .crrav-menuclose'); if (x) x.remove(); return; }
+    const theirs = menu.querySelector('[data-t="mobile-header-close-svg"], [class*="close-icon"]');
+    const r = theirs && theirs.getBoundingClientRect();
+    const visible = !!(r && r.width > 4 && r.height > 4 && r.right <= window.innerWidth + 1 && getComputedStyle(theirs).visibility !== 'hidden');
+    let mine = menu.querySelector('.crrav-menuclose');
+    if (visible) { if (mine) mine.remove(); return; }
+    if (mine) return;
+    mine = document.createElement('button');
+    mine.type = 'button';
+    mine.className = 'crrav-menuclose';
+    mine.setAttribute('aria-label', 'Fermer');
+    mine.dataset.crravMenuclose = '1';
+    mine.textContent = '\u2715';
+    const head = menu.querySelector('[class*="mobile-heading"]');
+    (head || menu).appendChild(mine);
+  }
   function crpDecorateMenu(menu) {
+    safeCall(() => crpEnsureMenuClose(menu), undefined, 'crpEnsureMenuClose');
+    if (!CFG.crHistoryDelete && !CFG.crMarkUpTo) return;
     if (menu.querySelector('[data-crrav-item]')) return;
     const ctx = crpMenuContext(menu);
     if (!ctx) return;
@@ -20140,7 +20167,7 @@
     }
   }
   function crpCleanupAll() {
-    document.querySelectorAll('.crrav-crinfo, [data-crrav-item], .crrav-crribbon, .crrav-cwstats, .crrav-herohide, .crrav-railhid, .crrav-plan, .crrav-dash, .crrav-epbadge, #crrav-crwarn, #crrav-appbtn, #crrav-crtoast')
+    document.querySelectorAll('.crrav-crinfo, [data-crrav-item], .crrav-crribbon, .crrav-cwstats, .crrav-cwhero, .crrav-herohide, .crrav-menuclose, .crrav-railhid, .crrav-plan, .crrav-dash, .crrav-epbadge, #crrav-crwarn, #crrav-appbtn, #crrav-crtoast')
       .forEach((n) => n.remove());
     const cls = ['crrav-cwdone', 'crrav-cwshow', 'crrav-cwnolist', 'crrav-hidecard', 'crrav-dimcard', 'crrav-epseen', 'crrav-epfilm', 'crrav-hasinfo', 'crrav-fhwrap', 'crrav-cwkeep'];
     document.querySelectorAll(cls.map((c) => '.' + c).join(',')).forEach((n) => n.classList.remove(...cls));
@@ -20179,9 +20206,7 @@
     crpStep('menus', () => {
       if (!CFG.crHistoryDelete) document.querySelectorAll('[data-crrav-del], [data-crrav-scope]').forEach((n) => n.remove());
       if (!CFG.crMarkUpTo) document.querySelectorAll('[data-crrav-upto]').forEach((n) => n.remove());
-      if (CFG.crHistoryDelete || CFG.crMarkUpTo) {
-        document.querySelectorAll('[role="menu"]').forEach((m) => safeCall(() => crpDecorateMenu(m), undefined, 'crpDecorateMenu'));
-      }
+      document.querySelectorAll('[role="menu"]').forEach((m) => safeCall(() => crpDecorateMenu(m), undefined, 'crpDecorateMenu'));
     }, 'Menus');
     crpStep('cards', () => {
       if (!CFG.crCardInfo) {
@@ -20481,7 +20506,7 @@
     if (CFG.crHideHero) t += CRP_HIDEHERO_CSS;
     return t;
   }
-  function crpWantsCwRow() { return !!(CFG.crPageEnhance && (CFG.crCwStats || CFG.crHideHero)); }
+  function crpWantsCwRow() { return !!(CFG.crPageEnhance && CFG.crCwStats); }
   function crpInjectCss() {
     const host = document.head;
     if (!host) return false;
@@ -20598,6 +20623,18 @@
     }
     const h2 = section.querySelector('h2');
     if (!h2 || !h2.parentElement || h2.contains(coll)) return;
+    // (v3.113.0) « Afficher le carrousel » : sur la ligne du titre, juste avant « Voir
+    // l'historique » — plus perdu en bout de bilan (il passait seul à la ligne sur téléphone).
+    let hb = h2.parentElement.querySelector(':scope > .crrav-cwhero');
+    if (CFG.crHideHero && !hb) {
+      hb = document.createElement('button');
+      hb.type = 'button';
+      hb.className = 'crrav-cwhero';
+      hb.dataset.crravHero = 'show';
+      hb.title = 'Réafficher le grand carrousel en haut de l’accueil';
+      hb.innerHTML = '<span aria-hidden="true">\u25BE</span> <span class="lg">Afficher le </span>carrousel';
+      h2.insertAdjacentElement('afterend', hb);
+    } else if (!CFG.crHideHero && hb) hb.remove();
     let el = h2.parentElement.querySelector(':scope > .crrav-cwstats');
     if (!crpWantsCwRow()) { if (el) el.remove(); h2.parentElement.classList.remove('crrav-fhwrap'); return; }
     if (!el) {
@@ -20628,7 +20665,6 @@
       if (outN) parts.push(`<span class="crrav-cwstat dim" title="Séries lancées mais absentes de ta watchlist et de tes Crunchylists — masquées (réglable dans Mon Crunchy › Réglages › Crunchyroll)">${outN} hors listes masquée${outN > 1 ? 's' : ''}</span>`);
       if (loaded < total) parts.push(`<span class="crrav-cwstat dim">${loaded}/${total}\u2026</span>`);
     }
-    if (CFG.crHideHero) parts.push('<button type="button" class="crrav-cwstat btn crrav-cwhero" data-crrav-hero="show" title="Réafficher le grand carrousel en haut de l’accueil">\u25BE Afficher le carrousel</button>');
     const html = parts.join('');
     if (el.dataset.html !== html) { el.dataset.html = html; el.innerHTML = html; }
   }
@@ -20850,6 +20886,18 @@
       crpToggleHero(hero.dataset.crravHero === 'hide');
       return;
     }
+    const mclose = e.target.closest('[data-crrav-menuclose]');
+    if (mclose) {
+      e.preventDefault();
+      e.stopPropagation();
+      crpCloseMenuOf(mclose);
+      // Repli : si le déclencheur ne referme pas (structure changée), on simule Échap.
+      setTimeout(() => {
+        const m = mclose.closest('[role="menu"]');
+        if (m && m.isConnected) document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      }, 120);
+      return;
+    }
     const upto = e.target.closest('[data-crrav-upto]');
     if (upto) {
       e.preventDefault();
@@ -20932,6 +20980,9 @@
     animation:crrav-cri-pulse 1.6s ease-out infinite}
   .crrav-cri-chip.film{background:rgba(94,211,220,.15);color:#8fe6ec}
   .crrav-crdel.armed{color:#ff7b7b !important;font-weight:700 !important}
+  .crrav-menuclose{margin-left:auto;flex:0 0 auto;width:40px;height:40px;border:0;border-radius:50%;background:rgba(255,255,255,.08);
+    color:#fff;font:700 18px/40px system-ui,sans-serif;text-align:center;cursor:pointer;padding:0}
+  [role="menu"] > .crrav-menuclose{position:absolute;top:10px;right:12px;z-index:2}
   .crrav-hasinfo > [class*="hover-info"]{bottom:var(--crrav-crih,0px) !important}
   .crrav-crinfo{position:relative;z-index:2}
   .crrav-cri-next{display:flex;align-items:center;gap:7px;margin-top:9px;padding:8px 11px;border-radius:9px;min-width:0;
@@ -21163,8 +21214,12 @@
   .crrav-cwstat.dim{background:none;color:#8a8a94;font-weight:600}
   .crrav-cwstat.btn{border:1px solid rgba(255,255,255,.16);cursor:pointer;background:none;color:#a9a9b3;font-weight:600}
   .crrav-cwstat.btn:hover,.crrav-cwstat.btn:focus-visible{background:rgba(255,100,10,.15);color:#ffb27a;border-color:rgba(255,120,40,.4)}
-  .crrav-cwhero{margin-left:auto}
+  .crrav-cwhero{order:0;align-self:center;flex:0 0 auto;margin:0 0 0 .75rem;border:1px solid rgba(255,255,255,.16);border-radius:999px;
+    padding:5px 11px;background:none;color:#a9a9b3;font:600 12px/1.2 system-ui,sans-serif;cursor:pointer;white-space:nowrap}
+  .crrav-cwhero:hover,.crrav-cwhero:focus-visible{background:rgba(255,100,10,.15);color:#ffb27a;border-color:rgba(255,120,40,.4)}
   @media (max-width:35.49em){
+    .crrav-cwhero{padding:4px 9px;font-size:11px;margin-left:.5rem}
+    .crrav-cwhero .lg{display:none}
     .crrav-cwstat{font-size:11px;padding:3px 8px}
     .crrav-herohide{top:10px;right:10px;padding:6px 10px}
   }`;
