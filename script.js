@@ -4587,6 +4587,78 @@
   }
 
 
+  // ─── Suivi automatique des suites (S1 → S2 → S3, « Part 2 »…) ─────────────────────────
+  // Problème : plusieurs saisons partagent UN titre Crunchyroll (« Les Carnets de l'apothicaire »)
+  // et la recherche texte renvoie surtout les fiches anciennes (terminées) : on se retrouvait
+  // avec la fiche de la saison 1 (FINISHED, aucun prochain épisode) alors que Crunchyroll
+  // diffuse la saison 3. Règle générale, sans table manuelle : si Crunchyroll voit la série EN
+  // DIFFUSION mais que la fiche retenue n'est pas elle-même en cours avec un prochain
+  // épisode, on remonte la chaîne des relations SEQUEL d'AniList (4 niveaux max) et on retient
+  // la suite RELEASING (ou à venir avec date), cohérente avec l'année du dernier épisode CR.
+  async function anilistFetchRelations(ids) {
+    const out = new Map();
+    const clean = [...new Set((ids || []).filter((x) => Number.isFinite(x)))];
+    if (!clean.length) return out;
+    const blocks = clean.map((id, i) =>
+      `m${i}: Media(id: ${id}) { id relations { edges { relationType node { id type format status startDate { year } } } } }`
+    ).join('\n');
+    const data = await anilistQuery(`query {\n${blocks}\n}`, {});
+    clean.forEach((id, i) => {
+      const m = data && data[`m${i}`];
+      const edges = (m && m.relations && m.relations.edges) || [];
+      out.set(id, edges.filter((e) => e && e.relationType === 'SEQUEL' && e.node && e.node.type === 'ANIME').map((e) => e.node));
+    });
+    return out;
+  }
+  // best : Map(s.id → fiche retenue) — modifiée sur place. Renvoie le nombre de séries corrigées.
+  async function anilistFollowSequels(best, targets) {
+    const TVISH = new Set(['TV', 'TV_SHORT', 'ONA']);
+    const st = new Map();
+    for (const s of targets) {
+      const m = best.get(s.id);
+      if (!m || m.__forced || !s.airing) continue;
+      if (m.status === 'RELEASING' && m.nextAiringEpisode) continue;   // déjà la bonne fiche
+      st.set(s.id, { s, m, frontier: [m.id], seen: new Set([m.id]), pick: null });
+    }
+    if (!st.size) return 0;
+    for (let depth = 0; depth < 4; depth++) {
+      if (anilistCooldownRemainingMs() > 0) break;
+      const active = [...st.values()].filter((x) => !x.pick && x.frontier.length);
+      if (!active.length) break;
+      let rel;
+      try { rel = await anilistFetchRelations(active.flatMap((x) => x.frontier)); } catch (_) { break; }
+      for (const x of active) {
+        const y = (x.s.lastAired && x.s.lastAired.air) ? new Date(x.s.lastAired.air).getFullYear() : null;
+        const next = [], found = [];
+        for (const id of x.frontier) for (const n of (rel.get(id) || [])) {
+          if (x.seen.has(n.id)) continue;
+          x.seen.add(n.id); next.push(n.id);
+          const yearOk = !y || !(n.startDate && n.startDate.year) || n.startDate.year >= y - 1;
+          if (TVISH.has(n.format) && yearOk && (n.status === 'RELEASING' || n.status === 'NOT_YET_RELEASED')) found.push(n);
+        }
+        if (found.length) {
+          found.sort((a, b) => (a.status === 'RELEASING' ? 0 : 1) - (b.status === 'RELEASING' ? 0 : 1));
+          x.pick = found[0];
+        }
+        x.frontier = next;
+      }
+    }
+    let fixed = 0;
+    await Promise.all([...st.values()].filter((x) => x.pick).map(async (x) => {
+      try {
+        const data = await anilistQuery(`query ($id: Int) { Media(id: $id, type: ANIME) { ...F } }\n${ANILIST_FRAGMENT}`, { id: x.pick.id });
+        const full = data && data.Media;
+        // Une suite « à venir » sans date de prochain épisode n'apporte rien au calendrier.
+        if (!full || (full.status === 'NOT_YET_RELEASED' && !full.nextAiringEpisode)) return;
+        full.__viaSequel = true;
+        best.set(x.s.id, full);
+        fixed++;
+        LOG(`AniList : « ${x.s.title} » → suite retenue #${full.id} (${aniPrimaryTitle(full)}, ${full.status}) au lieu de #${x.m.id}`);
+      } catch (_) { /* best-effort : on garde la fiche d'origine */ }
+    }));
+    return fixed;
+  }
+
   async function anilistFetchSchedules(ids) {
     const out = new Map();
     const clean = [...new Set((ids || []).filter((x) => Number.isFinite(x)))];
@@ -4920,6 +4992,9 @@
     if (!o || !o.v || o.v.av !== ANILIST_CACHE_VER) return true;   // ancien format = à refaire
     const age = Date.now() - o.ts;
     if (age > anilistTtlMs(o.v)) return true;
+    // Une correspondance forcée (ANILIST_TITLE_OVERRIDES) ajoutée ou modifiée après coup :
+    // si la fiche en cache n'est pas celle forcée, on relit tout de suite.
+    if (s && s.title) { const ov = anilistOverrideId(s.title); if (ov && o.v.aniId !== ov) return true; }
     // (v4.2.1) Trois cas où le cache est connu pour être faux AVANT son TTL :
     //  1. le « prochain épisode » mémorisé est déjà passé (l'épisode est sorti depuis) →
     //     AniList a forcément une nouvelle date ; on relit au plus toutes les 30 min ;
@@ -4928,6 +5003,10 @@
     //     retenue) → on relit toutes les 6 h au lieu d'attendre 90 jours ;
     //  3. série en diffusion appariée sans AUCUNE date de prochain épisode → même rythme.
     if (o.v.nextEpTs && o.v.nextEpTs < Date.now() && age > 30 * 60e3) return true;
+    // Entrées écrites avant le suivi des suites (relv) : si CR voit la série en diffusion et que
+    // la fiche en cache n'a pas de prochain épisode, on retente UNE fois tout de suite
+    // (au lieu d'attendre 6 h) — aucun vidage de cache nécessaire.
+    if (s && s.airing && o.v.relv !== 1 && (o.v.anilistStatus !== 'RELEASING' || !o.v.nextEpTs)) return true;
     if (s && s.airing && age > 6 * 3600e3
       && (!o.v.matched || o.v.anilistStatus !== 'RELEASING' || !o.v.nextEpTs)) return true;
     return false;
@@ -5035,6 +5114,11 @@
         }
       }
 
+      // ── Phase 1ter : séries diffusées côté CR dont la fiche retenue est une saison terminée ──
+      if (anilistCooldownRemainingMs() === 0 && best.size) {
+        try { await anilistFollowSequels(best, targets); } catch (_) { /* best-effort */ }
+      }
+
       // ── Phase 2 : airingSchedule ciblé (précision fin de saison / prochain épisode) ──
       // Uniquement les matchs EN DIFFUSION dont le total d'épisodes n'est pas officiel :
       // pour tout le reste, computeAniSchedule se débrouille sans airingSchedule.
@@ -5063,7 +5147,7 @@
       for (const s of targets) {
         if (!searched.has(s.id)) continue;
         const m = best.get(s.id);
-        const result = { matched: false, ...EMPTY_ANI, aniId: null, aniTitle: '', av: ANILIST_CACHE_VER };
+        const result = { matched: false, ...EMPTY_ANI, aniId: null, aniTitle: '', av: ANILIST_CACHE_VER, relv: 1 };
         if (m) Object.assign(result, computeAniSchedule(m, s),
           { matched: true, aniId: m.id, aniTitle: aniPrimaryTitle(m) });
         cacheSet('anilist:' + s.id, result);
