@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      4.2.1
+// @version      4.3.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '4.2.1';
+  const SCRIPT_VERSION = '4.3.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -4291,6 +4291,7 @@
     source
     studios(isMain: true) { nodes { name } }
     nextAiringEpisode { episode airingAt }
+    externalLinks { url site }
     airingSchedule(perPage: 60) { nodes { episode airingAt } }
   }`;
 
@@ -4459,6 +4460,7 @@
     source
     studios(isMain: true) { nodes { name } }
     nextAiringEpisode { episode airingAt }
+    externalLinks { url site }
   }`;
 
   // items : [{ key, title }] — construit une requête légère groupée. Renvoie
@@ -4797,6 +4799,17 @@
   // assez sûre. Score = similarité de titre, bonifiée si la fiche est « en diffusion »
   // (comme la série CR) et si l'année de début concorde. Le garde-fou final exige un
   // nom fort, OU un nom correct CORROBORÉ par l'année/le statut — sinon on renonce.
+  // Liaison par ID : beaucoup de fiches AniList portent le lien Crunchyroll de la série
+  // (…/series/GRxxxxxxxx/…) dans externalLinks. S'il contient l'ID de NOTRE série, c'est la
+  // bonne franchise à coup sûr (indépendamment de la langue du titre). Absent = aucun effet.
+  function aniHasCrLink(m, crId) {
+    if (!m || !crId || !Array.isArray(m.externalLinks)) return false;
+    const want = String(crId).toLowerCase();
+    return m.externalLinks.some((l) => {
+      const parsed = l && l.url ? parseCrunchyrollUrl(l.url) : null;   // même parseur que Découverte
+      return !!parsed && parsed.id.toLowerCase() === want;
+    });
+  }
   function aniPickMatch(media, s) {
     if (!Array.isArray(media) || !media.length) return null;
     // Correspondance forcée (voir ANILIST_TITLE_OVERRIDES) : aucun score de titre à
@@ -4861,11 +4874,13 @@
         }
       }
       m.__titleScore = titleScore; m.__releasing = releasing; m.__yearMatch = yearMatch;
-      const composite = titleScore + (releasing && s.airing ? 0.15 : 0) + (yearMatch ? 0.1 : 0) + epBonus + seasonBonus;
+      m.__crLink = aniHasCrLink(m, s.id);
+      const composite = titleScore + (m.__crLink ? 1 : 0) + (releasing && s.airing ? 0.15 : 0) + (yearMatch ? 0.1 : 0) + epBonus + seasonBonus;
       if (composite > bestComposite) { bestComposite = composite; best = m; }
     }
     if (!best) return null;
-    const ok = best.__titleScore >= 0.9
+    const ok = best.__crLink   // lien Crunchyroll = même franchise, quel que soit le titre
+      || best.__titleScore >= 0.9
       || (best.__titleScore >= 0.6 && (best.__yearMatch || (best.__releasing && s.airing)));
     return ok ? best : null;
   }
