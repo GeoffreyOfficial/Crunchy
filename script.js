@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      4.3.0
+// @version      4.3.1
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '4.3.0';
+  const SCRIPT_VERSION = '4.3.1';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -15651,6 +15651,22 @@
               } catch (e) { d.enFetchError = (e && (e.message || String(e))) || 'inconnue'; }
             }
           }
+          // Même logique que l'enrichissement réel : série en diffusion côté CR mais fiche
+          // retenue terminée / sans prochain épisode → on suit les suites (S1 → S2 → S3).
+          // Sans ça, le diagnostic affichait la saison 1 alors que la carte utilisait la bonne.
+          if (best) {
+            const bm = new Map([[diagTarget.id, best]]);
+            try {
+              if (await anilistFollowSequels(bm, [diagTarget])) {
+                const picked = bm.get(diagTarget.id);
+                if (picked && picked.id !== best.id) {
+                  d.viaSequelFrom = aniPrimaryTitle(best) || '?';
+                  if (!media.some((m) => m.id === picked.id)) { picked.__titleScore = best.__titleScore || 0; media.unshift(picked); }
+                  best = picked;
+                }
+              }
+            } catch (e) { d.sequelError = (e && (e.message || String(e))) || 'inconnue'; }
+          }
           d.candidateCount = media.length;
           d.candidates = media.slice(0, 6).map((m) => ({
             titre: aniPrimaryTitle(m) || (m.title && m.title.romaji) || '?',
@@ -15660,7 +15676,8 @@
           if (best) {
             const sch = computeAniSchedule(best, diagTarget);
             d.match = aniPrimaryTitle(best);
-            d.matchedVia = scoredAgainst === diagTarget ? 'titre affiché' : 'titre anglais (repli CR)';
+            d.matchedVia = (scoredAgainst === diagTarget ? 'titre affiché' : 'titre anglais (repli CR)')
+              + (d.viaSequelFrom ? ' → suite de « ' + d.viaSequelFrom + ' »' : '');
             // (diag) id + meanScore de la fiche RÉELLEMENT choisie : permet de vérifier
             // directement, ex. via https://anilist.co/anime/<id>, que la bonne saison/fiche
             // a été retenue, et si le meanScore est vraiment absent côté AniList à l'instant
