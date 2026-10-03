@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      4.6.0
+// @version      4.7.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '4.6.0';
+  const SCRIPT_VERSION = '4.7.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -3071,7 +3071,11 @@
   // Scan complet de contrôle au-delà de cet âge du dernier scan complet, même si l'incrémental
   // fonctionne : un éventuel trou futur ne reste jamais permanent.
   const HISTORY_FULL_RESCAN_MS = 7 * 24 * 3600e3;
-  const HISTORY_CACHE_CV = 3;
+  // (v4.7.0) cv 4 : les caches cv 2/3 ont pu être construits sur la seule page 1 (total
+  // annoncé = taille de page, voir getWatchedSeriesIds) → jamais réutilisés, scan complet.
+  const HISTORY_CACHE_CV = 4;
+  // Garde-fou anti-boucle quand le total annoncé n'est pas fiable (100 000 entrées).
+  const HISTORY_MAX_PAGES = 1000;
 
   // Le détail est stocké AVEC la liste des clés d'épisodes : sans elles, impossible de
   // fusionner un scan partiel avec l'ancien sans recompter les épisodes déjà connus.
@@ -3114,8 +3118,8 @@
   // en libellé lisible pour les indicateurs de chargement. Sans repère de total (scan
   // instantané / 1re page pas encore revenue), on retombe sur le texte neutre.
   function historyScanLabel(p) {
-    if (!p || !p.total) return 'Historique de visionnage…';
-    const bits = [`page ${p.done}/${p.total}`];
+    if (!p || !p.done) return 'Historique de visionnage…';
+    const bits = [p.total ? `page ${p.done}/${p.total}` : `page ${p.done}`];
     if (p.scanned) bits.push(`${p.scanned} entrées`);
     if (p.series)  bits.push(`${p.series} séries`);
     return 'Historique de visionnage… ' + bits.join(' · ');
@@ -3149,7 +3153,7 @@
     // (v4.6.0) Un cache cv 2 (ancien repère par id, potentiellement troué) n'est jamais servi
     // tel quel : scan complet de réparation immédiat, même s'il est encore « frais ».
     const cachedRaw = force ? null : cacheGet(cacheKey, freshMs);
-    const cached = (cachedRaw && !Array.isArray(cachedRaw) && cachedRaw.cv === 2) ? null : cachedRaw;
+    const cached = (cachedRaw && !Array.isArray(cachedRaw) && cachedRaw.cv >= 2 && cachedRaw.cv < HISTORY_CACHE_CV) ? null : cachedRaw;
     if (cached) {
       const ids = Array.isArray(cached) ? cached : (cached.ids || []);
       historyComplete = Array.isArray(cached) ? false : !!cached.complete;
@@ -3244,12 +3248,15 @@
     addFrom(firstData);
     let scanned = firstData.length;
 
-    // Plus de plafond réglable : on scanne TOUT l'historique (mis en cache ensuite, donc
-    // non répété). `total` est quasi toujours fourni par l'API dès la 1re page → on couvre
-    // toutes les pages ; s'il manque, un repli large suffit, la boucle s'arrêtant de toute
-    // façon sur la 1re page partielle (fin réelle de l'historique).
-    const maxEntries = total !== null ? total : 1000000;
-    const lastPage = Math.max(1, Math.ceil(maxEntries / PAGE_SIZE));
+    // (v4.7.0) BUG MAJEUR corrigé : Crunchyroll annonce `total` = nombre d'entrées DE LA PAGE
+    // (100), pas de l'historique entier — la page 2 renvoie pourtant 100 autres entrées
+    // (constaté au diagnostic). On en déduisait lastPage = 1 : seule la page 1 était lue, le
+    // scan se déclarait « complet », et Découverte coupait en plus son filet playheads →
+    // séries vues à 100 % reproposées, « Hors listes » quasi vide. Le total n'est désormais
+    // retenu que s'il DÉPASSE ce que la page 1 a renvoyé ; sinon on pagine jusqu'à la
+    // première page partielle/vide (vraie fin de l'historique).
+    const totalTrusted = total !== null && total > firstData.length;
+    const lastPage = totalTrusted ? Math.max(1, Math.ceil(total / PAGE_SIZE)) : HISTORY_MAX_PAGES;
 
     let reachedEnd = firstData.length < PAGE_SIZE || lastPage <= 1;
     if (stopAtMark) {
@@ -3260,12 +3267,20 @@
     if (!reachedEnd) {
       const pageNums = [];
       for (let pg = 2; pg <= lastPage; pg++) pageNums.push(pg);
-      const totalReq = pageNums.length + 1;
+      // Total de pages inconnu si le total annoncé n'est pas fiable : progression sans « /N ».
+      const totalReq = totalTrusted ? pageNums.length + 1 : null;
       let doneReq = 1;
       if (onProgress) onProgress({ done: doneReq, total: totalReq, series: ids.size, scanned });
 
       let stop = stopAtMark;
       const failedPages = [];
+      // (v4.7.0) Repères de fin, utiles quand le total annoncé n'est pas fiable : dernière page
+      // lue avec succès, et première page partielle/vide (vraie fin de l'historique).
+      let maxOkPage = 1, endPage = Infinity;
+      const notePage = (pg, data) => {
+        if (pg > maxOkPage) maxOkPage = pg;
+        if (data.length < PAGE_SIZE && pg < endPage) endPage = pg;
+      };
       for (let i = 0; i < pageNums.length && !stop; i += CFG.concurrency) {
         const wave = pageNums.slice(i, i + CFG.concurrency);
         // (fix v3.80.8) paceLimit() dans le pool — la taille de la « vague » ci-dessus reste
@@ -3280,6 +3295,7 @@
         for (let k = 0; k < pages.length; k++) {
           const data = pages[k];
           if (!data) { failedPages.push(wave[k]); continue; }   // (v4.5.5) page perdue : on la rejoue plus bas
+          notePage(wave[k], data);
           scanned += data.length;
           addFrom(data);
           if (data.length < PAGE_SIZE) stop = true;   // dernière page (partielle ou vide)
@@ -3287,6 +3303,37 @@
         }
         doneReq += wave.length;
         if (onProgress) onProgress({ done: doneReq, total: totalReq, series: ids.size, scanned });
+        // (v4.7.0) Sans total fiable, une vague ENTIÈREMENT en échec peut signifier qu'on a
+        // dépassé la fin (si l'API répond en erreur plutôt qu'en page vide), ou une simple
+        // rafale d'erreurs. On la rejoue tout de suite : si elle repasse, on continue d'avancer
+        // normalement ; sinon on s'arrête (au lieu d'enchaîner jusqu'à HISTORY_MAX_PAGES
+        // requêtes en échec) et le traitement des pages perdues ci-dessous tranche.
+        if (!totalTrusted && !stop && pages.every((d) => !d)) {
+          let recovered = false;
+          for (let round = 1; round <= 3 && !recovered; round++) {
+            await sleep(800 * round);
+            const again = await pool(wave, async (pg) => {
+              const r = await api(`/content/v2/${accountId}/watch-history`, {
+                page: pg, page_size: PAGE_SIZE, locale: CFG.locale, preferred_audio_language: 'ja-JP',
+              });
+              return r.data || [];
+            }, Math.min(2, paceLimit()));
+            if (!again.some((d) => d)) continue;
+            recovered = true;
+            for (let k = 0; k < again.length; k++) {
+              const data = again[k];
+              if (!data) continue;   // reste dans failedPages, rejouée plus bas
+              const at = failedPages.indexOf(wave[k]);
+              if (at >= 0) failedPages.splice(at, 1);
+              notePage(wave[k], data);
+              scanned += data.length;
+              addFrom(data);
+              if (data.length < PAGE_SIZE) stop = true;
+              if (stopAtMark) stop = true;
+            }
+          }
+          if (!recovered) stop = true;
+        }
       }
       // On n'a atteint la VRAIE fin de l'historique que si une page partielle est apparue
       // (stop). Le scan étant désormais complet (plus de plafond), ce cas correspond à la
@@ -3309,12 +3356,23 @@
         }, Math.min(2, paceLimit()));
         for (let k = 0; k < got.length; k++) {
           if (!got[k]) { failedPages.push(retry[k]); continue; }
+          notePage(retry[k], got[k]);
           scanned += got[k].length;
           addFrom(got[k]);
         }
       }
+      // (v4.7.0) Une page en échec APRÈS la vraie fin (page partielle) n'est pas un trou. Sans
+      // total fiable, des échecs persistants uniquement APRÈS la dernière page lue sont traités
+      // comme la fin de l'historique — mais sans le déclarer « complet » (prudence : le filet
+      // playheads de Découverte reste alors actif).
+      let tailErrors = false;
+      for (let k = failedPages.length - 1; k >= 0; k--) {
+        const pg = failedPages[k];
+        if (pg > endPage) failedPages.splice(k, 1);
+        else if (!totalTrusted && pg > maxOkPage) { failedPages.splice(k, 1); tailErrors = true; }
+      }
       historyGapPages = failedPages.length;
-      reachedEnd = stop;
+      reachedEnd = stop && !tailErrors;
     }
 
     // Un scan incrémental hérite de l'exhaustivité du scan précédent : on n'a relu que
@@ -3323,10 +3381,11 @@
     // si l'API cesse de servir des pages avant `total` (page vide/partielle trop tôt), l'ancien
     // test `reachedEnd` déclarait l'historique complet à tort. Découverte désactivait alors le
     // filet playheads et ne se fiait qu'à des ids incomplets → séries vues à 100 % proposées.
-    const coversTotal = total === null || scanned >= Math.floor(total * 0.98);
+    const coversTotal = !totalTrusted || scanned >= Math.floor(total * 0.98);
+    // (v4.7.0) Atteindre la page HISTORY_MAX_PAGES sans page partielle n'est pas une vraie fin.
     historyComplete = (incremental && stopAtMark)
       ? !!prev.complete
-      : (historyGapPages === 0 && ((reachedEnd && coversTotal) || (total !== null && scanned >= total)));
+      : (historyGapPages === 0 && ((reachedEnd && coversTotal) || (totalTrusted && scanned >= total)));
     LOG('historique de visionnage :', ids.size, 'séries (', scanned, '/', total ?? '?',
       'entrées scannées ·', PAGE_SIZE, 'par page )',
       historyComplete ? '— COMPLET' : '— partiel (limite atteinte)');
@@ -16535,6 +16594,11 @@
     if (r.extract && r.extract.sampleSize) {
       const rate = Math.round((r.extract.extracted / r.extract.sampleSize) * 100);
       if (rate < 80) return { status: 'warn', note: `Taux d'extraction bas (${rate} %) sur l'échantillon testé.` };
+    }
+    // (v4.7.0) Total annoncé = taille de la page 1 alors que la page 2 est pleine : ce n'est
+    // PAS le vrai total (Crunchyroll renvoie la taille de page). Le scan l'ignore désormais.
+    if (r.total != null && r.total <= r.depth && r.startWorks) {
+      return { status: 'ok', note: `Total annoncé (${r.total}) = taille de page, non fiable : le scan pagine jusqu’à la fin réelle · pagination et extraction OK.` };
     }
     return { status: 'ok', note: `${r.total ?? '?'} entrées au total côté Crunchyroll · pagination et extraction OK.` };
   }
