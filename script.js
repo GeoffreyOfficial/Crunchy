@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      4.5.2
+// @version      4.5.5
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '4.5.2';
+  const SCRIPT_VERSION = '4.5.5';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -3023,6 +3023,7 @@
   // l'endpoint n'existe pas ou échoue, on continue sans (5).
   // Vrai si le dernier scan a parcouru l'intégralité de l'historique Crunchyroll.
   let historyComplete = false;
+  let historyGapPages = 0;   // (v4.5.5) pages d'historique définitivement illisibles au dernier scan
   // Détail agrégé de l'historique (par série), rempli par le scan. Sert aux stats
   // « hors listes » : épisodes, heures, top séries, genres — sans requête en plus.
   let HISTORY_DETAIL = null;
@@ -3119,7 +3120,13 @@
     // requêtes : il s'arrête au repère du dernier scan). Utilisé quand tu relances /
     // demandes « 30 autres » : de quoi capter ce que tu viens de regarder à l'instant.
     const cacheKey = 'watchedids:' + accountId;
-    const cached = force ? null : cacheGet(cacheKey, CFG.discoverHistoryCacheHours * 3600e3);
+    // (v4.5.4) Le scan étant incrémental (1-2 requêtes quand une base v2 existe), inutile de
+    // se fier à un cache d'une heure : un épisode vu il y a 10 min doit exclure la série de
+    // Découverte. Plafond de fraîcheur = 2 min, SAUF si aucune base incrémentale n'existe
+    // encore (premier scan complet, ~80 requêtes) : là, on garde le réglage utilisateur.
+    const baseOk = (() => { const b = cacheGetStale(cacheKey); return !!(b && !Array.isArray(b) && b.mark && b.detail && b.ids && b.cv === 2); })();
+    const freshMs = baseOk ? Math.min(CFG.discoverHistoryCacheHours * 3600e3, 120e3) : CFG.discoverHistoryCacheHours * 3600e3;
+    const cached = force ? null : cacheGet(cacheKey, freshMs);
     if (cached) {
       const ids = Array.isArray(cached) ? cached : (cached.ids || []);
       historyComplete = Array.isArray(cached) ? false : !!cached.complete;
@@ -3138,9 +3145,10 @@
     // est introuvable (historique effacé, entrée supprimée, premier lancement).
     const prev = cacheGetStale(cacheKey);
     const prevMark = (prev && !Array.isArray(prev) && prev.mark) ? prev.mark : null;
-    const incremental = !!(prevMark && prev.detail && prev.ids);
+    const incremental = !!(prevMark && prev.detail && prev.ids && prev.cv === 2);   // (v4.5.3) cv<2 : drapeau « complet » non fiable → un scan complet de remise à niveau
     let stopAtMark = false;
 
+    historyGapPages = 0;
     const ids = new Set();
     // Détail par série, extrait de l'historique SANS requête supplémentaire : chaque
     // entrée porte l'épisode, sa durée (episode_metadata) et le titre/genres de la série.
@@ -3223,6 +3231,7 @@
       if (onProgress) onProgress({ done: doneReq, total: totalReq, series: ids.size, scanned });
 
       let stop = stopAtMark;
+      const failedPages = [];
       for (let i = 0; i < pageNums.length && !stop; i += CFG.concurrency) {
         const wave = pageNums.slice(i, i + CFG.concurrency);
         // (fix v3.80.8) paceLimit() dans le pool — la taille de la « vague » ci-dessus reste
@@ -3234,8 +3243,9 @@
           });
           return r.data || [];
         }, paceLimit());
-        for (const data of pages) {
-          if (!data) continue;
+        for (let k = 0; k < pages.length; k++) {
+          const data = pages[k];
+          if (!data) { failedPages.push(wave[k]); continue; }   // (v4.5.5) page perdue : on la rejoue plus bas
           scanned += data.length;
           addFrom(data);
           if (data.length < PAGE_SIZE) stop = true;   // dernière page (partielle ou vide)
@@ -3248,14 +3258,41 @@
       // (stop). Le scan étant désormais complet (plus de plafond), ce cas correspond à la
       // fin réelle de l'historique — le filet de sécurité playheads de Découverte reste
       // couvert. (Le cas « total réellement atteint » reste couvert par scanned >= total.)
+      // (v4.5.5) Pages perdues (429/timeout après les 3 essais de api()). pool() avale l'erreur et
+      // renvoyait null : la page était SAUTÉE en silence, ses séries manquaient pour toujours et
+      // le scan, mis en cache avec son repère, ne se réparait jamais. Sur un gros historique
+      // (des centaines de pages) cela arrive. On rejoue donc les pages manquantes, à faible
+      // débit, jusqu'à 3 tours.
+      for (let round = 1; round <= 3 && failedPages.length; round++) {
+        await sleep(800 * round);
+        const retry = failedPages.splice(0, failedPages.length);
+        LOG(`historique : ${retry.length} page(s) à rejouer (tour ${round})`);
+        const got = await pool(retry, async (pg) => {
+          const r = await api(`/content/v2/${accountId}/watch-history`, {
+            page: pg, page_size: PAGE_SIZE, locale: CFG.locale, preferred_audio_language: 'ja-JP',
+          });
+          return r.data || [];
+        }, Math.min(2, paceLimit()));
+        for (let k = 0; k < got.length; k++) {
+          if (!got[k]) { failedPages.push(retry[k]); continue; }
+          scanned += got[k].length;
+          addFrom(got[k]);
+        }
+      }
+      historyGapPages = failedPages.length;
       reachedEnd = stop;
     }
 
     // Un scan incrémental hérite de l'exhaustivité du scan précédent : on n'a relu que
     // le sommet, mais le socle en dessous provient d'un scan déjà validé.
+    // (v4.5.3) « Complet » exige maintenant d'avoir lu (presque) toutes les entrées annoncées :
+    // si l'API cesse de servir des pages avant `total` (page vide/partielle trop tôt), l'ancien
+    // test `reachedEnd` déclarait l'historique complet à tort. Découverte désactivait alors le
+    // filet playheads et ne se fiait qu'à des ids incomplets → séries vues à 100 % proposées.
+    const coversTotal = total === null || scanned >= Math.floor(total * 0.98);
     historyComplete = (incremental && stopAtMark)
       ? !!prev.complete
-      : (reachedEnd || (total !== null && scanned >= total));
+      : (historyGapPages === 0 && ((reachedEnd && coversTotal) || (total !== null && scanned >= total)));
     LOG('historique de visionnage :', ids.size, 'séries (', scanned, '/', total ?? '?',
       'entrées scannées ·', PAGE_SIZE, 'par page )',
       historyComplete ? '— COMPLET' : '— partiel (limite atteinte)');
@@ -3269,9 +3306,14 @@
 
     const detailArr = serializeDetail(detail);
     HISTORY_DETAIL = detailArr;
+    // Trou dans le scan : on garde les ids lus mais SANS repère → le prochain scan repart de zéro
+    // (au lieu de l'incrémental, qui aurait figé le trou), et Découverte retombe sur son filet
+    // playheads puisque complete=false.
     cacheSet(cacheKey, {
-      ids: [...ids], complete: historyComplete, detail: detailArr, mark: newMark,
+      ids: [...ids], complete: historyComplete, detail: detailArr,
+      mark: historyGapPages ? null : newMark, cv: historyGapPages ? 1 : 2,
     });
+    if (historyGapPages) console.warn(`[reste-à-voir] historique : ${historyGapPages} page(s) illisible(s) — scan à refaire au prochain lancement`);
     return ids;
   }
 
@@ -6213,8 +6255,49 @@
   // pouvoir s'arrêter net sur annulation). Retourne un candidat INTERMÉDIAIRE
   // (categories/tags pas encore complétés par AniList en mode légendaire — géré par
   // l'appelant) ou null si le candidat est rejeté ou le scan annulé en cours de route.
+  // (v4.5.3) Filet « déjà vu » PAR TITRE. L'exclusion de Découverte ne comparait que des ids de
+  // série : un même contenu catalogué sous une autre fiche Crunchyroll (doublage, remake, saison
+  // à part, fiche « (VF) »…) passait donc, même vu à 100 %. On compare aussi le titre (marqueurs
+  // de saison / doublage retirés) à celui de tout ce qui est dans l'historique et tes listes.
+  let WATCHED_TITLE_KEYS = new Set();
+  let WATCHED_TITLE_BIGRAMS = [];
+  function discoverTitleKey(t) {
+    return aniNorm(t)
+      .replace(/\b\d+(?:st|nd|rd|th|e|eme|ere)\s+(?:season|saison|part|partie|cour)\b/g, ' ')
+      .replace(/\b(?:season|saison|part|partie|cour)\s*\d+\b/g, ' ')
+      .replace(/\b(?:the\s+)?final\s+(?:season|saison)\b/g, ' ')
+      .replace(/\bs\d+\b/g, ' ')
+      .replace(/\b(?:dub|vf|vostfr|french dub|english dub|version francaise)\b/g, ' ')
+      .replace(/\s+/g, ' ').trim();
+  }
+  function buildWatchedTitleNet() {
+    const keys = new Set();
+    const add = (t) => { const k = discoverTitleKey(t); if (k && k.length >= 3) keys.add(k); };
+    for (const d of (Array.isArray(HISTORY_DETAIL) ? HISTORY_DETAIL : [])) if (d && d.title) add(d.title);
+    for (const x of STATE.series) add(x.title);
+    WATCHED_TITLE_KEYS = keys;
+    WATCHED_TITLE_BIGRAMS = [...keys].filter((k) => k.length >= 8).map((k) => ({ bg: aniBigrams(k), nums: (k.match(/\d+/g) || []).join(',') }));
+  }
+  function isWatchedByTitle(title) {
+    const k = discoverTitleKey(title);
+    if (!k) return false;
+    if (WATCHED_TITLE_KEYS.has(k)) return true;
+    if (k.length < 8 || !WATCHED_TITLE_BIGRAMS.length) return false;
+    const B = aniBigrams(k);
+    if (!B.size) return false;
+    const nums = (k.match(/\d+/g) || []).join(',');
+    for (const A of WATCHED_TITLE_BIGRAMS) {
+      if (A.nums !== nums) continue;   // « Jujutsu Kaisen 0 » ≠ « Jujutsu Kaisen » : chiffres différents = autre œuvre
+      let inter = 0;
+      for (const x of A.bg) if (B.has(x)) inter++;
+      if ((2 * inter) / (A.bg.size + B.size) >= 0.92) return true;
+    }
+    return false;
+  }
+
   async function evaluateDiscoverCandidate(p, ctx, opts) {
     const { accountId, REJ, D } = ctx;
+    if (p && p.title && isWatchedByTitle(p.title)) { REJ.knownHistory++; return null; }   // (v4.5.3)
     // (perf) En mode légendaire, on DIFFÈRE la récupération des épisodes (l'étape la plus
     // chère : saisons + épisodes par saison + playheads) : seul le SCORE décide si une
     // candidate est légendaire, et il n'utilise pas les épisodes. On ne les paiera donc que
@@ -6526,6 +6609,7 @@
       // série que tu viens d'ajouter à une liste ne doit plus apparaître ici. STATE.series
       // n'est PAS rechargé par une simple relance de Découverte, d'où cette lecture ciblée.
       const [listMemberIds, watchedIds] = await Promise.all([listMemberIdsPromise, watchedIdsPromise]);
+      buildWatchedTitleNet();   // (v4.5.3) filet par titre, voir isWatchedByTitle
 
       // Si une de ces séries n'est pas encore dans « Reste à voir » (STATE.series), c'est
       // un ajout tout frais : on relance « Reste à voir » en tâche de fond pour qu'elle y
@@ -6582,6 +6666,7 @@
         for (const c of knownPool) {
           if (!c || !c.id || excluded.has(c.id) || seenCandidate.has(c.id)) continue;
           seenCandidate.add(c.id);
+          if (isWatchedByTitle(c.title)) { REJ.knownHistory++; continue; }   // (v4.5.3)
           if (c.seasons != null && c.seasons > CFG.discoverMaxSeasons) continue;
           if (categoriesRejectedByGenre(c.categories, null, null, STATE.filters.discoverCatsInMode === 'all')) continue;
           // (fix doublon titre) Vérifié seulement ICI, juste avant l'entrée réelle dans
@@ -6909,6 +6994,7 @@
               if (p && p.id && excluded.has(p.id)) REJ[classifyKnownReason(p.id)]++;
               return false;
             }
+            if (p.title && isWatchedByTitle(p.title)) { REJ.knownHistory++; return false; }   // (v4.5.4) gratuit, avant toute requête
             candidatesSeenTotal++;
             // Pré-filtre de genre AVANT toute requête, MAIS seulement si le panel browse
             // porte les genres (souvent non). Le vrai filtre se fait plus bas, une fois le
