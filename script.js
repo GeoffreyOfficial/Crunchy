@@ -5046,8 +5046,22 @@
   // l'API publique AniList, limitée en débit) ; cache 12 h (en diffusion) / 7 j (sinon)
   // via anilistNeedsFetch, donc un passage complet ne se refait pas à chaque affichage.
   let anilistPassRunning = false;
-  async function enrichAnilistSchedule(list) {
+  async function enrichAnilistSchedule(list, _split) {
     if (!CFG.anilistSchedule || anilistPassRunning) return;
+    // (v4.3.2) Le calendrier ne dépend que des séries EN DIFFUSION. Avant, elles étaient
+    // traitées dans le même passage que toute la bibliothèque (genres des séries terminées…) :
+    // les dates n'apparaissaient qu'à la fin d'un passage parfois très long, d'où l'impression
+    // de devoir « mettre à jour » à la main. On traite donc d'abord les séries en diffusion,
+    // puis le reste, en deux passages successifs.
+    if (!_split) {
+      const air = (list || []).filter((s) => s && s.airing);
+      const rest = (list || []).filter((s) => s && !s.airing);
+      if (air.length && rest.length) {
+        await enrichAnilistSchedule(air, true);
+        await enrichAnilistSchedule(rest, true);
+        return;
+      }
+    }
     // Coupe-circuit : AniList a refusé (403/429) récemment → on laisse retomber avant de
     // relancer, sinon on risque un blocage d'IP. (Le diagnostic manuel, lui, passe outre.)
     const cooldown = anilistCooldownRemainingMs();
@@ -5218,7 +5232,12 @@
       }
       if (changed) { LOG(`AniList : ${changed} série(s) enrichie(s) (total prévu / fin de saison)`); render(); }
     } catch (e) { safeCall.log(e, 'enrichAnilistSchedule'); }
-    finally { anilistPassRunning = false; STATE.anilistProgress = null; render(); }
+    finally {
+      anilistPassRunning = false; STATE.anilistProgress = null; render();
+      // (v4.3.2) Le calendrier de l'accueil ne se recalcule que toutes les 30 s : on invalide
+      // sa clé pour qu'il se redessine dès que les dates AniList viennent d'arriver.
+      try { const cs = document.querySelector('.crrav-calsec'); if (cs) { delete cs.dataset.key; crpQueueScan(); } } catch (_) { /* hors accueil */ }
+    }
   }
 
   // Récupère À LA DEMANDE les tags AniList d'UNE seule série (baguette magique 🪄) quand ni
@@ -15622,13 +15641,82 @@
           : { ...target, lastAired: target.maxAir ? { air: target.maxAir } : null };
         const o = cacheReadRaw('anilist:' + target.id);
         d.cache = o ? { av: o.v && o.v.av, matched: o.v && o.v.matched, aniId: o.v && o.v.aniId,
-          meanScore: o.v && o.v.meanScore, planned: o.v && o.v.plannedTotal, ageMin: Math.round((Date.now() - o.ts) / 60000) } : null;
+          meanScore: o.v && o.v.meanScore, planned: o.v && o.v.plannedTotal, relv: o.v && o.v.relv, ageMin: Math.round((Date.now() - o.ts) / 60000) } : null;
         // (diag) target EST l'objet réellement utilisé par la carte affichée (référence
         // partagée avec STATE.series / STATE.discover.series, pas une copie) — comparer
         // son aniScore actuel au meanScore du cache/test permet de distinguer un calcul
         // qui n'a jamais tourné (les deux à null) d'un calcul fait mais pas répercuté à
         // l'affichage (cache/test ont une valeur, target.aniScore reste null).
         d.liveOnCard = { aniMatched: !!target.aniMatched, aniScore: target.aniScore ?? null };
+        // D'où la série est-elle connue ? (watchlist / quelle Crunchylist / aucune liste), dans
+        // quels onglets elle est chargée, et si elle apparaît dans le calendrier de l'accueil.
+        d.origin = safeCall(() => {
+          const id = target.id;
+          const has = (arr) => Array.isArray(arr) && arr.some((x) => x && x.id === id);
+          const tabs = [];
+          if (has(STATE.series)) tabs.push('Reste à voir');
+          if (has(STATE.orphan && STATE.orphan.series)) tabs.push('Hors listes');
+          if (has(STATE.discover && STATE.discover.series)) tabs.push('Découverte');
+          if (has(STATE.newPremieres && STATE.newPremieres.series)) tabs.push('Nouveautés');
+          const live = (STATE.series || []).find((x) => x && x.id === id) || null;
+          // Entrées brutes renvoyées par Crunchyroll pour cette série (watchlist ou Crunchylist).
+          const FLAGS = ['is_favorite', 'fully_watched', 'never_watched', 'new', 'playhead'];
+          const rawHits = [];
+          for (const it of (STATE.raw || [])) {
+            const r = extractSeriesRef(it);
+            if (!r || r.id !== id) continue;
+            const flags = FLAGS.filter((k) => it && it[k] !== undefined).map((k) => `${k}=${it[k]}`).join(', ');
+            rawHits.push((it._listId ? `Crunchylist « ${it._listTitle || '?'} »` : 'Watchlist (Ma liste)') + (flags ? ` [${flags}]` : ''));
+          }
+          const lists = crpListSet();
+          const snap = cacheReadRaw('snapshot');
+          let inCal = null;
+          try { inCal = crpCalEvents().ev.some((e) => e.s && e.s.id === id); } catch (_) { /* hors accueil */ }
+          return {
+            tabs, rawHits: [...new Set(rawHits)],
+            inWatchlist: live ? !!live.inWatchlist : null,
+            customLists: live ? (live.listIds || []).map((l) => l.title || 'Crunchylist') : [],
+            inListSet: lists ? lists.has(id) : null,
+            inSnapshot: !!(snap && Array.isArray(snap.v) && snap.v.some((x) => x && x.id === id)),
+            ignored: IGNORED.has(id), inCalendar: inCal,
+          };
+        }, null, 'diag:origin');
+        const fmtTs = (ts) => new Date(ts).toLocaleString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).replace(/\./g, '');
+        const fmtIn = (ts) => { const h = (ts - Date.now()) / 3600e3; return h < 0 ? 'passé' : h < 24 ? `dans ${Math.max(1, Math.round(h))} h` : `dans ${Math.round(h / 24)} j`; };
+        // Côté Crunchyroll : ce que le script sait de la série, indépendamment d'AniList.
+        d.crSeries = safeCall(() => {
+          const s = target, la = s.lastAired, ls = s.lastSeen;
+          const eps = Array.isArray(s.episodes) ? s.episodes : [];
+          return {
+            id: s.id, slug: s.slug || '',
+            seen: s.seen, total: s.total, remaining: s.remaining,
+            seasons: [...new Set(eps.map((e) => e.season))].length,
+            lastAired: la ? `${la.season ? 'S' + la.season + ' ' : ''}E${la.n ?? '?'} · ${la.air ? fmtTs(la.air) : 'date inconnue'} (il y a ${la.air ? Math.floor((Date.now() - la.air) / DAY) : '?'} j)` : 'aucun épisode daté',
+            lastSeen: ls ? `${ls.season ? 'S' + ls.season + ' ' : ''}E${ls.n ?? '?'}` : 'aucun',
+            window: CFG.airingWindowDays,
+          };
+        }, null, 'diag:crSeries');
+        // Verdict « pourquoi / pourquoi pas dans les prochaines sorties » (mêmes règles que le
+        // calendrier : estimatedSchedule + sureNextRelease + garde-fous de crpCalEvents).
+        d.cal = safeCall(() => {
+          const s = target, now = Date.now(), why = [];
+          const la = s.lastAired;
+          if (IGNORED.has(s.id)) why.push('série ignorée');
+          if (!s.airing) why.push(`pas « en diffusion » : dernier épisode ${la && la.air ? 'il y a ' + Math.floor((now - la.air) / DAY) + ' j' : 'non daté'}, seuil ${CFG.airingWindowDays} j`);
+          else if (!la || !la.air) why.push('aucun épisode daté côté Crunchyroll');
+          const src = crpCalSeries();
+          const lists = crpListSet();
+          if (!src.live && lists && !lists.has(s.id)) why.push('absente de tes listes (calendrier alimenté par l’instantané)');
+          if (!s.aniNextTs || !s.aniNextNum) why.push('AniList ne donne pas de prochain épisode daté (fiche absente, terminée ou pas encore relue)');
+          else if (s.aniNextTs <= now) why.push(`date AniList déjà passée (${fmtTs(s.aniNextTs)}) — relecture en attente`);
+          else if (s.plannedTotal && s.aniNextNum > s.plannedTotal) why.push(`prochain ép. E${s.aniNextNum} au-delà du total prévu (${s.plannedTotal})`);
+          if (why.length) return { ok: false, why };
+          const k0 = new Date(); k0.setHours(0, 0, 0, 0);
+          const late = s.aniNextTs - k0.getTime() >= 7 * DAY;
+          return { ok: true, text: `E${s.aniNextNum} · ${fmtTs(s.aniNextTs)} (${fmtIn(s.aniNextTs)})${late ? ' — colonne « Plus tard » (> 7 j)' : ''}` };
+        }, null, 'diag:cal');
+        d.needsFetch = safeCall(() => anilistNeedsFetch(target.id, target), null, 'diag:needsFetch');
+        d.cooldownMin = Math.ceil(anilistCooldownRemainingMs() / 60000);
         let media = null;
         try {
           const res = await anilistSearch(target.title);
@@ -15683,6 +15771,15 @@
             // a été retenue, et si le meanScore est vraiment absent côté AniList à l'instant
             // du test (plutôt que de le déduire indirectement depuis la carte Découverte).
             d.aniId = best.id;
+            d.aniExtra = {
+              status: best.status || '?', format: best.format || '?',
+              start: best.startDate && best.startDate.year ? [best.startDate.day, best.startDate.month, best.startDate.year].filter(Boolean).join('/') : '?',
+              episodes: best.episodes ?? 'inconnu',
+              next: best.nextAiringEpisode ? `E${best.nextAiringEpisode.episode} · ${fmtTs(best.nextAiringEpisode.airingAt * 1000)} (${fmtIn(best.nextAiringEpisode.airingAt * 1000)})` : 'aucun',
+              crLink: aniHasCrLink(best, target.id) ? 'oui — fiche liée à cette série Crunchyroll'
+                : (Array.isArray(best.externalLinks) && best.externalLinks.some((l) => l && parseCrunchyrollUrl(l.url)) ? 'lien vers une AUTRE série Crunchyroll ⚠' : 'aucun lien Crunchyroll sur la fiche'),
+              viaSequel: !!best.__viaSequel,
+            };
             d.meanScore = Number.isFinite(best.meanScore) ? best.meanScore : null;
             d.planned = sch.plannedTotal;
             d.end = sch.seasonEndTs ? new Date(sch.seasonEndTs).toLocaleDateString('fr-FR') : null;
@@ -15728,6 +15825,25 @@
     return h;
   }
 
+  // Lignes « d'où vient cette série ? » du test individuel (voir d.origin dans runAnilistDiag).
+  function diagOriginLines(o, line) {
+    const out = [];
+    const yn = (v) => (v == null ? '—' : v ? 'oui' : 'non');
+    out.push(line('Connue via', o.rawHits.length ? o.rawHits.join(' + ')
+      : 'aucune liste (ni watchlist, ni Crunchylist)'));
+    if (o.inWatchlist != null || o.customLists.length) {
+      out.push(line('Appartenance mémorisée', [o.inWatchlist ? 'Watchlist' : null,
+        ...o.customLists.map((l) => `Crunchylist « ${l} »`)].filter(Boolean).join(' + ') || 'aucune'));
+    }
+    out.push(line('Chargée dans', o.tabs.length ? o.tabs.join(', ') : 'aucun onglet en mémoire'));
+    out.push(line('Dans « mes listes » (accueil)', yn(o.inListSet)));
+    out.push(line('Dans l’instantané', yn(o.inSnapshot)));
+    if (o.ignored) out.push(line('Ignorée', 'oui'));
+    out.push(line('Dans les prochaines sorties', yn(o.inCalendar)));
+    if (o.inCalendar && !o.rawHits.length) out.push(line('⚠', 'visible dans le calendrier sans être dans une liste'));
+    return out.join('');
+  }
+
   function renderAnilistDiag() {
     const d = STATE.anilistDiag;
     if (!d) return '';
@@ -15753,6 +15869,8 @@
     let headline = `<div class="crrav-diag" style="margin-top:8px">
       ${line('Série testée', d.title || '—')}
       ${line('En diffusion', d.airing ? 'oui' : 'non')}
+      ${d.cal ? line('Dans les prochaines sorties ?', d.cal.ok ? '✓ ' + d.cal.text : '✗ ' + d.cal.why.join(' · ')) : ''}
+      ${d.origin ? diagOriginLines(d.origin, line) : ''}
     </div>`;
 
     let matchBlock = '';
@@ -15764,6 +15882,11 @@
         ${line('Fin de saison', d.end ? ((d.approx ? '~' : '') + d.end) : 'inconnue')}
         ${line('Prochain épisode', d.nextEp ?? '?')}
         ${line('Trouvé via', d.matchedVia)}
+        ${d.aniExtra ? line('Statut AniList', `${d.aniExtra.status} · ${d.aniExtra.format} · début ${d.aniExtra.start}`)
+          + line('Épisodes (fiche AniList)', d.aniExtra.episodes)
+          + line('Prochain ép. AniList', d.aniExtra.next)
+          + line('Lien Crunchyroll sur AniList', d.aniExtra.crLink)
+          + (d.aniExtra.viaSequel ? line('Fiche choisie', 'suite suivie automatiquement') : '') : ''}
       </div>`;
     }
 
@@ -15786,11 +15909,22 @@
       if (d.enTerms) techLines.push(['Termes cherchés (EN)', d.enTerms.join(' | ')]);
       if (d.enFetchError) techLines.push(['Requête EN', '❌ ' + d.enFetchError]);
     }
+    if (d.crSeries) {
+      const c = d.crSeries;
+      techLines.push(['ID Crunchyroll', c.id + (c.slug ? ' · ' + c.slug : '')]);
+      techLines.push(['Dernier épisode sorti', c.lastAired]);
+      techLines.push(['Dernier épisode vu', c.lastSeen]);
+      techLines.push(['Vus / restants / total', `${c.seen ?? '?'} / ${c.remaining ?? '?'} / ${c.total ?? '?'}`]);
+      techLines.push(['Saisons détectées', c.seasons]);
+      techLines.push(['Seuil « en diffusion »', c.window + ' jours']);
+    }
+    if (d.needsFetch != null) techLines.push(['Relecture AniList nécessaire', d.needsFetch ? 'oui (sera relue au prochain passage)' : 'non (cache valide)']);
+    techLines.push(['Coupe-circuit AniList', d.cooldownMin > 0 ? `actif ~${d.cooldownMin} min ⚠` : 'inactif']);
     techLines.push(['Vus/total CR', d.total]);
     techLines.push(['Réglage AniList', d.settingOn ? 'activé' : 'DÉSACTIVÉ ⚠']);
     if (d.match) techLines.push(['Épisodes datés AniList', d.schedNodes ?? 0]);
     if (d.liveOnCard) techLines.push(['Sur la carte en ce moment', `matched=${d.liveOnCard.aniMatched} · aniScore=${d.liveOnCard.aniScore ?? 'null'}`]);
-    if (d.cache) techLines.push(['Cache AniList', `format av${d.cache.av ?? '?'} · ${d.cache.matched ? 'match' : 'no-match'}${
+    if (d.cache) techLines.push(['Cache AniList', `format av${d.cache.av ?? '?'}${d.cache.relv ? ' · suites v' + d.cache.relv : ''} · ${d.cache.matched ? 'match' : 'no-match'}${
       d.cache.matched ? ` (#${d.cache.aniId ?? '?'}, meanScore ${d.cache.meanScore ?? 'null'})` : ''} · ${d.cache.ageMin} min`]);
     const techBlock = `<details class="crrav-diagdetails"><summary>Détails techniques</summary>
       <div class="crrav-diag">${techLines.map(([k, v]) => line(k, v)).join('')}</div>
@@ -20452,11 +20586,24 @@
   // le cache habituel (séries terminées 30 j, en cours 1 h) : le coût réel est faible. Les
   // pannes s'enchaînent au plus une fois toutes les 2 min (pas de boucle sur erreur).
   let crpCalAutoAt = 0;
+  let crpAniKickAt = 0;
   function crpCalAutoRefresh() {
     if (!CFG.crCalendar || crpPageKind() !== 'home') return;
     if (STATE.loading || sessionLost || document.visibilityState !== 'visible') return;
     const now = Date.now();
     const last = STATE.lastSync ? STATE.lastSync.getTime() : 0;
+    // (v4.3.2) AniList est indépendant de Crunchyroll : même si les séries sont « fraîches »
+    // (< refreshMinutes), une série en diffusion dont la fiche AniList manque, est périmée ou
+    // vient d'être corrigée doit être relue SANS attendre le prochain rechargement complet
+    // (c'est ce qui obligeait à cliquer sur « Mettre à jour »). Léger : AniList seulement,
+    // au plus une fois toutes les 5 min, jamais en parallèle d'un passage déjà lancé.
+    if (CFG.anilistSchedule && last && !STATE.fromSnapshot && !anilistPassRunning
+      && now - crpAniKickAt > 5 * 60e3 && Array.isArray(STATE.series)
+      && STATE.series.some((s) => s && s.airing && !IGNORED.has(s.id) && anilistNeedsFetch(s.id, s))) {
+      crpAniKickAt = now;
+      LOG('accueil : relecture AniList des séries en diffusion (sans rechargement Crunchyroll)');
+      idle(() => enrichAnilistSchedule(STATE.series));
+    }
     if (last && now - last < Math.max(1, CFG.refreshMinutes) * 60e3) return;
     // Après un échec (STATE.error), on espace davantage les nouvelles tentatives.
     if (now - crpCalAutoAt < (STATE.error ? 10 : 2) * 60e3) return;
