@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      4.3.2
+// @version      4.4.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '4.3.2';
+  const SCRIPT_VERSION = '4.4.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -5496,7 +5496,7 @@
     series: [], raw: [], loading: false, error: null, warning: null,
     announced: null, lastSync: null, settingsOpen: false, apiWarning: null, quotaWarning: null, anilistWarning: null,
     probeResult: null, probeRunning: false, reconnecting: false,
-    anilistDiag: null, anilistDiagRunning: false, anilistDiagTargetId: null, anilistDiagQ: '',
+    anilistDiag: null, anilistDiagRunning: false, anilistDiagTargetId: null, anilistDiagQ: '', anilistDiagSrc: 'all',
     fullDiag: null, fullDiagRunning: false, fullDiagText: '',
     anilistProgress: null,   // { done, total, startedAt } pendant enrichAnilistSchedule (planning + genres), null sinon
     historyGenreProgress: null,   // { done, total, startedAt } pendant enrichHistoryGenres (genres « hors listes »), null sinon
@@ -10348,6 +10348,21 @@
   .crrav-globalloading{color:#9a9aa4;font:600 12.5px/1 system-ui;margin:0 0 10px}
   .crrav-diagpicker{margin:6px 0 10px}
   .crrav-diagsearch{width:100%;padding:10px 14px;font-size:14.5px;background:rgba(255,255,255,.07)}
+  .crrav-diagsearchwrap{position:relative}
+  .crrav-diagsearchwrap .crrav-diagsearch{padding-right:40px}
+  .crrav-diagsearch::-webkit-search-cancel-button{-webkit-appearance:none;display:none}
+  .crrav-diagclear{position:absolute;right:6px;top:50%;transform:translateY(-50%);width:28px;height:28px;
+    border-radius:50%;border:0;background:rgba(255,255,255,.1);color:#d0d0d6;font:700 13px/1 system-ui;cursor:pointer}
+  .crrav-diagclear[hidden]{display:none}
+  .crrav-diagchips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+  .crrav-diagchip{padding:5px 11px;border-radius:999px;border:1px solid rgba(255,255,255,.14);
+    background:#1c1c22;color:#d8d8de;font:600 12px/1.2 system-ui;cursor:pointer}
+  .crrav-diagchip small{color:#9a9aa4;font:600 11px/1 system-ui;margin-left:2px}
+  .crrav-diagchip.on{border-color:#f47521;background:#2a1d14;color:#fff}
+  .crrav-diagchip.on small{color:#f4b183}
+  .crrav-diagcount{margin:2px 2px 0;color:#9a9aa4;font:600 11.5px/1.3 system-ui}
+  .crrav-diaglist{display:flex;flex-direction:column;gap:5px;margin-top:6px;max-height:46vh;
+    overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;padding-right:2px}
   .crrav-diagresults{display:flex;flex-direction:column;gap:5px;margin-top:8px}
   .crrav-diagpick{display:flex;flex-direction:column;gap:2px;text-align:left;width:100%;padding:9px 12px;
     background:#1c1c22;border:1px solid rgba(255,255,255,.1);border-radius:10px;color:#f2f2f4;cursor:pointer}
@@ -15617,35 +15632,108 @@
   }
   function anilistDiagAllSeries() { return anilistDiagIndex().map((e) => e.s); }
 
-  // Recherche de série pour les tests individuels : champ + résultats TAPABLES (au lieu d'une
-  // longue liste déroulante). Un tap choisit la série ET lance le test AniList tout de suite.
+  // Recherche de série pour les tests individuels : champ + filtres par source + liste COMPLÈTE
+  // et défilante de résultats TAPABLES. Un tap choisit la série ET lance le test AniList.
+  // (v4.4.0) Refonte : (1) la liste n'est plus plafonnée à 8 lignes, elle défile ; (2) sans
+  // saisie, TOUTES les séries connues sont parcourables (A→Z) ; (3) puces par source avec
+  // compteurs ; (4) recherche tolérante : accents/casse ignorés, mots dans n'importe quel
+  // ordre, slug et id inclus, et repli « approchants » (un mot au moins / lettres dans
+  // l'ordre) quand rien ne correspond exactement ; (5) bouton ✕ pour effacer.
   const diagNorm = (x) => String(x || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-  function anilistDiagResultsHtml(q) {
+  const DIAG_SRC_TABS = ['Reste à voir', 'Hors listes', 'Découverte', 'Nouveautés'];
+  const DIAG_MAX_ROWS = 400;   // garde-fou de rendu (la liste défile, mais pas de DOM démesuré)
+  function diagIsSubseq(needle, hay) {
+    let i = 0;
+    for (let j = 0; j < hay.length && i < needle.length; j++) if (hay[j] === needle[i]) i++;
+    return i === needle.length;
+  }
+  // Toutes les séries connues qui correspondent à la saisie (toutes sources confondues).
+  // → { rows: [{ s, tabs }], approx } ; approx = true si seuls des résultats approchants existent.
+  function anilistDiagMatches(q) {
     const words = diagNorm(q).split(/\s+/).filter(Boolean);
+    const idx = anilistDiagIndex().filter((e) => e.s && e.s.title);
+    const hayOf = (e) => diagNorm(`${e.s.title} ${String(e.s.slug || '').replace(/[-_]+/g, ' ')} ${e.s.id}`);
+    const titleOf = (e) => diagNorm(e.s.title);
+    const byAlpha = (a, b) => a.s.title.localeCompare(b.s.title, 'fr');
+    if (!words.length) return { rows: idx.slice().sort(byAlpha), approx: false };
+    const rank = (e) => {
+      const t = titleOf(e);
+      if (t.startsWith(words[0])) return 0;
+      if (t.split(/[^a-z0-9]+/).some((w) => w.startsWith(words[0]))) return 1;
+      return 2;
+    };
+    const order = (a, b) => rank(a) - rank(b) || (b.s.airing ? 1 : 0) - (a.s.airing ? 1 : 0) || byAlpha(a, b);
+    let rows = idx.filter((e) => { const h = hayOf(e); return words.every((w) => h.includes(w)); });
+    if (rows.length) return { rows: rows.sort(order), approx: false };
+    // Repli 1 : au moins un des mots (titres à plusieurs mots mal retapés)
+    rows = idx.filter((e) => { const h = hayOf(e); return words.some((w) => w.length >= 3 && h.includes(w)); });
+    // Repli 2 : lettres dans l'ordre (« tsgai » → « Tsugai »), seulement sur une saisie d'un mot
+    if (!rows.length && words.length === 1 && words[0].length >= 3) {
+      rows = idx.filter((e) => diagIsSubseq(words[0], titleOf(e).replace(/[^a-z0-9]/g, '')));
+    }
+    return { rows: rows.sort(order), approx: rows.length > 0 };
+  }
+  function anilistDiagChipsHtml(q, src) {
+    src = src || 'all';
+    const { rows } = anilistDiagMatches(q);
+    const counts = {};
+    for (const e of rows) for (const t of e.tabs) counts[t] = (counts[t] || 0) + 1;
+    const chip = (key, label, n) => `<button type="button" class="crrav-diagchip${src === key ? ' on' : ''}" data-act="diag-src" data-src="${escapeHtml(key)}">${escapeHtml(label)} <small>${n}</small></button>`;
+    return chip('all', 'Tout', rows.length)
+      + DIAG_SRC_TABS.filter((t) => counts[t] || t === src).map((t) => chip(t, t, counts[t] || 0)).join('');
+  }
+  function anilistDiagResultsHtml(q, src) {
+    src = src || 'all';
+    const hasQ = !!String(q || '').trim();
+    const { rows: all, approx } = anilistDiagMatches(q);
+    const rows = src === 'all' ? all : all.filter((e) => e.tabs.includes(src));
     const sel = STATE.anilistDiagTargetId;
-    let rows = anilistDiagIndex().filter((e) => e.s.title && words.every((w) => diagNorm(e.s.title).includes(w)));
-    rows.sort((a, b) => {
-      const sa = diagNorm(a.s.title).startsWith(words[0] || '\u0000') ? 0 : 1;
-      const sb = diagNorm(b.s.title).startsWith(words[0] || '\u0000') ? 0 : 1;
-      return sa - sb || (b.s.airing ? 1 : 0) - (a.s.airing ? 1 : 0) || a.s.title.localeCompare(b.s.title, 'fr');
-    });
-    if (!rows.length) return `<p class="crrav-diagcard-note" style="margin:6px 0">Aucune série ne correspond${
-      STATE.series.length ? '' : ' — ouvre d’abord « Reste à voir » pour charger tes séries'}.</p>`;
-    const MAX = 8, shown = rows.slice(0, MAX);
-    const html = shown.map((e) => `<button type="button" class="crrav-diagpick${e.s.id === sel ? ' on' : ''}" data-act="diag-pick" data-id="${escapeHtml(e.s.id)}">
-      <b>${escapeHtml(e.s.title)}</b>
-      <small>${e.s.airing ? '🟢 en diffusion · ' : ''}${escapeHtml(e.tabs.join(' + '))}</small></button>`).join('');
-    return html + (rows.length > MAX ? `<p class="crrav-diagcard-note" style="margin:4px 2px">+ ${rows.length - MAX} autres — précise ta recherche.</p>` : '');
+    if (!rows.length) {
+      const other = all.length && src !== 'all'
+        ? ` — ${all.length} dans d’autres sources : touche « Tout ».` : '.';
+      return `<p class="crrav-diagcard-note" style="margin:6px 2px">${hasQ ? `Aucune série ne correspond à « ${escapeHtml(q.trim())} »` : 'Aucune série dans cette source'}${other}${
+        STATE.series.length ? '' : ' Ouvre d’abord « Reste à voir » pour charger tes séries.'}</p>`;
+    }
+    const shown = rows.slice(0, DIAG_MAX_ROWS);
+    const n = rows.length;
+    const count = !hasQ ? `${n} série${n > 1 ? 's' : ''} connue${n > 1 ? 's' : ''} — tape pour filtrer`
+      : approx ? `Aucun titre exact — ${n} résultat${n > 1 ? 's' : ''} approchant${n > 1 ? 's' : ''}`
+      : `${n} résultat${n > 1 ? 's' : ''}`;
+    const list = shown.map((e) => {
+      const s = e.s;
+      const prog = typeof s.seen === 'number' && s.total ? ` · ${s.seen}/${s.total} ép.` : '';
+      return `<button type="button" class="crrav-diagpick${s.id === sel ? ' on' : ''}" data-act="diag-pick" data-id="${escapeHtml(s.id)}">
+      <b>${escapeHtml(s.title)}</b>
+      <small>${s.airing ? '🟢 en diffusion · ' : ''}${escapeHtml(e.tabs.join(' + '))}${prog}</small></button>`;
+    }).join('');
+    return `<p class="crrav-diagcount">${escapeHtml(count)}</p><div class="crrav-diaglist">${list}</div>${
+      n > DIAG_MAX_ROWS ? `<p class="crrav-diagcard-note" style="margin:4px 2px">+ ${n - DIAG_MAX_ROWS} autres — précise ta recherche.</p>` : ''}`;
   }
   function anilistDiagSeriesSelect() {
     if (!anilistDiagIndex().length) return '';
     const cur = anilistDiagAllSeries().find((s) => s.id === STATE.anilistDiagTargetId);
     const q = STATE.anilistDiagQ || '';
+    const src = STATE.anilistDiagSrc || 'all';
     return `<div class="crrav-diagpicker">
       ${cur ? `<p class="crrav-diagcard-note" style="margin:6px 0 4px">Série choisie : <b>${escapeHtml(cur.title)}</b></p>` : ''}
-      <input class="crrav-search crrav-diagsearch" type="search" placeholder="🔎 Chercher une série à tester…" value="${escapeHtml(q)}" autocomplete="off">
-      <div class="crrav-diagresults">${q.trim() ? anilistDiagResultsHtml(q) : '<p class="crrav-diagcard-note" style="margin:6px 2px">Tape le début du titre : toutes tes séries sont cherchables (listes, hors listes, nouveautés, découverte).</p>'}</div>
+      <div class="crrav-diagsearchwrap">
+        <input class="crrav-search crrav-diagsearch" type="search" enterkeyhint="search" placeholder="🔎 Chercher une série (titre, mots, début…)" value="${escapeHtml(q)}" autocomplete="off" autocapitalize="off" spellcheck="false">
+        <button type="button" class="crrav-diagclear" data-act="diag-clearq" aria-label="Effacer la recherche"${q ? '' : ' hidden'}>✕</button>
+      </div>
+      <div class="crrav-diagchips">${anilistDiagChipsHtml(q, src)}</div>
+      <div class="crrav-diagresults">${anilistDiagResultsHtml(q, src)}</div>
     </div>`;
+  }
+  // Met à jour UNIQUEMENT puces + résultats (jamais le champ) : le clavier mobile garde le focus.
+  function updateDiagPicker(picker) {
+    if (!picker) return;
+    const q = STATE.anilistDiagQ || '', src = STATE.anilistDiagSrc || 'all';
+    const chips = picker.querySelector('.crrav-diagchips');
+    if (chips) chips.innerHTML = anilistDiagChipsHtml(q, src);
+    const box = picker.querySelector('.crrav-diagresults');
+    if (box) { box.innerHTML = anilistDiagResultsHtml(q, src); const l = box.querySelector('.crrav-diaglist'); if (l) l.scrollTop = 0; }
+    const clr = picker.querySelector('.crrav-diagclear');
+    if (clr) clr.hidden = !q;
   }
 
   // Diagnostic AniList affiché À L'ÉCRAN (console inaccessible sur mobile) : lance la
@@ -17080,6 +17168,26 @@
     if (settingsSearchQ) { setSearch.value = settingsSearchQ; applySettingsFilter(setSearch); }
   }
 
+  // (v4.4.0)(fix) Câblage du champ de recherche des tests individuels (onglet Diagnostic).
+  // Même piège que wireSettingsSearch / wireGenreFields : buildSettingsSheetBodyHtml() régénère
+  // un NOUVEAU <input class="crrav-diagsearch"> à chaque reconstruction du corps de la sheet,
+  // or seul renderNow() le câblait. Changer de sous-onglet (→ Diagnostic) ou lancer un test
+  // passe par patchSettingsSheetInPlace(), qui ne le recâblait jamais : le champ restait donc
+  // totalement inerte (aucune réaction à la frappe). Idempotent (garde dataset.diagWired).
+  function wireDiagSearch(scopeEl) {
+    const input = scopeEl && scopeEl.querySelector('.crrav-diagsearch');
+    if (!input || input.dataset.diagWired) return;
+    input.dataset.diagWired = '1';
+    const refresh = debounce(() => {
+      STATE.anilistDiagQ = input.value;
+      updateDiagPicker(input.closest('.crrav-diagpicker'));
+    }, 90);
+    input.addEventListener('input', refresh);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); input.blur(); }   // ferme le clavier, résultats visibles
+    });
+  }
+
   function patchSettingsSheetInPlace(sheetEl) {
     // (46) Boutons Annuler/Rétablir dans l'en-tête de la sheet : leur état disabled dépend
     // d'appHistoryIndex, qui change à chaque ignorer/réafficher — ces actions passent TOUTES
@@ -17117,6 +17225,8 @@
       // (51) Même raisonnement que pour le tuner : le nouveau champ de recherche n'a
       // aucun écouteur tant qu'on ne le recâble pas explicitement ici.
       wireSettingsSearch(bodyEl);
+      // (v4.4.0)(fix) Idem pour la recherche de série du Diagnostic (voir wireDiagSearch).
+      wireDiagSearch(bodyEl);
       // (31)(fix) Idem pour les cases « Genres exclus » : ce chemin de patch-in-place
       // régénère aussi .crrav-genrefield mais sans ce recâblage, cocher/ajouter un genre
       // restait sans effet dès qu'un rendu de fond survenait sheet ouverte (voir wireGenreFields).
@@ -17907,18 +18017,8 @@
       }, 220));
     }
 
-    // Recherche de série (tests individuels du diagnostic) : filtre local, on ne met à jour QUE
-    // la liste de résultats (pas de re-rendu complet → le clavier mobile garde le focus).
-    const diagSearch = content.querySelector('.crrav-diagsearch');
-    if (diagSearch) {
-      diagSearch.addEventListener('input', debounce((e) => {
-        STATE.anilistDiagQ = e.target.value;
-        const box = content.querySelector('.crrav-diagresults');
-        if (box) box.innerHTML = STATE.anilistDiagQ.trim()
-          ? anilistDiagResultsHtml(STATE.anilistDiagQ)
-          : '<p class="crrav-diagcard-note" style="margin:6px 2px">Tape le début du titre.</p>';
-      }, 120));
-    }
+    // Recherche de série (tests individuels du diagnostic) — voir wireDiagSearch.
+    wireDiagSearch(content);
 
     // (27) Recherche dans le panneau « Séries ignorées » — même principe que la
     // recherche globale (focus repris après le rendu), mais purement locale : pas de
@@ -18737,6 +18837,19 @@
         }
         if (act.dataset.act === 'probe-anilist') {
           runAnilistDiag();
+          return;
+        }
+        if (act.dataset.act === 'diag-src') {
+          STATE.anilistDiagSrc = act.dataset.src || 'all';
+          updateDiagPicker(act.closest('.crrav-diagpicker'));    // pas de re-rendu complet
+          return;
+        }
+        if (act.dataset.act === 'diag-clearq') {
+          STATE.anilistDiagQ = '';
+          const picker = act.closest('.crrav-diagpicker');
+          const inp = picker && picker.querySelector('.crrav-diagsearch');
+          if (inp) { inp.value = ''; inp.focus(); }
+          updateDiagPicker(picker);
           return;
         }
         if (act.dataset.act === 'diag-pick') {
