@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      4.5.5
+// @version      4.6.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '4.5.5';
+  const SCRIPT_VERSION = '4.6.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -3057,6 +3057,22 @@
     return panel.id || em.id || '';
   }
 
+  // (v4.6.0) Date de visionnage d'une entrée d'historique (ms, 0 si absente). Sert de repère
+  // TEMPOREL au scan incrémental, à la place de l'id seul (voir getWatchedSeriesIds).
+  function historyTs(it) {
+    if (!it) return 0;
+    const p = it.panel || {};
+    return Date.parse(it.date_played || p.date_played || it.last_modified || '') || 0;
+  }
+  // Marge de tolérance du repère temporel : on relit un peu PLUS que strictement nécessaire
+  // (horloges, écritures concurrentes côté Crunchyroll) — quelques entrées relues en trop ne
+  // coûtent rien, la fusion par épisode logique dédoublonne.
+  const HISTORY_TS_MARGIN_MS = 10 * 60e3;
+  // Scan complet de contrôle au-delà de cet âge du dernier scan complet, même si l'incrémental
+  // fonctionne : un éventuel trou futur ne reste jamais permanent.
+  const HISTORY_FULL_RESCAN_MS = 7 * 24 * 3600e3;
+  const HISTORY_CACHE_CV = 3;
+
   // Le détail est stocké AVEC la liste des clés d'épisodes : sans elles, impossible de
   // fusionner un scan partiel avec l'ancien sans recompter les épisodes déjà connus.
   function serializeDetail(detail) {
@@ -3124,9 +3140,16 @@
     // se fier à un cache d'une heure : un épisode vu il y a 10 min doit exclure la série de
     // Découverte. Plafond de fraîcheur = 2 min, SAUF si aucune base incrémentale n'existe
     // encore (premier scan complet, ~80 requêtes) : là, on garde le réglage utilisateur.
-    const baseOk = (() => { const b = cacheGetStale(cacheKey); return !!(b && !Array.isArray(b) && b.mark && b.detail && b.ids && b.cv === 2); })();
+    // (v4.6.0) Base incrémentale valide = format cv 3 (repère temporel) ET dernier scan complet
+    // de moins de 7 jours. Sinon, scan complet (et on respecte le réglage de fraîcheur).
+    const incBaseValid = (b) => !!(b && !Array.isArray(b) && b.markTs && b.detail && b.ids
+      && b.cv === HISTORY_CACHE_CV && b.fullAt && (Date.now() - b.fullAt) < HISTORY_FULL_RESCAN_MS);
+    const baseOk = incBaseValid(cacheGetStale(cacheKey));
     const freshMs = baseOk ? Math.min(CFG.discoverHistoryCacheHours * 3600e3, 120e3) : CFG.discoverHistoryCacheHours * 3600e3;
-    const cached = force ? null : cacheGet(cacheKey, freshMs);
+    // (v4.6.0) Un cache cv 2 (ancien repère par id, potentiellement troué) n'est jamais servi
+    // tel quel : scan complet de réparation immédiat, même s'il est encore « frais ».
+    const cachedRaw = force ? null : cacheGet(cacheKey, freshMs);
+    const cached = (cachedRaw && !Array.isArray(cachedRaw) && cachedRaw.cv === 2) ? null : cachedRaw;
     if (cached) {
       const ids = Array.isArray(cached) ? cached : (cached.ids || []);
       historyComplete = Array.isArray(cached) ? false : !!cached.complete;
@@ -3144,8 +3167,16 @@
     // 1 à 2 requêtes au lieu de ~80. Repli automatique sur un scan complet si le repère
     // est introuvable (historique effacé, entrée supprimée, premier lancement).
     const prev = cacheGetStale(cacheKey);
-    const prevMark = (prev && !Array.isArray(prev) && prev.mark) ? prev.mark : null;
-    const incremental = !!(prevMark && prev.detail && prev.ids && prev.cv === 2);   // (v4.5.3) cv<2 : drapeau « complet » non fiable → un scan complet de remise à niveau
+    // (v4.6.0) BUG corrigé : le repère était l'id de la 1re entrée du scan précédent. Or
+    // l'historique est trié par date de visionnage : reprendre CET épisode le faisait remonter
+    // en tête, le scan s'arrêtait dès la 1re entrée et tout ce qui avait été regardé ENTRE-TEMPS
+    // (plus bas) n'était jamais lu — et, le repère restant le même, plus jamais par la suite.
+    // Ces séries manquaient donc pour toujours aux exclusions de Découverte (et le drapeau
+    // « complet » hérité désactivait le filet playheads). Désormais : repère TEMPOREL, on lit
+    // tout ce qui est plus récent que l'entrée la plus récente du scan précédent (moins une
+    // marge). Les caches cv<3 (potentiellement troués) déclenchent un scan complet de réparation.
+    const prevMarkTs = incBaseValid(prev) ? prev.markTs : 0;
+    const incremental = !!prevMarkTs;
     let stopAtMark = false;
 
     historyGapPages = 0;
@@ -3160,12 +3191,15 @@
     // durée est retenue une seule fois par épisode.
     const detail = new Map();
     let newMark = null;
+    let newMarkTs = 0;   // (v4.6.0) date la plus récente rencontrée = repère du prochain scan
     const addFrom = (data) => {
       for (const it of data) {
-        if (!newMark) newMark = historyMark(it) || null;   // 1re entrée vue = nouveau repère
-        // Repère atteint : tout ce qui suit a déjà été scanné, on peut s'arrêter là.
-        const mk = historyMark(it);
-        if (incremental && prevMark && mk && mk === prevMark) { stopAtMark = true; return; }
+        if (!newMark) newMark = historyMark(it) || null;   // conservé pour diagnostic
+        const ts = historyTs(it);
+        if (ts > newMarkTs) newMarkTs = ts;
+        // Repère atteint : entrée plus ancienne que le scan précédent → tout ce qui suit est
+        // déjà connu (tri décroissant). Une entrée sans date ne déclenche jamais l'arrêt.
+        if (incremental && ts && ts < prevMarkTs - HISTORY_TS_MARGIN_MS) { stopAtMark = true; return; }
         const ref = extractSeriesRef(it);
         if (!ref || !ref.id) continue;
         ids.add(ref.id);
@@ -3311,7 +3345,14 @@
     // playheads puisque complete=false.
     cacheSet(cacheKey, {
       ids: [...ids], complete: historyComplete, detail: detailArr,
-      mark: historyGapPages ? null : newMark, cv: historyGapPages ? 1 : 2,
+      mark: historyGapPages ? null : newMark,
+      // (v4.6.0) Repère temporel. Le scan incrémental ne recule jamais le repère : si rien de
+      // nouveau n'a été lu, on garde l'ancien. Trou de pages ou aucune date lisible → pas de
+      // repère (cv 1) → scan complet au prochain coup, plutôt qu'un incrémental qui figerait le trou.
+      markTs: historyGapPages ? 0 : Math.max(newMarkTs, incremental ? prevMarkTs : 0),
+      cv: (historyGapPages || !Math.max(newMarkTs, incremental ? prevMarkTs : 0)) ? 1 : HISTORY_CACHE_CV,
+      // Date du dernier scan COMPLET : héritée par l'incrémental, posée à maintenant sinon.
+      fullAt: (incremental && stopAtMark) ? prev.fullAt : (historyGapPages ? 0 : Date.now()),
     });
     if (historyGapPages) console.warn(`[reste-à-voir] historique : ${historyGapPages} page(s) illisible(s) — scan à refaire au prochain lancement`);
     return ids;
