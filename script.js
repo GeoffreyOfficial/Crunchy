@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      4.3.1
+// @version      4.3.2
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '4.3.1';
+  const SCRIPT_VERSION = '4.3.2';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -5496,7 +5496,7 @@
     series: [], raw: [], loading: false, error: null, warning: null,
     announced: null, lastSync: null, settingsOpen: false, apiWarning: null, quotaWarning: null, anilistWarning: null,
     probeResult: null, probeRunning: false, reconnecting: false,
-    anilistDiag: null, anilistDiagRunning: false, anilistDiagTargetId: null,
+    anilistDiag: null, anilistDiagRunning: false, anilistDiagTargetId: null, anilistDiagQ: '',
     fullDiag: null, fullDiagRunning: false, fullDiagText: '',
     anilistProgress: null,   // { done, total, startedAt } pendant enrichAnilistSchedule (planning + genres), null sinon
     historyGenreProgress: null,   // { done, total, startedAt } pendant enrichHistoryGenres (genres « hors listes »), null sinon
@@ -10346,6 +10346,14 @@
   .crrav-globalscan{display:flex}
   .crrav-globalscan>.crrav-btn{width:100%}
   .crrav-globalloading{color:#9a9aa4;font:600 12.5px/1 system-ui;margin:0 0 10px}
+  .crrav-diagpicker{margin:6px 0 10px}
+  .crrav-diagsearch{width:100%;padding:10px 14px;font-size:14.5px;background:rgba(255,255,255,.07)}
+  .crrav-diagresults{display:flex;flex-direction:column;gap:5px;margin-top:8px}
+  .crrav-diagpick{display:flex;flex-direction:column;gap:2px;text-align:left;width:100%;padding:9px 12px;
+    background:#1c1c22;border:1px solid rgba(255,255,255,.1);border-radius:10px;color:#f2f2f4;cursor:pointer}
+  .crrav-diagpick b{font:600 14px/1.25 system-ui}
+  .crrav-diagpick small{color:#9a9aa4;font:500 11.5px/1.2 system-ui}
+  .crrav-diagpick.on{border-color:#f47521;background:#2a1d14}
   .crrav-select{background:#1c1c22;border:1px solid rgba(255,255,255,.12);border-radius:10px;
     padding:9px 12px;color:#f2f2f4;font-size:14px;cursor:pointer;
     appearance:none;-webkit-appearance:none;padding-right:30px;
@@ -15590,24 +15598,54 @@
   // Isekai Quartet 3) n'y apparaissait donc jamais, même une fois le tri alphabétique
   // corrigé. Fusionne les deux sources, la série de STATE.series faisant foi en cas de
   // doublon (données plus complètes : notes perso, progression…).
-  function anilistDiagAllSeries() {
-    const map = new Map();
-    for (const s of (STATE.discover && STATE.discover.series) || []) if (s && s.id != null) map.set(s.id, s);
-    for (const s of STATE.series || []) if (s && s.id != null) map.set(s.id, s);   // priorité : écrase Découverte
+  function anilistDiagIndex() {
+    const map = new Map();   // id → { s, tabs[] }
+    const add = (arr, tab, override) => {
+      for (const s of arr || []) {
+        if (!s || s.id == null) continue;
+        const e = map.get(s.id) || { s, tabs: [] };
+        if (!e.tabs.includes(tab)) e.tabs.push(tab);
+        if (override || !map.has(s.id)) e.s = s;      // STATE.series fait foi (données complètes)
+        map.set(s.id, e);
+      }
+    };
+    add(STATE.discover && STATE.discover.series, 'Découverte', false);
+    add(STATE.newPremieres && STATE.newPremieres.series, 'Nouveautés', false);
+    add(STATE.orphan && STATE.orphan.series, 'Hors listes', true);
+    add(STATE.series, 'Reste à voir', true);
     return [...map.values()];
   }
+  function anilistDiagAllSeries() { return anilistDiagIndex().map((e) => e.s); }
 
+  // Recherche de série pour les tests individuels : champ + résultats TAPABLES (au lieu d'une
+  // longue liste déroulante). Un tap choisit la série ET lance le test AniList tout de suite.
+  const diagNorm = (x) => String(x || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  function anilistDiagResultsHtml(q) {
+    const words = diagNorm(q).split(/\s+/).filter(Boolean);
+    const sel = STATE.anilistDiagTargetId;
+    let rows = anilistDiagIndex().filter((e) => e.s.title && words.every((w) => diagNorm(e.s.title).includes(w)));
+    rows.sort((a, b) => {
+      const sa = diagNorm(a.s.title).startsWith(words[0] || '\u0000') ? 0 : 1;
+      const sb = diagNorm(b.s.title).startsWith(words[0] || '\u0000') ? 0 : 1;
+      return sa - sb || (b.s.airing ? 1 : 0) - (a.s.airing ? 1 : 0) || a.s.title.localeCompare(b.s.title, 'fr');
+    });
+    if (!rows.length) return `<p class="crrav-diagcard-note" style="margin:6px 0">Aucune série ne correspond${
+      STATE.series.length ? '' : ' — ouvre d’abord « Reste à voir » pour charger tes séries'}.</p>`;
+    const MAX = 8, shown = rows.slice(0, MAX);
+    const html = shown.map((e) => `<button type="button" class="crrav-diagpick${e.s.id === sel ? ' on' : ''}" data-act="diag-pick" data-id="${escapeHtml(e.s.id)}">
+      <b>${escapeHtml(e.s.title)}</b>
+      <small>${e.s.airing ? '🟢 en diffusion · ' : ''}${escapeHtml(e.tabs.join(' + '))}</small></button>`).join('');
+    return html + (rows.length > MAX ? `<p class="crrav-diagcard-note" style="margin:4px 2px">+ ${rows.length - MAX} autres — précise ta recherche.</p>` : '');
+  }
   function anilistDiagSeriesSelect() {
-    const all = anilistDiagAllSeries()
-      .sort((a, b) => a.title.localeCompare(b.title, 'fr'));
-    if (!all.length) return '';
-    if (!STATE.anilistDiagTargetId || !all.some((s) => s.id === STATE.anilistDiagTargetId)) {
-      STATE.anilistDiagTargetId = all[0].id;
-    }
-    const opts = all.map((s) =>
-      `<option value="${escapeHtml(s.id)}"${s.id === STATE.anilistDiagTargetId ? ' selected' : ''}>${
-        escapeHtml(s.title)}${s.airing ? ' (en diffusion)' : ''}</option>`).join('');
-    return `<select class="crrav-select" data-act="diag-select-series" style="margin:6px 0">${opts}</select>`;
+    if (!anilistDiagIndex().length) return '';
+    const cur = anilistDiagAllSeries().find((s) => s.id === STATE.anilistDiagTargetId);
+    const q = STATE.anilistDiagQ || '';
+    return `<div class="crrav-diagpicker">
+      ${cur ? `<p class="crrav-diagcard-note" style="margin:6px 0 4px">Série choisie : <b>${escapeHtml(cur.title)}</b></p>` : ''}
+      <input class="crrav-search crrav-diagsearch" type="search" placeholder="🔎 Chercher une série à tester…" value="${escapeHtml(q)}" autocomplete="off">
+      <div class="crrav-diagresults">${q.trim() ? anilistDiagResultsHtml(q) : '<p class="crrav-diagcard-note" style="margin:6px 2px">Tape le début du titre : toutes tes séries sont cherchables (listes, hors listes, nouveautés, découverte).</p>'}</div>
+    </div>`;
   }
 
   // Diagnostic AniList affiché À L'ÉCRAN (console inaccessible sur mobile) : lance la
@@ -15825,23 +15863,22 @@
     return h;
   }
 
-  // Lignes « d'où vient cette série ? » du test individuel (voir d.origin dans runAnilistDiag).
+  // « D'où vient cette série ? » (voir d.origin dans runAnilistDiag) : une ligne essentielle
+  // (main) + le reste pour le bloc Détails (extra).
   function diagOriginLines(o, line) {
-    const out = [];
     const yn = (v) => (v == null ? '—' : v ? 'oui' : 'non');
-    out.push(line('Connue via', o.rawHits.length ? o.rawHits.join(' + ')
-      : 'aucune liste (ni watchlist, ni Crunchylist)'));
+    const main = line('Connue via', o.rawHits.length ? o.rawHits.join(' + ') : 'aucune liste (ni watchlist, ni Crunchylist)');
+    const extra = [];
     if (o.inWatchlist != null || o.customLists.length) {
-      out.push(line('Appartenance mémorisée', [o.inWatchlist ? 'Watchlist' : null,
+      extra.push(line('Appartenance mémorisée', [o.inWatchlist ? 'Watchlist' : null,
         ...o.customLists.map((l) => `Crunchylist « ${l} »`)].filter(Boolean).join(' + ') || 'aucune'));
     }
-    out.push(line('Chargée dans', o.tabs.length ? o.tabs.join(', ') : 'aucun onglet en mémoire'));
-    out.push(line('Dans « mes listes » (accueil)', yn(o.inListSet)));
-    out.push(line('Dans l’instantané', yn(o.inSnapshot)));
-    if (o.ignored) out.push(line('Ignorée', 'oui'));
-    out.push(line('Dans les prochaines sorties', yn(o.inCalendar)));
-    if (o.inCalendar && !o.rawHits.length) out.push(line('⚠', 'visible dans le calendrier sans être dans une liste'));
-    return out.join('');
+    extra.push(line('Chargée dans', o.tabs.length ? o.tabs.join(', ') : 'aucun onglet en mémoire'));
+    extra.push(line('Dans « mes listes » (accueil)', yn(o.inListSet)));
+    extra.push(line('Dans l’instantané', yn(o.inSnapshot)));
+    if (o.ignored) extra.push(line('Ignorée', 'oui'));
+    if (o.inCalendar && !o.rawHits.length) extra.push(line('⚠', 'visible dans le calendrier sans être dans une liste'));
+    return { main, extra: extra.join('') };
   }
 
   function renderAnilistDiag() {
@@ -15866,42 +15903,39 @@
             bloqué anilist.co.</p>`;
     }
 
-    let headline = `<div class="crrav-diag" style="margin-top:8px">
-      ${line('Série testée', d.title || '—')}
-      ${line('En diffusion', d.airing ? 'oui' : 'non')}
-      ${d.cal ? line('Dans les prochaines sorties ?', d.cal.ok ? '✓ ' + d.cal.text : '✗ ' + d.cal.why.join(' · ')) : ''}
-      ${d.origin ? diagOriginLines(d.origin, line) : ''}
+    const org = d.origin ? diagOriginLines(d.origin, line) : { main: '', extra: '' };
+    const ax = d.aniExtra;
+    // Essentiel : de quoi comprendre en 10 secondes pourquoi une série est (ou non) au calendrier.
+    const headline = `<div class="crrav-diag" style="margin-top:8px">
+      ${line('Série', (d.title || '—') + (d.airing ? ' · en diffusion' : ''))}
+      ${d.cal ? line('Prochaines sorties', d.cal.ok ? '✓ ' + d.cal.text : '✗ ' + d.cal.why.join(' · ')) : ''}
+      ${org.main}
+      ${'match' in d && d.match && d.aniId ? line('Fiche AniList', `#${d.aniId}${ax ? ' · ' + ax.status : ''}${ax ? ' · ' + ax.format : ''}`) : ''}
+      ${ax ? line('Prochain ép. AniList', ax.next) : ''}
+      ${ax ? line('Lien Crunchyroll (AniList)', ax.crLink.startsWith('oui') ? 'oui ✓' : ax.crLink.includes('AUTRE') ? 'autre série ⚠' : 'absent') : ''}
     </div>`;
 
-    let matchBlock = '';
+    // Tout le reste, replié dans UN seul bloc.
+    const detailRows = [];
     if ('match' in d && d.match) {
-      matchBlock = `<div class="crrav-diag" style="margin-top:8px">
-        ${line('Fiche AniList', d.aniId ? `#${d.aniId} (anilist.co/anime/${d.aniId})` : '?')}
-        ${line('Note communautaire (meanScore)', d.meanScore != null ? `${d.meanScore}% (soit ★ ${(d.meanScore / 20).toFixed(1)})` : 'absente côté AniList pour cette fiche')}
-        ${line('Total prévu', d.planned ?? 'inconnu (episodes null + calendrier trop court)')}
-        ${line('Fin de saison', d.end ? ((d.approx ? '~' : '') + d.end) : 'inconnue')}
-        ${line('Prochain épisode', d.nextEp ?? '?')}
-        ${line('Trouvé via', d.matchedVia)}
-        ${d.aniExtra ? line('Statut AniList', `${d.aniExtra.status} · ${d.aniExtra.format} · début ${d.aniExtra.start}`)
-          + line('Épisodes (fiche AniList)', d.aniExtra.episodes)
-          + line('Prochain ép. AniList', d.aniExtra.next)
-          + line('Lien Crunchyroll sur AniList', d.aniExtra.crLink)
-          + (d.aniExtra.viaSequel ? line('Fiche choisie', 'suite suivie automatiquement') : '') : ''}
-      </div>`;
+      detailRows.push(line('Fiche AniList', d.aniId ? `anilist.co/anime/${d.aniId}` : '?'));
+      detailRows.push(line('Trouvée via', d.matchedVia));
+      if (ax) { detailRows.push(line('Début', ax.start)); detailRows.push(line('Épisodes (AniList)', ax.episodes)); }
+      detailRows.push(line('Note (meanScore)', d.meanScore != null ? `${d.meanScore}% (★ ${(d.meanScore / 20).toFixed(1)})` : 'absente côté AniList'));
+      detailRows.push(line('Total prévu', d.planned ?? 'inconnu'));
+      detailRows.push(line('Fin de saison', d.end ? ((d.approx ? '~' : '') + d.end) : 'inconnue'));
+      if (ax && ax.viaSequel) detailRows.push(line('Fiche choisie', 'suite suivie automatiquement'));
     }
-
     let candidatesBlock = '';
     if (d.candidates && d.candidates.length) {
       const rows = d.candidates.map((c, i) => `<div class="crrav-diagrow${c.chosen ? ' chosen' : ''}">
         <span>${c.chosen ? '🏆 ' : `<span class="rank">${i + 1}.</span> `}${escapeHtml(c.titre)}</span>
         <small>${escapeHtml(c.statut || '?')} · ${c.episodes ?? 'ép?'} ép · ${c.annee ?? '?'} · score ${c.score}</small>
       </div>`).join('');
-      candidatesBlock = `<details class="crrav-diagdetails"><summary>Candidats AniList testés (${d.candidateCount ?? d.candidates.length})</summary>
-        <div class="crrav-diagtbl" style="margin-top:6px">${rows}</div>
-      </details>`;
+      candidatesBlock = `<p class="crrav-diagcard-note" style="margin:10px 0 4px">Fiches AniList testées (${d.candidateCount ?? d.candidates.length}) :</p>
+        <div class="crrav-diagtbl">${rows}</div>`;
     }
 
-    // Détails techniques : utiles pour creuser, pas pour la lecture au quotidien.
     const techLines = [];
     if (d.terms) techLines.push(['Termes cherchés (titre affiché)', d.terms.join(' | ') + (d.perTerm ? ' → ' + d.perTerm.join('/') : '')]);
     if (d.enTitle) {
@@ -15920,19 +15954,19 @@
     }
     if (d.needsFetch != null) techLines.push(['Relecture AniList nécessaire', d.needsFetch ? 'oui (sera relue au prochain passage)' : 'non (cache valide)']);
     techLines.push(['Coupe-circuit AniList', d.cooldownMin > 0 ? `actif ~${d.cooldownMin} min ⚠` : 'inactif']);
-    techLines.push(['Vus/total CR', d.total]);
     techLines.push(['Réglage AniList', d.settingOn ? 'activé' : 'DÉSACTIVÉ ⚠']);
     if (d.match) techLines.push(['Épisodes datés AniList', d.schedNodes ?? 0]);
     if (d.liveOnCard) techLines.push(['Sur la carte en ce moment', `matched=${d.liveOnCard.aniMatched} · aniScore=${d.liveOnCard.aniScore ?? 'null'}`]);
     if (d.cache) techLines.push(['Cache AniList', `format av${d.cache.av ?? '?'}${d.cache.relv ? ' · suites v' + d.cache.relv : ''} · ${d.cache.matched ? 'match' : 'no-match'}${
       d.cache.matched ? ` (#${d.cache.aniId ?? '?'}, meanScore ${d.cache.meanScore ?? 'null'})` : ''} · ${d.cache.ageMin} min`]);
-    const techBlock = `<details class="crrav-diagdetails"><summary>Détails techniques</summary>
-      <div class="crrav-diag">${techLines.map(([k, v]) => line(k, v)).join('')}</div>
+    const techBlock = `<details class="crrav-diagdetails"><summary>Détails</summary>
+      <div class="crrav-diag" style="margin-top:6px">${org.extra}${detailRows.join('')}${techLines.map(([k, v]) => line(k, v)).join('')}</div>
+      ${candidatesBlock}
     </details>`;
 
     return `<div class="crrav-diagcard ${status}">
       <div class="crrav-diagcard-head"><span class="ic">${icon}</span>${escapeHtml(note)}</div>
-      ${headline}${fetchNote}${matchBlock}${candidatesBlock}${techBlock}
+      ${fetchNote}${headline}${techBlock}
     </div>`;
   }
 
@@ -17873,6 +17907,19 @@
       }, 220));
     }
 
+    // Recherche de série (tests individuels du diagnostic) : filtre local, on ne met à jour QUE
+    // la liste de résultats (pas de re-rendu complet → le clavier mobile garde le focus).
+    const diagSearch = content.querySelector('.crrav-diagsearch');
+    if (diagSearch) {
+      diagSearch.addEventListener('input', debounce((e) => {
+        STATE.anilistDiagQ = e.target.value;
+        const box = content.querySelector('.crrav-diagresults');
+        if (box) box.innerHTML = STATE.anilistDiagQ.trim()
+          ? anilistDiagResultsHtml(STATE.anilistDiagQ)
+          : '<p class="crrav-diagcard-note" style="margin:6px 2px">Tape le début du titre.</p>';
+      }, 120));
+    }
+
     // (27) Recherche dans le panneau « Séries ignorées » — même principe que la
     // recherche globale (focus repris après le rendu), mais purement locale : pas de
     // requête, juste un filtre sur la liste déjà en mémoire.
@@ -18690,6 +18737,12 @@
         }
         if (act.dataset.act === 'probe-anilist') {
           runAnilistDiag();
+          return;
+        }
+        if (act.dataset.act === 'diag-pick') {
+          STATE.anilistDiagTargetId = act.dataset.id;
+          STATE.anilistDiag = null;
+          runAnilistDiag();          // choisit ET teste (le rendu se refait au début du test)
           return;
         }
         if (act.dataset.act === 'full-diag') {
