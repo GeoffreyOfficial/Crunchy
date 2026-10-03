@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      4.4.0
+// @version      4.5.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '4.4.0';
+  const SCRIPT_VERSION = '4.5.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -5496,7 +5496,7 @@
     series: [], raw: [], loading: false, error: null, warning: null,
     announced: null, lastSync: null, settingsOpen: false, apiWarning: null, quotaWarning: null, anilistWarning: null,
     probeResult: null, probeRunning: false, reconnecting: false,
-    anilistDiag: null, anilistDiagRunning: false, anilistDiagTargetId: null, anilistDiagQ: '', anilistDiagSrc: 'all',
+    anilistDiag: null, anilistDiagRunning: false, anilistDiagTargetId: null, anilistDiagQ: '', anilistDiagSrc: 'all', anilistDiagPickerOpen: false, anilistDiagFresh: false, anilistDiagRunTitle: '',
     fullDiag: null, fullDiagRunning: false, fullDiagText: '',
     anilistProgress: null,   // { done, total, startedAt } pendant enrichAnilistSchedule (planning + genres), null sinon
     historyGenreProgress: null,   // { done, total, startedAt } pendant enrichHistoryGenres (genres « hors listes »), null sinon
@@ -10348,6 +10348,58 @@
   .crrav-globalloading{color:#9a9aa4;font:600 12.5px/1 system-ui;margin:0 0 10px}
   .crrav-diagpicker{margin:6px 0 10px}
   .crrav-diagsearch{width:100%;padding:10px 14px;font-size:14.5px;background:rgba(255,255,255,.07)}
+  .crrav-diagcur{display:flex;align-items:center;gap:12px;width:100%;margin:6px 0 10px;padding:12px 14px;
+    text-align:left;color:#f2f2f4;cursor:pointer;background:#1c1c22;border:1px solid rgba(255,255,255,.14);
+    border-radius:12px;transition:border-color .2s,background .2s}
+  .crrav-diagcur:active{background:#24242c}
+  .crrav-diagcur.empty{border-style:dashed;border-color:rgba(244,117,33,.6)}
+  .crrav-diagcur-ico{font-size:22px;line-height:1}
+  .crrav-diagcur-txt{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}
+  .crrav-diagcur-txt small{color:#9a9aa4;font:600 11px/1.2 system-ui}
+  .crrav-diagcur-txt b{font:700 14.5px/1.3 system-ui;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .crrav-diagcur-chev{color:#f47521;font-size:16px}
+  .crrav-diagcur.launching{border-color:#f47521;background:#2a1d14;animation:crrav-launchpulse 1.3s ease-out infinite}
+  .crrav-diagcur.launching .crrav-diagcur-ico{animation:crrav-launchfloat 1.6s ease-in-out infinite}
+  @keyframes crrav-launchpulse{0%{box-shadow:0 0 0 0 rgba(244,117,33,.55)}100%{box-shadow:0 0 0 10px rgba(244,117,33,0)}}
+  @keyframes crrav-launchfloat{0%,100%{transform:translateY(0)}50%{transform:translateY(-3px)}}
+  .crrav-diagpicker.open{animation:crrav-launch-in .25s ease-out both}
+  .crrav-diagpick-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}
+  .crrav-diagpick-head b{font:800 13px/1.3 system-ui}
+  .crrav-diagpick-head small{color:#9a9aa4;font:500 11px/1 system-ui}
+  .crrav-diagclose{flex:0 0 auto;padding:6px 11px;border-radius:999px;border:1px solid rgba(255,255,255,.16);
+    background:#1c1c22;color:#d8d8de;font:700 12px/1 system-ui;cursor:pointer}
+  .crrav-launch{position:relative;overflow:hidden;margin-top:10px;padding:14px;border-radius:12px;
+    background:linear-gradient(135deg,#25190f,#15110d);border:1px solid rgba(244,117,33,.55);
+    animation:crrav-launch-in .4s cubic-bezier(.2,.9,.3,1.15) both}
+  .crrav-launch::before{content:"";position:absolute;inset:0;pointer-events:none;
+    background:linear-gradient(110deg,transparent 30%,rgba(244,117,33,.16) 50%,transparent 70%);
+    background-size:220% 100%;animation:crrav-launch-sweep 1.8s linear infinite}
+  .crrav-launch-row{position:relative;display:flex;align-items:center;gap:12px}
+  .crrav-launch-ring{flex:0 0 auto;width:26px;height:26px;border-radius:50%;border:3px solid rgba(244,117,33,.25);
+    border-top-color:#f47521;animation:crrav-spin .8s linear infinite}
+  .crrav-launch-txt{display:flex;flex-direction:column;gap:2px;min-width:0}
+  .crrav-launch-txt small{color:#f4b183;font:700 11px/1.2 system-ui}
+  .crrav-launch-txt b{font:700 14px/1.3 system-ui;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .crrav-launch-bar{position:relative;height:4px;margin-top:12px;border-radius:99px;background:rgba(255,255,255,.08);overflow:hidden}
+  .crrav-launch-bar i{position:absolute;top:0;height:100%;width:32%;border-radius:99px;
+    background:linear-gradient(90deg,#f47521,#ffb347);animation:crravIndeterminate 1.25s ease-in-out infinite}
+  .crrav-launch-steps{position:relative;height:18px;margin-top:10px;font:600 12px/18px system-ui;color:#d8d8de}
+  .crrav-launch-steps span{position:absolute;left:0;top:0;opacity:0;animation:crrav-launch-step 6s ease-in-out infinite}
+  .crrav-launch-steps span:nth-child(2){animation-delay:2s}
+  .crrav-launch-steps span:nth-child(3){animation-delay:4s}
+  @keyframes crrav-launch-in{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:none}}
+  @keyframes crrav-launch-sweep{from{background-position:220% 0}to{background-position:-120% 0}}
+  @keyframes crrav-launch-step{0%{opacity:0;transform:translateY(6px)}6%,30%{opacity:1;transform:none}36%,100%{opacity:0;transform:translateY(-6px)}}
+  .crrav-diagresult{scroll-margin-top:8px}
+  .crrav-diagresult.fresh>.crrav-diagcard,.crrav-diagresult.fresh>.crrav-diag{animation:crrav-launch-in .45s cubic-bezier(.2,.9,.3,1.15) both}
+  .crrav-diagresult.fresh>.crrav-diagcard.ok{box-shadow:0 0 0 0 rgba(92,230,160,.5);animation:crrav-launch-in .45s cubic-bezier(.2,.9,.3,1.15) both,crrav-donepulse 1s ease-out .2s 1}
+  @keyframes crrav-donepulse{0%{box-shadow:0 0 0 0 rgba(92,230,160,.5)}100%{box-shadow:0 0 0 12px rgba(92,230,160,0)}}
+  @media (prefers-reduced-motion:reduce){
+    .crrav-diagcur.launching,.crrav-diagcur.launching .crrav-diagcur-ico,.crrav-diagpicker.open,.crrav-launch,.crrav-launch::before,
+    .crrav-diagresult.fresh>.crrav-diagcard,.crrav-diagresult.fresh>.crrav-diag{animation:none!important}
+    .crrav-launch-bar i{animation:none!important;width:100%}
+    .crrav-launch-steps span{animation:none!important}
+    .crrav-launch-steps span:first-child{opacity:1}}
   .crrav-diagsearchwrap{position:relative}
   .crrav-diagsearchwrap .crrav-diagsearch{padding-right:40px}
   .crrav-diagsearch::-webkit-search-cancel-button{-webkit-appearance:none;display:none}
@@ -10361,7 +10413,7 @@
   .crrav-diagchip.on{border-color:#f47521;background:#2a1d14;color:#fff}
   .crrav-diagchip.on small{color:#f4b183}
   .crrav-diagcount{margin:2px 2px 0;color:#9a9aa4;font:600 11.5px/1.3 system-ui}
-  .crrav-diaglist{display:flex;flex-direction:column;gap:5px;margin-top:6px;max-height:46vh;
+  .crrav-diaglist{display:flex;flex-direction:column;gap:5px;margin-top:6px;max-height:55vh;
     overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;padding-right:2px}
   .crrav-diagresults{display:flex;flex-direction:column;gap:5px;margin-top:8px}
   .crrav-diagpick{display:flex;flex-direction:column;gap:2px;text-align:left;width:100%;padding:9px 12px;
@@ -15520,8 +15572,9 @@
             ${anilistStatusReadout()}
             ${anilistDiagSeriesSelect()}
             <button class="crrav-btn" data-act="probe-anilist"${STATE.anilistDiagRunning ? ' disabled' : ''}>
-              ${STATE.anilistDiagRunning ? '⏳ Test en cours…' : '🔬 Tester AniList'}</button>
-            ${renderAnilistDiag()}
+              ${STATE.anilistDiagRunning ? '⏳ Test en cours…' : (STATE.anilistDiag ? '🔁 Relancer le test' : '🔬 Tester AniList')}</button>
+            ${anilistDiagLaunchCard()}
+            <div class="crrav-diagresult${STATE.anilistDiagFresh ? ' fresh' : ''}">${renderAnilistDiag()}</div>
           </div>
 
           <div class="crrav-probe">
@@ -15709,19 +15762,75 @@
     return `<p class="crrav-diagcount">${escapeHtml(count)}</p><div class="crrav-diaglist">${list}</div>${
       n > DIAG_MAX_ROWS ? `<p class="crrav-diagcard-note" style="margin:4px 2px">+ ${n - DIAG_MAX_ROWS} autres — précise ta recherche.</p>` : ''}`;
   }
+  // (v4.5.0) Sélecteur REPLIÉ par défaut : une carte « Série à tester » à taper pour ouvrir la
+  // liste. Sur téléphone, un champ texte toujours visible faisait surgir le clavier dès qu'on
+  // voulait juste parcourir/scroller. Ouvert : liste + puces visibles SANS clavier (le champ
+  // n'est jamais focalisé automatiquement). Choisir une série referme tout et lance le test.
   function anilistDiagSeriesSelect() {
     if (!anilistDiagIndex().length) return '';
     const cur = anilistDiagAllSeries().find((s) => s.id === STATE.anilistDiagTargetId);
+    const running = !!STATE.anilistDiagRunning;
+    if (!STATE.anilistDiagPickerOpen) {
+      return `<div class="crrav-diagpicker" data-open="0">
+        <button type="button" class="crrav-diagcur${running ? ' launching' : ''}${cur ? '' : ' empty'}" data-act="diag-open" aria-expanded="false">
+          <span class="crrav-diagcur-ico">${running ? '🛰️' : '🎬'}</span>
+          <span class="crrav-diagcur-txt"><small>${running ? 'Diagnostic en cours' : 'Série à tester'}</small>
+            <b>${cur ? escapeHtml(cur.title) : 'Choisir une série…'}</b></span>
+          <span class="crrav-diagcur-chev" aria-hidden="true">▾</span>
+        </button>
+      </div>`;
+    }
     const q = STATE.anilistDiagQ || '';
     const src = STATE.anilistDiagSrc || 'all';
-    return `<div class="crrav-diagpicker">
-      ${cur ? `<p class="crrav-diagcard-note" style="margin:6px 0 4px">Série choisie : <b>${escapeHtml(cur.title)}</b></p>` : ''}
+    return `<div class="crrav-diagpicker open" data-open="1">
+      <div class="crrav-diagpick-head">
+        <b>Choisir une série <small>(un tap lance le test)</small></b>
+        <button type="button" class="crrav-diagclose" data-act="diag-close">✕ Fermer</button>
+      </div>
       <div class="crrav-diagsearchwrap">
-        <input class="crrav-search crrav-diagsearch" type="search" enterkeyhint="search" placeholder="🔎 Chercher une série (titre, mots, début…)" value="${escapeHtml(q)}" autocomplete="off" autocapitalize="off" spellcheck="false">
+        <input class="crrav-search crrav-diagsearch" type="search" enterkeyhint="search" placeholder="🔎 Filtrer (facultatif) : titre, mots, début…" value="${escapeHtml(q)}" autocomplete="off" autocapitalize="off" spellcheck="false">
         <button type="button" class="crrav-diagclear" data-act="diag-clearq" aria-label="Effacer la recherche"${q ? '' : ' hidden'}>✕</button>
       </div>
       <div class="crrav-diagchips">${anilistDiagChipsHtml(q, src)}</div>
       <div class="crrav-diagresults">${anilistDiagResultsHtml(q, src)}</div>
+    </div>`;
+  }
+  // Remplace le sélecteur en place (sans re-rendu complet : pas de saut de scroll) et le recâble.
+  function swapDiagPicker(pickerEl) {
+    if (!pickerEl) return null;
+    const tmp = document.createElement('div');
+    tmp.innerHTML = anilistDiagSeriesSelect();
+    const n = tmp.firstElementChild;
+    if (!n) return null;
+    pickerEl.replaceWith(n);
+    wireDiagSearch(n);
+    return n;
+  }
+  // Fait défiler la feuille Diagnostic jusqu'à un élément (animation douce sauf si l'utilisateur
+  // a demandé moins de mouvement).
+  function diagScrollTo(sel, block) {
+    safeCall(() => {
+      const el = root && root.querySelector(sel);
+      if (!el) return;
+      const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      el.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: block || 'center' });
+    }, undefined, 'diagScrollTo');
+  }
+  // Carte « diagnostic lancé » : anneau qui tourne, barre indéterminée, étapes qui défilent.
+  function anilistDiagLaunchCard() {
+    if (!STATE.anilistDiagRunning) return '';
+    const title = STATE.anilistDiagRunTitle || 'la série';
+    return `<div class="crrav-launch" role="status" aria-live="polite">
+      <div class="crrav-launch-row">
+        <span class="crrav-launch-ring" aria-hidden="true"></span>
+        <div class="crrav-launch-txt"><small>Diagnostic lancé</small><b>${escapeHtml(title)}</b></div>
+      </div>
+      <div class="crrav-launch-bar" aria-hidden="true"><i></i></div>
+      <div class="crrav-launch-steps" aria-hidden="true">
+        <span>🔎 Recherche sur AniList…</span>
+        <span>🧩 Comparaison des titres…</span>
+        <span>📅 Calcul du planning…</span>
+      </div>
     </div>`;
   }
   // Met à jour UNIQUEMENT puces + résultats (jamais le champ) : le clavier mobile garde le focus.
@@ -15743,7 +15852,17 @@
   async function runAnilistDiag() {
     STATE.anilistDiagRunning = true;
     STATE.anilistDiag = null;
+    STATE.anilistDiagFresh = false;
+    STATE.anilistDiagPickerOpen = false;
+    // Titre affiché sur la carte « diagnostic lancé » (même résolution de cible que plus bas).
+    STATE.anilistDiagRunTitle = safeCall(() => {
+      const t = (STATE.anilistDiagTargetId && anilistDiagAllSeries().find((s) => s.id === STATE.anilistDiagTargetId))
+        || STATE.series.find((s) => /tsugai|daemon/i.test(s.title)) || STATE.series.find((s) => s.airing) || STATE.series[0];
+      return t ? t.title : '';
+    }, '', 'diag:runTitle');
+    safeCall(() => { if (navigator.vibrate) navigator.vibrate(15); }, undefined, 'diag:vibrate');
     forceRender();
+    diagScrollTo('.crrav-launch', 'center');
     const d = { steps: [] };
     try {
       const airingPool = STATE.series.filter((s) => s.airing);
@@ -15919,7 +16038,10 @@
     finally {
       STATE.anilistDiag = d;
       STATE.anilistDiagRunning = false;
+      STATE.anilistDiagFresh = true;      // anime l'apparition du résultat (voir .crrav-diagresult.fresh)
       forceRender();
+      diagScrollTo('.crrav-diagresult', 'start');
+      setTimeout(() => { STATE.anilistDiagFresh = false; }, 1500);
     }
   }
 
@@ -17183,6 +17305,15 @@
       updateDiagPicker(input.closest('.crrav-diagpicker'));
     }, 90);
     input.addEventListener('input', refresh);
+    // (v4.5.0) Faire défiler la liste referme le clavier (téléphone) : on parcourt sans écrire.
+    // touchmove/scroll seulement — jamais touchstart, sinon la fermeture du clavier décalerait la
+    // mise en page entre le début et la fin d'un simple tap et ferait rater le clic.
+    const res = input.closest('.crrav-diagpicker') && input.closest('.crrav-diagpicker').querySelector('.crrav-diagresults');
+    if (res) {
+      const dropKb = () => { if (document.activeElement === input) input.blur(); };
+      res.addEventListener('touchmove', dropKb, { passive: true });
+      res.addEventListener('scroll', dropKb, { capture: true, passive: true });
+    }
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); input.blur(); }   // ferme le clavier, résultats visibles
     });
@@ -18852,8 +18983,21 @@
           updateDiagPicker(picker);
           return;
         }
+        if (act.dataset.act === 'diag-open') {
+          STATE.anilistDiagPickerOpen = true;
+          const n = swapDiagPicker(act.closest('.crrav-diagpicker'));
+          if (n) diagScrollTo('.crrav-diagpicker.open', 'start');   // la liste, pas le clavier
+          return;
+        }
+        if (act.dataset.act === 'diag-close') {
+          STATE.anilistDiagPickerOpen = false;
+          swapDiagPicker(act.closest('.crrav-diagpicker'));
+          return;
+        }
         if (act.dataset.act === 'diag-pick') {
           STATE.anilistDiagTargetId = act.dataset.id;
+          STATE.anilistDiagPickerOpen = false;
+          safeCall(() => { if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); }, undefined, 'diag-pick:blur');
           STATE.anilistDiag = null;
           runAnilistDiag();          // choisit ET teste (le rendu se refait au début du test)
           return;
