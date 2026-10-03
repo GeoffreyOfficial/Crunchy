@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      4.5.0
+// @version      4.5.2
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '4.5.0';
+  const SCRIPT_VERSION = '4.5.2';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -2609,6 +2609,15 @@
     loadEps3Store()[seriesId] = { ts: Date.now(), v };
     markDirty(IDB_EPS3_PREFIX + seriesId);
   }
+  // (v4.5.2) Oublie le cache épisodes/saisons d'UNE série (nouvelle saison repérée ailleurs).
+  function eps3Invalidate(seriesId) {
+    const store = loadEps3Store();
+    if (store[seriesId]) { delete store[seriesId]; markDeleted(IDB_EPS3_PREFIX + seriesId); }
+    SEASONS_MEMO.delete(seriesId);
+    for (const k of ['seasoncount:' + seriesId, 'series:' + seriesId, 'anilist:' + seriesId]) {
+      if (BIGCACHE[k]) { delete BIGCACHE[k]; markDeleted(k); }
+    }
+  }
   // Purge les entrées les plus vieilles du store eps3 (utilisé par evictOldest).
   function eps3EvictOldest(fraction) {
     const store = loadEps3Store();
@@ -3841,7 +3850,18 @@
   // changement de fetchEpisodesRaw() qui modifie le résultat pour des données identiques.
   const EPS_FILTER_VER = 2;
 
-  async function fetchEpisodesRaw(seriesId) {
+  // (v4.5.1) Une série « terminée » gardait ses épisodes 30 j : une nouvelle saison (ex. Les
+  // Carnets de l'apothicaire S3) restait invisible, donc ni « en diffusion » ni dans le
+  // Diagnostic. `sc` = season_count du panel Crunchyroll au moment du fetch, mémorisé (`pc`) :
+  // dès que le panel en annonce plus que ce qu'on connaît, l'entrée est périmée (voir
+  // epsSeasonsStale). Sans `pc` (anciennes entrées), on compare au nombre de saisons déjà lues.
+  function epsSeasonsStale(v, sc) {
+    if (!v || !Number.isFinite(sc) || sc <= 0) return false;
+    const known = Number.isFinite(v.pc) ? v.pc : (Array.isArray(v.seasonsDiag) ? v.seasonsDiag.length : null);
+    return known != null && sc > known;
+  }
+
+  async function fetchEpisodesRaw(seriesId, sc) {
     const seasonsAll = await fetchSeasonsRaw(seriesId);
 
     // (26) Crunchyroll range parfois les OAD/spéciaux comme des « saisons » à part
@@ -3942,20 +3962,20 @@
     const maxAir = episodes.reduce((m, e) => (e.air && e.air > m ? e.air : m), 0) || null;
     // Diagnostic allégé (pas d'id) : quelques dizaines d'octets par série.
     const diag = seasonsDiag.map(({ id, ...rest }) => rest);
-    return { episodes, maxAir, fv: EPS_FILTER_VER, seasonsDiag: diag };
+    return { episodes, maxAir, fv: EPS_FILTER_VER, seasonsDiag: diag, pc: Number.isFinite(sc) && sc > 0 ? sc : undefined };
   }
 
   // Renvoie { episodes, maxAir }. Cache adaptatif (3) : court si la série diffuse encore.
   // Persisté dans le blob eps3 (watchlist + Hors listes : séries que tu suis ou as déjà
   // commencées — ça vaut la peine de garder leur détail longtemps).
-  async function getEpisodes(seriesId) {
+  async function getEpisodes(seriesId, sc) {
     const raw = eps3ReadRaw(seriesId);
-    if (raw && raw.v && raw.v.fv === EPS_FILTER_VER) {
+    if (raw && raw.v && raw.v.fv === EPS_FILTER_VER && !epsSeasonsStale(raw.v, sc)) {
       const ttl = (isAiring(raw.v.maxAir) ? CFG.cacheHoursAiring : CFG.cacheHoursFinished) * 3600e3;
       if (Date.now() - raw.ts < ttl) { STATS.hit++; return raw.v; }
     }
     STATS.miss++;
-    const out = await fetchEpisodesRaw(seriesId);
+    const out = await fetchEpisodesRaw(seriesId, sc);
     eps3Write(seriesId, out);
     return out;
   }
@@ -5798,7 +5818,7 @@
         const results = await pool(slice, async (ref, k) => {
           const panel = ref.panel || (await getSeriesPanel(ref.id));
           if (!panel) return null;
-          const eps = await getEpisodes(ref.id);
+          const eps = await getEpisodes(ref.id, panelSeasons(panel));
           const rating = getRatingCached(ref.id);      // sans requête : complété plus tard
           const myRating = getMyRatingCached(ref.id);   // idem, note perso
           return { panel, episodes: eps.episodes, maxAir: eps.maxAir, rating, myRating, order: i + k, refId: ref.id };
@@ -7939,6 +7959,7 @@
     return found;
   }
 
+  const NEWSEASON_KICKED = new Set();   // (v4.5.2) séries déjà relues cette session (anti-boucle)
   async function loadNewPremieres(onProgress) {
     const N = STATE.newPremieres;
     if (!CFG.discoverNewPremieres) { N.series = []; N.error = null; N.loading = false; render(); return; }
@@ -7992,6 +8013,7 @@
       // c'est déjà une série en cours normale) et « à venir » (l'épisode 1 lui-même n'est
       // pas encore sorti : c'est justement la définition, rien de plus à vérifier).
       let cRaw = 0, cFormat = 0;
+      const knownHits = [];   // (v4.5.2) nouvelles saisons de séries déjà suivies (titre reconnu)
       let cReleasedCand = 0, cStatusOk = 0, cEp2Ok = 0;
       let cUpcomingCand = 0;
       let cTitle = 0, cNotIgnored = 0, cKnown = 0, cGenreOk = 0, cCrConfirmed = 0;
@@ -8026,7 +8048,13 @@
         const id = 'ani:' + m.id;
         if (IGNORED.has(id)) continue;
         cNotIgnored++;
-        if (isKnown(title)) continue;
+        if (isKnown(title)) {
+          // (v4.5.2) Titre déjà suivi MAIS épisode 1 tout frais : c'est une nouvelle saison/cour
+          // d'une série de tes listes (pas une découverte). On ne l'affiche pas ici, on la garde
+          // pour l'interpréter plus bas (relecture de la série suivie).
+          if (released && knownHits.length < 8) knownHits.push({ m, ep1Ts: airTs });
+          continue;
+        }
         cKnown++;
         // Genres AniList (m.genres) contre le réglage permanent (CFG.discoverExcludeCategories,
         // « hentai » exclu par défaut — voir CFG) ET les puces live newPremCatsIn/Ex.
@@ -8090,7 +8118,37 @@
           }
         });
       }
+      // (v4.5.2) Nouvelle saison d'une série SUIVIE ? Si la fiche CR trouvée EST une série de
+      // tes listes (même id), ou si un titre déjà suivi sort un épisode 1 neuf : Crunchyroll
+      // range les saisons sous une seule fiche, donc ce n'est pas une nouveauté mais la
+      // suite. On marque la carte et, si le cache épisodes ne contient pas encore cet
+      // épisode 1, on le jette et on relit la série (une seule fois par session et par série).
+      const followedById = new Map(STATE.series.map((x) => [x.id, x]));
+      const staleFollowed = new Set();
+      const checkFollowed = (crId, ep1Ts) => {
+        const f = crId && followedById.get(crId);
+        if (!f) return null;
+        const have = (f.episodes || []).some((e) => e.air && e.air >= ep1Ts - 36 * 3600e3);
+        if (!have && !NEWSEASON_KICKED.has(f.id)) staleFollowed.add(f.id);
+        return f;
+      };
+      for (const item of candidates) {
+        const f = checkFollowed(item.crId, item.ep1Ts);
+        if (f) { item.followedId = f.id; item.followedTitle = f.title; }
+      }
+      await pool(knownHits, async (h) => {
+        try {
+          const cr = await resolveCrunchyrollForPremiere(h.m);
+          if (cr && cr.id) checkFollowed(cr.id, h.ep1Ts);
+        } catch (e) { safeCall.log(e, 'loadNewPremieres (suite connue)'); }
+      });
       for (const item of candidates) delete item._m;
+      if (staleFollowed.size) {
+        for (const id of staleFollowed) { NEWSEASON_KICKED.add(id); eps3Invalidate(id); }
+        LOG(`nouveautés : nouvelle saison repérée pour ${staleFollowed.size} série(s) suivie(s) → relecture`);
+        N.newSeasonRefresh = staleFollowed.size;
+        setTimeout(() => { safeCall(() => refresh(), undefined, 'newSeasonRefresh'); }, 0);
+      }
 
       // On garde tout candidat pour lequel on a un id CR (fiche confirmée OU simplement
       // probable) — exiger une fiche garantie pour proposer une nouveauté était trop strict
@@ -10043,7 +10101,7 @@
     // Deux cas bien distincts (voir loadNewPremieres) : déjà regardable maintenant, ou
     // encore à venir — même traitement « wahou » de carte, mais couleur/texte différents
     // pour ne jamais laisser croire qu'une première pas encore sortie est déjà disponible.
-    const ribbon = s.released ? 'Inédit' : 'Bientôt';
+    const ribbon = s.followedId ? 'Nouvelle saison' : (s.released ? 'Inédit' : 'Bientôt');
     const statusBadge = s.released
       ? `<span class="crrav-rating" style="background:rgba(92,230,160,.85);color:#0b0b0d">🆕 Ép. 1</span>`
       : `<span class="crrav-rating" style="background:rgba(159,214,255,.9);color:#0b0b0d">📅 Ép. 1</span>`;
@@ -10076,6 +10134,7 @@
       <div class="crrav-body">
         <a class="crrav-title" href="${url}">${escapeHtml(s.title)}</a>
         <div class="crrav-meta"><span${crSourceTitle ? ` title="${escapeHtml(crSourceTitle)}"` : ''}>${metaLabel} ${fmtShortDate(s.ep1Ts)}</span></div>
+        ${s.followedId ? `<div class="crrav-meta"><span title="Cette série est déjà dans tes listes : la saison s'ajoute à sa fiche">🔁 Suite de « ${escapeHtml(s.followedTitle || '')} » (dans tes listes)</span></div>` : ''}
         ${(s.categories || []).length
           ? `<div class="crrav-cats" title="${escapeHtml((s.categories || []).join(', '))}"
               >${escapeHtml((s.categories || []).join(' · '))}</div>` : ''}
@@ -20861,7 +20920,8 @@
       if (!days.has(k)) days.set(k, []);
       days.get(k).push(e);
     }
-    if (!days.has(t0)) days.set(t0, []);
+    // (v4.5.1) Plus de colonne « Aujourd’hui / Rien de prévu » forcée : une colonne vide de 270 px
+    // prenait la place d'une vraie journée. Le résumé de l'en-tête dit déjà « rien aujourd’hui ».
     const cols = [...days.keys()].sort((a, b) => a - b).map((k) => {
       const L = crpCalDayLabel(k);
       const list = days.get(k);
@@ -20875,10 +20935,11 @@
         ${later.map((e) => crpCalEvHtml(e).replace('<span class="tm">', `<span class="tm"><small class="dt">${crpDate(e.ts)} ·</small>`)).join('')}</div>`);
     }
     const week = ev.filter((e) => !e.out && e.ts - now < 7 * DAY).length;
+    const todayN = days.has(t0) ? days.get(t0).length : 0;
     const stale = !live && ts && now - ts > DAY;
     const head = `<div class="crrav-cal-head">
         <h2 class="${escapeHtml(cls.h2 || '')} crrav-cal-h2">Prochaines sorties</h2>
-        <span class="crrav-cal-sum">${week ? `${week} épisode${week > 1 ? 's' : ''} cette semaine` : 'rien cette semaine'}${stale ? ` · données ${crpRelDays(ts)}` : ''}</span>
+        <span class="crrav-cal-sum">${week ? `${week} épisode${week > 1 ? 's' : ''} cette semaine` : 'rien cette semaine'}${todayN ? '' : ' · rien aujourd’hui'}${stale ? ` · données ${crpRelDays(ts)}` : ''}</span>
         <button type="button" class="crrav-cal-upd" data-crrav-calupd="1" title="Relit tes séries et les dates AniList (se fait déjà automatiquement)">↻ Mettre à jour</button>
       </div>`;
     const body = ev.length
