@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      4.2.0
+// @version      4.2.1
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '4.2.0';
+  const SCRIPT_VERSION = '4.2.1';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -281,6 +281,8 @@
                                    // quelques jours, même en pleine saison de simulcasts
     newPremieresTarget: 30,       // nombre de nouveautés affichées
     newPremieresWindowDays: 10,   // « déjà sorties » : épisode 1 sorti il y a moins de … jours
+                                   // (v4.2.1) 0 = seulement ceux sortis AUJOURD'HUI : dès le lendemain,
+                                   // la série n'est plus dans Nouveautés
     newPremieresUpcomingDays: 30, // « à venir » : épisode 1 prévu dans moins de … jours (pas
                                    // encore diffusé) — les deux cas cohabitent dans le bloc,
                                    // visuellement distingués (voir newPremiereCard)
@@ -896,8 +898,8 @@
       help: 'Repère, via AniList, les séries dont l’épisode 1 vient de sortir et l’épisode 2 pas encore — une façon de découvrir les nouveaux simulcasts. Les cartes renvoient vers une recherche Crunchyroll (pas de fiche précise : AniList ne connaît pas les identifiants Crunchyroll). Si tu ne l’ajoutes pas à une liste, une série disparaît d’elle-même du bloc dès que l’épisode 2 sort.',
       impact: 'newpremieres' },
     { key: 'newPremieresWindowDays', label: 'Nouveautés — « déjà sorti » depuis moins de',
-      type: 'int', min: 1, max: 60, unit: 'j',
-      help: 'Une série quitte le bloc une fois ce délai dépassé (ou dès que l’épisode 2 sort, ce qui arrive en premier).',
+      type: 'int', min: 0, max: 60, unit: 'j',
+      help: 'Une série quitte le bloc une fois ce délai dépassé (ou dès que l’épisode 2 sort, ce qui arrive en premier). 0 = seulement les sorties du jour : dès le lendemain, elle n’apparaît plus.',
       impact: 'newpremieres' },
     { key: 'newPremieresUpcomingDays', label: 'Nouveautés — « à venir » dans moins de',
       type: 'int', min: 1, max: 60, unit: 'j',
@@ -4862,6 +4864,10 @@
   // mêmes séries croisées plusieurs fois.
   function anilistTtlMs(v) {
     if (v && v.anilistStatus === 'RELEASING') return 12 * 3600e3;
+    // (v4.2.1) « Pas encore sortie » : la fiche passe en RELEASING à la première diffusion —
+    // avec le TTL de 90 j ci-dessous, une saison mise en cache AVANT sa sortie (ex. S3 d'une
+    // série) n'était jamais relue, et son prochain épisode n'apparaissait donc jamais.
+    if (v && v.anilistStatus === 'NOT_YET_RELEASED') return 6 * 3600e3;
     // (fix) Fiche matchée mais SANS meanScore connu à l'époque du fetch : AniList
     // n'affiche une note communautaire qu'à partir d'un certain nombre de votes, qui
     // peut être atteint APRÈS coup — y compris pour une série déjà terminée. Avec le
@@ -4909,10 +4915,22 @@
       format: o.v.format ?? null,
     };
   }
-  function anilistNeedsFetch(seriesId) {
+  function anilistNeedsFetch(seriesId, s) {
     const o = cacheReadRaw('anilist:' + seriesId);
     if (!o || !o.v || o.v.av !== ANILIST_CACHE_VER) return true;   // ancien format = à refaire
-    return Date.now() - o.ts > anilistTtlMs(o.v);
+    const age = Date.now() - o.ts;
+    if (age > anilistTtlMs(o.v)) return true;
+    // (v4.2.1) Trois cas où le cache est connu pour être faux AVANT son TTL :
+    //  1. le « prochain épisode » mémorisé est déjà passé (l'épisode est sorti depuis) →
+    //     AniList a forcément une nouvelle date ; on relit au plus toutes les 30 min ;
+    //  2. Crunchyroll voit la série en diffusion (s.airing) mais le cache la dit terminée /
+    //     non appariée (typiquement : nouvelle saison apparue depuis, ou mauvaise saison
+    //     retenue) → on relit toutes les 6 h au lieu d'attendre 90 jours ;
+    //  3. série en diffusion appariée sans AUCUNE date de prochain épisode → même rythme.
+    if (o.v.nextEpTs && o.v.nextEpTs < Date.now() && age > 30 * 60e3) return true;
+    if (s && s.airing && age > 6 * 3600e3
+      && (!o.v.matched || o.v.anilistStatus !== 'RELEASING' || !o.v.nextEpTs)) return true;
+    return false;
   }
 
   // Série dont les genres CR sont trop pauvres pour être exploitables telles quelles
@@ -4947,7 +4965,7 @@
       return;
     }
     const targets = (list || []).filter((s) => s && s.id
-      && (s.airing || needsAniGenres(s)) && anilistNeedsFetch(s.id));
+      && (s.airing || needsAniGenres(s)) && anilistNeedsFetch(s.id, s));
     if (!targets.length) return;
     anilistPassRunning = true;
     STATE.anilistProgress = { done: 0, total: targets.length, startedAt: Date.now() };
@@ -7831,7 +7849,7 @@
       };
 
       const nowSec = Math.floor(Date.now() / 1000);
-      const from = nowSec - CFG.newPremieresWindowDays * 86400;      // « déjà sorti » : passé
+      const from = Math.floor(newPremieresFromMs() / 1000);          // « déjà sorti » : passé (0 j = minuit)
       const to = nowSec + CFG.newPremieresUpcomingDays * 86400;      // « à venir » : futur
       const byId = new Map();
       let page = 1, hasNext = true;
@@ -8309,11 +8327,26 @@
     return [...list].sort(sorters[discoverSort] || sorters.popularity);
   }
 
+  // (v4.2.1) Début de la fenêtre « déjà sorti ». N jours > 0 : maintenant − N jours (comme
+  // avant). 0 : minuit local du jour même — seules les sorties d'aujourd'hui restent, et dès
+  // le lendemain elles quittent le bloc.
+  function newPremieresFromMs(now) {
+    const t = now || Date.now();
+    const d = Number(CFG.newPremieresWindowDays);
+    if (d > 0) return t - d * 86400e3;
+    const m = new Date(t); m.setHours(0, 0, 0, 0);
+    return m.getTime();
+  }
+
   // Filet : ignorer une nouveauté la fait disparaître tout de suite, sans relance
   // (même principe que visibleDiscover — voir plus haut).
   function visibleNewPremieres() {
     const { newPremCatsIn, newPremCatsEx } = STATE.filters;
-    let list = STATE.newPremieres.series.filter((s) => !IGNORED.has(s.id));
+    const fromMs = newPremieresFromMs();
+    // (v4.2.1) Filtre aussi à l'affichage : un onglet resté ouvert après minuit ne garde
+    // plus une série dont l'épisode 1 est sorti avant le début de la fenêtre.
+    let list = STATE.newPremieres.series.filter((s) => !IGNORED.has(s.id)
+      && !(s.released && s.ep1Ts && s.ep1Ts < fromMs));
     // Puces live : narrowing immédiat, sans requête (le filtre permanent + les puces
     // déjà actives au moment du chargement ont, eux, déjà réduit ce qui a été téléchargé
     // — voir loadNewPremieres). Changer les puces ici affine encore, un prochain
@@ -12963,6 +12996,17 @@
     };
   }
 
+  // (v4.2.1) Prochaine sortie CERTAINE : uniquement une date + un numéro annoncés par AniList,
+  // strictement dans le futur, et jamais au-delà du total prévu. Aucune projection : si le
+  // cache AniList est périmé, anilistNeedsFetch() relance la requête (voir plus bas) au lieu
+  // d'inventer une date.
+  function sureNextRelease(r, now) {
+    const s = r.s;
+    if (!(s.aniNextTs && s.aniNextTs > now && s.aniNextNum)) return null;
+    if (s.plannedTotal && s.aniNextNum > s.plannedTotal) return null;
+    return { ts: s.aniNextTs, n: s.aniNextNum, exact: true, hasTime: true };
+  }
+
   // Calendrier ESTIMATIF : la plupart des animes sortent chaque semaine, à jour ET heure
   // fixes. On déduit les deux du dernier épisode connu (lastAired.air, timestamp complet),
   // ainsi que le numéro du prochain épisode (dernier sorti + 1) et où tu en es.
@@ -12994,7 +13038,8 @@
         // « Sorti aujourd'hui » et dans les prochaines sorties, comme un doublon.
         const nextDate = new Date(la.air || ref);
         if (hasTime) nextDate.setHours(hh, mm, 0, 0); else nextDate.setHours(0, 0, 0, 0);
-        do { nextDate.setDate(nextDate.getDate() + 7); } while (nextDate.getTime() <= Date.now());
+        let steps = 0;
+        do { nextDate.setDate(nextDate.getDate() + 7); steps++; } while (nextDate.getTime() <= Date.now());
         const nextTs = nextDate.getTime();
         // delta = nombre de jours calendaires d'ici la prochaine sortie (0 = aujourd'hui).
         const midnight = new Date(); midnight.setHours(0, 0, 0, 0);
@@ -13014,7 +13059,9 @@
         // Épisode suivant dans la même saison, et son existence probable.
         const sameSeasonEps = s.episodes.filter((e) => e.season === la.season);
         const maxNumThisSeason = sameSeasonEps.reduce((m, e) => Math.max(m, e.n || 0), 0);
-        const nextNum = (la.n || 0) + 1;
+        // (v4.2.1) +steps et non +1 : si le dernier épisode connu date de plus d'une semaine
+        // (données pas rafraîchies), le prochain n'est pas le « n+1 » mais le « n+steps ».
+        const nextNum = (la.n || 0) + steps;
         // Si le dernier épisode sorti est déjà le plus haut connu de sa saison, le
         // prochain pourrait ouvrir une nouvelle saison — on le signale au lieu d'inventer.
         const seasonMayEnd = la.n >= maxNumThisSeason;
@@ -13033,7 +13080,9 @@
           curRank, current: s.lastSeen,
         };
       })
-      .filter((r) => r.daysSince <= 10)
+      // (v4.2.1) Aligné sur la fenêtre « en diffusion » (airingWindowDays) : 10 j écartait une
+      // série en pause de quelques semaines alors qu'AniList annonce sa reprise.
+      .filter((r) => r.daysSince <= CFG.airingWindowDays)
       .sort((a, b) => a.delta - b.delta || a.hh - b.hh);
   }
 
@@ -13466,29 +13515,17 @@
     const JOURS = ['dimanche', 'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi'];
     const now = Date.now();
 
-    // Date/numéro exacts via AniList quand connus, sinon estimation au rythme hebdomadaire.
+    // (v4.2.1) Date/numéro : AniList quand connus (future, ou périmée décalée de 7 j en 7 j
+    // tant que la série est en diffusion), voir sureNextRelease.
     const events = est.map((r) => {
-      const s = r.s;
-      let whenTs, source, nextN, nextRank, seasonMayEnd, exactTime;
-      // (fix) Avant, une date AniList encore acceptée jusqu'à 24h après son passage
-      // (`now - DAY`) pouvait s'afficher comme « prochain épisode » alors qu'elle était
-      // déjà dans le passé — d'où un épisode annoncé « imminent » alors qu'il datait de
-      // la veille. AniList doit désormais annoncer une date strictement future ; sinon on
-      // retombe sur l'estimation hebdomadaire (r.nextTs), qui est TOUJOURS dans le futur
-      // par construction (voir estimatedSchedule).
-      if (s.aniNextTs && s.aniNextTs > now && s.aniNextNum) {
-        whenTs = s.aniNextTs; source = 'anilist'; nextN = s.aniNextNum;
-        nextRank = r.seasonRank; seasonMayEnd = false; exactTime = true;
-      } else {
-        whenTs = r.nextTs; source = 'est'; nextN = r.nextNum; nextRank = r.seasonRank;
-        seasonMayEnd = r.seasonMayEnd; exactTime = r.hasTime;
-      }
-      return { r, whenTs, source, nextN, nextRank, seasonMayEnd, hasTime: exactTime };
+      const nx = sureNextRelease(r, now);
+      if (!nx) return null;
+      return {
+        r, whenTs: nx.ts, source: nx.exact ? 'anilist' : 'est', nextN: nx.n, nextRank: r.seasonRank,
+        seasonMayEnd: false, hasTime: nx.hasTime,
+      };
     })
-      // (v4.2.0) Uniquement du CERTAIN : prochain épisode annoncé par AniList (date +
-      // numéro), jamais la projection hebdomadaire — elle annonçait par exemple un « E13 »
-      // pour des saisons terminées à 12. Numéro au-delà du total prévu : écarté aussi.
-      .filter((e) => e.source === 'anilist' && !(e.r.s.plannedTotal && e.nextN > e.r.s.plannedTotal))
+      .filter(Boolean)
       .sort((a, b) => a.whenTs - b.whenTs);
     const unconfirmed = est.length - events.length;
 
@@ -18799,6 +18836,7 @@
     }
     root.style.display = 'block';
     document.documentElement.style.overflow = 'hidden';
+    safeCall(() => crpWarnUi(), undefined, 'open:crpWarnUi');   // (v4.2.1) pas d'alerte par-dessus le panneau
 
     // Ouverture instantanée : on repeint le dernier état connu avant de lancer
     // les ~25 s d'appels. Les données seront remplacées dès qu'elles arrivent.
@@ -18954,6 +18992,7 @@
     if (typeof crpQueueScan === 'function') crpQueueScan();   // réglage « pages Crunchyroll » pris en compte tout de suite
     if (root) root.style.display = 'none';
     document.documentElement.style.overflow = '';
+    safeCall(() => crpWarnUi(), undefined, 'close:crpWarnUi');
     // (7) c'est ici, et seulement ici, qu'on considère la visite terminée :
     // les pastilles « nouvel épisode » survivent aux rafraîchissements auto.
     commitAirSnapshot();
@@ -19003,7 +19042,7 @@
     cw: new Map(), cwPending: new Set(),
     itemOf: new WeakMap(), revealed: new WeakSet(), planAsked: new Set(),
     // (v3.111.0) robustesse : disjoncteurs par étape, alertes, mesures de perf
-    errs: {}, off: {}, health: new Map(), sessionMute: new Set(), apiFail: 0,
+    errs: {}, off: {}, health: new Map(), sessionMute: new Set(), apiFail: 0, bad: {},
     perf: { scans: 0, total: 0, max: 0, last: 0 }, resized: false };   // (v3.101.0) bilan « Reprendre » : sid → { ver, m }
 
   // (v3.105.0) Cache persistant des blocs d'infos : affichage INSTANTANÉ au chargement, puis
@@ -19149,7 +19188,7 @@
       let s = buildSeriesEntry(panel, eps.episodes, eps.maxAir, null, 0, ph, null);
       // Planning AniList (fin de saison, prochain épisode) : seulement pour une série en
       // diffusion dont le cache est à refaire, et jamais en concurrence d'un passage déjà lancé.
-      if (s.airing && CFG.anilistSchedule && anilistNeedsFetch(s.id) && !anilistPassRunning) {
+      if (s.airing && CFG.anilistSchedule && anilistNeedsFetch(s.id, s) && !anilistPassRunning) {
         try { await enrichAnilistSchedule([s]); } catch (_) { /* AniList indisponible : on s'en passe */ }
         s = buildSeriesEntry(panel, eps.episodes, eps.maxAir, null, 0, ph, null);
       }
@@ -20176,7 +20215,11 @@
     return `\n  .dynamic-feed-wrapper > .crrav-calsec{order:${ord}}`;
   }
   function crpCalSeries() {
-    if (typeof STATE !== 'undefined' && STATE.series && STATE.series.length) return { list: STATE.series, ts: Date.now(), live: true };
+    // (v4.2.1) Pendant le tout premier chargement (ni instantané affiché, ni synchro terminée),
+    // STATE.series se remplit PAR PAQUETS de 8 : on s'appuie alors sur l'instantané complet
+    // plutôt que d'afficher un calendrier tronqué qui se complète sous les yeux.
+    const partial = typeof STATE !== 'undefined' && STATE.loading && !STATE.lastSync && !STATE.fromSnapshot;
+    if (!partial && typeof STATE !== 'undefined' && STATE.series && STATE.series.length) return { list: STATE.series, ts: Date.now(), live: true };
     const raw = safeCall(() => cacheReadRaw('snapshot'), null, 'crpCal:snap');
     return { list: raw && Array.isArray(raw.v) ? raw.v : [], ts: raw ? raw.ts || 0 : 0, live: false };
   }
@@ -20188,15 +20231,16 @@
     const est = safeCall(() => estimatedSchedule(src), [], 'crpCal:est');
     const ev = est.map((r) => {
       const x = r.s;
-      const ani = x.aniNextTs && x.aniNextTs > now && x.aniNextNum;
+      const nx = sureNextRelease(r, now);
+      if (!nx) return null;
       const behind = (x.episodes || []).filter((e) => !e.seen).length;
       return {
-        s: x, ts: ani ? x.aniNextTs : r.nextTs, n: ani ? x.aniNextNum : r.nextNum,
-        season: r.seasonRank, seasons: r.totalSeasons, exact: !!ani, hasTime: ani ? true : r.hasTime,
-        mayEnd: !ani && r.seasonMayEnd, behind,
-        last: !!(x.plannedTotal && (ani ? x.aniNextNum : r.nextNum) >= x.plannedTotal),
+        s: x, ts: nx.ts, n: nx.n,
+        season: r.seasonRank, seasons: r.totalSeasons, exact: nx.exact, hasTime: nx.hasTime,
+        mayEnd: false, behind,
+        last: !!(x.plannedTotal && nx.n >= x.plannedTotal),
       };
-    });
+    }).filter(Boolean);
     // Sortis aujourd'hui (déjà disponibles), pour la colonne du jour.
     const t0 = new Date(); t0.setHours(0, 0, 0, 0);
     const out = src.map((x) => {
@@ -20210,8 +20254,7 @@
     // (fix v4.1.0) Uniquement du CERTAIN : prochain épisode annoncé par AniList (date et
     // numéro), et épisodes réellement sortis aujourd'hui. Les projections hebdomadaires
     // annonçaient à tort un « E13 » pour des saisons terminées à 12 épisodes.
-    const sure = ev.filter((e) => e.exact && e.ts > now && e.n
-      && !(e.s.plannedTotal && e.n > e.s.plannedTotal));
+    const sure = ev.filter((e) => e.ts > now && e.n);
     return { ev: [...out, ...sure].sort((a, b) => a.ts - b.ts), ts, live };
   }
   function crpCalDayKey(ts) { const d = new Date(ts); d.setHours(0, 0, 0, 0); return d.getTime(); }
@@ -20276,13 +20319,36 @@
     const head = `<div class="crrav-cal-head">
         <h2 class="${escapeHtml(cls.h2 || '')} crrav-cal-h2">Prochaines sorties</h2>
         <span class="crrav-cal-sum">${week ? `${week} épisode${week > 1 ? 's' : ''} cette semaine` : 'rien cette semaine'}${stale ? ` · données ${crpRelDays(ts)}` : ''}</span>
-        <button type="button" class="crrav-cal-upd" data-crrav-calupd="1" title="Ouvre Mon Crunchy pour relire tes séries (met à jour ce calendrier)">↻ Mettre à jour</button>
+        <button type="button" class="crrav-cal-upd" data-crrav-calupd="1" title="Relit tes séries et les dates AniList (se fait déjà automatiquement)">↻ Mettre à jour</button>
       </div>`;
     const body = ev.length
       ? `<div class="crrav-cal-days" role="list">${cols.join('')}</div>`
       : `<div class="crrav-cal-empty">${ts || live ? 'Aucune date de sortie confirmée par AniList pour les séries de tes listes en ce moment.' : 'Ouvre une fois Mon Crunchy (« Reste à voir ») pour que tes prochaines sorties apparaissent ici.'}</div>`;
     return `<div class="${escapeHtml(cls.container || '')} crrav-cal-in">${head}${body}</div>`;
   }
+  // (v4.2.1) Accueil : les données du calendrier se mettent à jour TOUTES SEULES, sans devoir
+  // ouvrir Mon Crunchy. Avant, la section ne lisait que l'instantané du dernier passage dans
+  // le panneau (ou STATE si le panneau avait été ouvert) : une nouvelle saison ou une date
+  // AniList tombée depuis n'apparaissait qu'après une ouverture manuelle. Ici, dès que
+  // l'accueil est affiché, on relance le même chargement que le panneau (refresh → loadAll,
+  // qui enchaîne l'enrichissement AniList) si les données ont plus de CFG.refreshMinutes
+  // minutes ou n'ont jamais été chargées dans cette page. Les requêtes Crunchyroll passent par
+  // le cache habituel (séries terminées 30 j, en cours 1 h) : le coût réel est faible. Les
+  // pannes s'enchaînent au plus une fois toutes les 2 min (pas de boucle sur erreur).
+  let crpCalAutoAt = 0;
+  function crpCalAutoRefresh() {
+    if (!CFG.crCalendar || crpPageKind() !== 'home') return;
+    if (STATE.loading || sessionLost || document.visibilityState !== 'visible') return;
+    const now = Date.now();
+    const last = STATE.lastSync ? STATE.lastSync.getTime() : 0;
+    if (last && now - last < Math.max(1, CFG.refreshMinutes) * 60e3) return;
+    // Après un échec (STATE.error), on espace davantage les nouvelles tentatives.
+    if (now - crpCalAutoAt < (STATE.error ? 10 : 2) * 60e3) return;
+    crpCalAutoAt = now;
+    LOG('accueil : actualisation automatique des prochaines sorties');
+    safeCall(() => refresh(), undefined, 'crpCal:autoRefresh');
+  }
+
   function crpCalendar() {
     const feed = document.querySelector('.erc-feed .dynamic-feed-wrapper');
     let el = document.querySelector('.crrav-calsec');
@@ -20302,7 +20368,7 @@
     }
     // Recalcul au plus toutes les 30 s (ou si la source change) : léger mais inutile à chaque scan.
     const src = crpCalSeries();
-    const key = `${src.ts}|${src.list.length}|${Math.floor(Date.now() / 30e3)}|${cls.h2}|${cls.container}`;
+    const key = `${src.ts}|${src.list.length}|${src.live}|${STATE.loading ? 1 : 0}|${STATE.lastSync ? STATE.lastSync.getTime() : 0}|${Math.floor(Date.now() / 30e3)}|${cls.h2}|${cls.container}`;
     if (el.dataset.key === key) return;
     el.dataset.key = key;
     const html = crpCalHtml(cls);
@@ -20493,6 +20559,7 @@
     crpStep('home', crpHomeSections, 'Rubriques de l’accueil');
     crpStep('hide', crpHideCards, 'Masquage des séries');
     crpStep('calendar', crpCalendar, 'Prochaines sorties');
+    crpStep('calauto', crpCalAutoRefresh, 'Actualisation des prochaines sorties');
     crpStep('plan', crpPlanning, 'Planning');
     crpStep('eplist', crpEpisodeList, 'Liste d’épisodes');
     crpStep('menus', () => {
@@ -20568,7 +20635,10 @@
   function crpWarnUi() {
     if (!document.body) return;
     let el = document.getElementById('crrav-crwarn');
-    const list = CFG.crPageEnhance && CFG.crWarnings
+    // (v4.2.1) Jamais par-dessus le panneau Mon Crunchy ouvert : l'alerte concerne la page
+    // Crunchyroll en dessous ; elle réapparaît à la fermeture du panneau (voir close()).
+    const panelOpen = !!(root && root.style.display !== 'none');
+    const list = CFG.crPageEnhance && CFG.crWarnings && !panelOpen
       ? [...CRP.health.entries()].filter(([k]) => !crpWarnMuted(k)) : [];
     if (!list.length) { if (el) el.remove(); return; }
     if (!el) {
@@ -20638,9 +20708,14 @@
         P.push({ key: 'home:history', feature: 'Reprendre', on: CFG.crCwFirst || CFG.crCwStats || CFG.crCwHideDone || CFG.crCwOnlyLists,
           bad: known && !hist && !histHint ? 'La section « Reprendre » n’est plus reconnue : elle ne remonte plus en tête et le bilan / masquage ne s’appliquent pas.' : null });
         if (hist) {
-          const items = hist.children.length;
+          // (v4.2.1) On compte les VRAIS contenus (liens vers un épisode / une série), pas les
+          // enfants : pendant le chargement, le carrousel contient des cartes squelettes (sans
+          // lien) — d'où une fausse alerte « cartes non reconnues » sur /discover, qui
+          // disparaissait au rechargement. Alerte seulement si des cartes avec lien sont bien
+          // là et qu'AUCUNE ne porte plus le repère attendu.
+          const realItems = $$('a[href*="/watch/"], a[href*="/series/"]', hist);
           P.push({ key: 'home:cwcards', feature: 'Reprendre', on: true,
-            bad: items >= 2 && !$$(CRP_CARD, hist) ? 'Les cartes de « Reprendre » ne sont plus reconnues (infos, bilan, masquage inactifs).' : null });
+            bad: realItems >= 2 && !$$(CRP_CARD, hist) ? 'Les cartes de « Reprendre » ne sont plus reconnues (infos, bilan, masquage inactifs).' : null });
           const vc = safeCall(() => getComputedStyle(hist).getPropertyValue('--visible-count'), '', 'probe:vc');
           P.push({ key: 'home:vcount', feature: 'Reprendre', on: CFG.crCwHideDone || CFG.crCwOnlyLists,
             bad: !String(vc).trim() ? 'Le nombre de cartes visibles de « Reprendre » n’est plus lisible : masquer une série peut laisser une place vide au lieu de faire monter la suivante.' : null });
@@ -20692,9 +20767,28 @@
     // chaque scan.
     if (CFG.crCwFirst) crpFeedLayoutCheck();
     const kind = crpPageKind();
+    // (v4.2.1) Une alerte n'est levée que si l'anomalie est CONFIRMÉE : constatée à ≥ 3 contrôles
+    // d'affilée, sur ≥ 20 s (contrôles espacés de 8 s). Un chargement lent, un squelette ou un
+    // carrousel qui se remplit tard ne déclenchent plus rien ; un vrai changement de page, lui,
+    // reste constaté à chaque contrôle et finit par être signalé.
+    const now = Date.now();
+    let pending = false;
     for (const pr of crpProbes(kind)) {
-      if (pr.on && pr.bad) crpWarn(pr.key, pr.bad, pr.feature);
-      else crpWarnClear(pr.key);
+      if (pr.on && pr.bad) {
+        let b = CRP.bad[pr.key];
+        if (!b || b.msg !== pr.bad || now - b.last > 30e3) b = CRP.bad[pr.key] = { n: 0, since: now, last: now, msg: pr.bad };
+        b.n++; b.last = now;
+        if (b.n >= 3 && now - b.since >= 20e3) crpWarn(pr.key, pr.bad, pr.feature);
+        else pending = true;
+      } else {
+        delete CRP.bad[pr.key];
+        crpWarnClear(pr.key);
+      }
+    }
+    // Page possiblement immobile (plus de scan) : on programme nous-mêmes le contrôle suivant.
+    if (pending) {
+      clearTimeout(CRP.healthT);
+      CRP.healthT = setTimeout(() => crpStep('health', crpHealthCheck, 'Surveillance'), 8000);
     }
   }
   // Un menu ⋮ vient de s'ouvrir sur une carte épisode mais on n'a pas pu y ajouter nos
@@ -21273,7 +21367,10 @@
     if (calupd) {
       e.preventDefault();
       e.stopPropagation();
-      safeCall(() => open(), undefined, 'crpCal:open');   // le panneau relit tes séries et met l'instantané à jour
+      // (v4.2.1) Relance directe, sans ouvrir le panneau ; ignore le délai anti-boucle.
+      crpCalAutoAt = 0;
+      if (STATE.lastSync) STATE.lastSync = new Date(0);
+      crpCalAutoRefresh();
       return;
     }
     const upto = e.target.closest('[data-crrav-upto]');
