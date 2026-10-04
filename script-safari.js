@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      4.12.1
+// @version      4.12.2
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -35,7 +35,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '4.12.1';
+  const SCRIPT_VERSION = '4.12.2';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -315,6 +315,13 @@
 
   const LS = 'crrav:';
   const RAW_FETCH = window.fetch.bind(window);
+  // (v4.12.2) API CSS du navigateur (CSS.escape / CSS.supports). ATTENTION : le script déclare
+  // plus bas `const CSS = \`…\`` (sa feuille de style), qui MASQUE l'objet global `CSS` dans
+  // toute l'IIFE — `CSS.escape(...)` y plantait (« n'est pas une fonction »). Toujours passer
+  // par CSS_API.
+  const CSS_API = (typeof window !== 'undefined' && window.CSS) || null;
+  const cssEscape = (v) => (CSS_API && typeof CSS_API.escape === 'function')
+    ? CSS_API.escape(String(v)) : String(v).replace(/[^a-zA-Z0-9_-]/g, (c) => '\\' + c);
   const DAY = 86400e3;
 
   // (fix) Filet de sécurité anti-boucle-infinie pour le scan popularité Crunchyroll
@@ -18122,32 +18129,49 @@
     });
   }
 
-  // (v4.9.1) Remplace le contenu de .crrav-content SAUF la ligne de recherche globale si
-  // l'utilisateur est en train d'y écrire : le nœud <input> (et donc le clavier virtuel)
-  // survit au rendu. Repli : remplacement complet si la structure ne s'y prête pas.
+  // (v4.9.1, refait v4.12.2) Remplace le contenu de .crrav-content SAUF la ligne de recherche
+  // globale si l'utilisateur est en train d'y écrire : le nœud <input> (donc le focus et le
+  // clavier virtuel) survit au rendu. BUG v4.9.1 : on exigeait que la ligne soit un enfant
+  // DIRECT de .crrav-content — or elle vit DANS .crrav-top (qui englobe aussi onglets et
+  // résultats) : la condition échouait toujours, on retombait sur le remplacement complet et
+  // le clavier se fermait à chaque lettre. On « greffe » désormais le nouveau rendu autour de
+  // l'ancienne ligne, niveau par niveau, quelle que soit sa profondeur.
   function replaceContentKeepingSearch(content, html) {
     const ae = document.activeElement;
     const typing = ae && ae.classList && ae.classList.contains('crrav-search-global') && content.contains(ae);
     const oldRow = typing ? ae.closest('.crrav-globalrow') : null;
-    if (!oldRow || oldRow.parentNode !== content) { content.innerHTML = html; return; }
+    if (!oldRow || !content.contains(oldRow)) { content.innerHTML = html; return; }
     const tpl = document.createElement('template');
     tpl.innerHTML = html;
     const newRow = tpl.content.querySelector('.crrav-globalrow');
-    if (!newRow || newRow.parentNode !== tpl.content) { content.innerHTML = html; return; }
+    if (!newRow) { content.innerHTML = html; return; }
+    // Chemins ancêtres (de la racine vers la ligne) dans l'ancien et le nouvel arbre.
+    const chain = (node, top) => { const out = []; for (let n = node; n && n !== top; n = n.parentNode) out.unshift(n); return out; };
+    const oldPath = chain(oldRow, content);
+    const newPath = chain(newRow, tpl.content);
+    const sameShape = oldPath.length === newPath.length && oldPath.every((n, i) =>
+      n.nodeName === newPath[i].nodeName && (n.className || '') === (newPath[i].className || ''));
+    if (!sameShape) { content.innerHTML = html; return; }
+    let oldParent = content, newParent = tpl.content;
+    for (let i = 0; i < oldPath.length; i++) {
+      const keep = oldPath[i], incoming = newPath[i];
+      for (const c of [...oldParent.childNodes]) if (c !== keep) c.remove();
+      let past = false, anchor = keep;
+      for (const n of [...newParent.childNodes]) {
+        if (n === incoming) { past = true; continue; }
+        if (!past) keep.before(n); else { anchor.after(n); anchor = n; }
+      }
+      if (keep === oldRow) break;
+      // Attributs du conteneur alignés sur le nouveau rendu (classes d'état, etc.).
+      for (const at of [...keep.attributes]) if (!incoming.hasAttribute(at.name)) keep.removeAttribute(at.name);
+      for (const at of [...incoming.attributes]) if (keep.getAttribute(at.name) !== at.value) keep.setAttribute(at.name, at.value);
+      oldParent = keep; newParent = incoming;
+    }
     // Bouton « effacer » : seul élément de la ligne qui dépend de la saisie.
     const oldClr = oldRow.querySelector('.crrav-globalclear');
     const newClr = newRow.querySelector('.crrav-globalclear');
     if (oldClr && !newClr) oldClr.remove();
     else if (!oldClr && newClr) oldRow.appendChild(newClr);
-    const before = [], after = [];
-    let past = false;
-    for (const n of [...tpl.content.childNodes]) {
-      if (n === newRow) { past = true; continue; }
-      (past ? after : before).push(n);
-    }
-    for (const n of [...content.childNodes]) if (n !== oldRow) n.remove();
-    oldRow.before(...before);
-    oldRow.after(...after);
   }
 
   function patchSettingsSheetInPlace(sheetEl) {
@@ -18855,7 +18879,10 @@
     if (activeFieldInfo) {
       const cls = activeFieldInfo.cls.trim();
       if (cls) {
-        const again = content.querySelector('.' + CSS.escape(cls.split(/\s+/).join('.')));
+        // (v4.12.2) Plantait toujours (CSS masqué, voir CSS_API) — et le plantage interrompait
+        // renderNow AVANT le câblage du champ de recherche recréé : seule la 1re lettre tapée
+        // était prise en compte, les suivantes n'avaient plus aucun effet.
+        const again = content.querySelector('.' + cls.split(/\s+/).map(cssEscape).join('.'));
         if (again && document.activeElement !== again) {
           again.focus({ preventScroll: true });
           try { again.setSelectionRange(activeFieldInfo.start, activeFieldInfo.end); } catch (_) { /* champ non textuel */ }
@@ -19072,7 +19099,7 @@
   // n'est pas dans le DOM actuel (filtrée par une recherche/un genre) ou si quoi que ce soit
   // d'inattendu se présente — jamais de plantage silencieux, juste un rendu plus coûteux.
   function patchDiscoverCardDOM(content, seriesId) {
-    const sel = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(seriesId) : seriesId;
+    const sel = cssEscape(seriesId);
     const node = content.querySelector(`[data-cardid="${sel}"]`);
     if (!node) return false;   // pas affichée actuellement (filtre/recherche) : rien à patcher
     const s = STATE.discover.series.find((x) => x.id === seriesId);
@@ -19135,7 +19162,7 @@
   // liste : un simple node.remove() sur CETTE carte suffit et évite le même travail inutile
   // (et le même risque de re-stabilisation de content-visibility) que dans Découverte.
   function patchRemoveCardDOM(content, seriesId) {
-    const sel = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(seriesId) : seriesId;
+    const sel = cssEscape(seriesId);
     const node = content.querySelector(`[data-cardid="${sel}"]`);
     if (!node) return false;
     const grid = node.parentElement;
@@ -20923,7 +20950,7 @@
     const inner = menu.parentElement && menu.parentElement.querySelector(':scope > [aria-haspopup]');
     if (inner) return inner;
     if (!menu.id) return null;
-    const esc = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(menu.id) : menu.id.replace(/["\\]/g, '\\$&');
+    const esc = cssEscape(menu.id);
     return document.querySelector(`[aria-controls="${esc}"]`);
   }
   // Nature du menu : carte épisode, fiche série (bouton « Plus » du bandeau) ou saison
@@ -22323,7 +22350,7 @@
   }
   function crpCheck() {
     const coll = document.querySelector(CRP_HIST_SEL);
-    const hasSel = (q) => { try { return typeof CSS !== 'undefined' && CSS.supports ? CSS.supports(`selector(${q})`) : null; } catch (_) { return null; } };
+    const hasSel = (q) => { try { return CSS_API && CSS_API.supports ? CSS_API.supports(`selector(${q})`) : null; } catch (_) { return null; } };
     return {
       actif: !!CFG.crPageEnhance,
       flux: !!document.querySelector('.dynamic-feed-wrapper'),
