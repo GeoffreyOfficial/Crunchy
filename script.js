@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      4.11.0
+// @version      4.12.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '4.11.0';
+  const SCRIPT_VERSION = '4.12.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -3511,7 +3511,12 @@
         changed = true;
       }
     }
-    if (changed) historyArchiveSave(accountId, a);
+    if (changed) {
+      historyArchiveSave(accountId, a);
+      // (v4.11.1) Détail en mémoire (Stats, filet titre) mis à jour tout de suite, sans attendre
+      // le prochain passage par getWatchedSeriesIds.
+      if (Array.isArray(HISTORY_DETAIL) && accountId === ACCOUNT_ID) HISTORY_DETAIL = withHistoryArchive(accountId, [], HISTORY_DETAIL).detail;
+    }
     return added;
   }
   // Construit l'entrée détail d'une série à partir de ses épisodes + progressions réelles.
@@ -3534,8 +3539,9 @@
     }
     return eps.length ? { id, title: title || '', eps, seconds, genres: [] } : null;
   }
-  function historyArchiveAddWatched(accountId, id, title, episodes, ph, src) {
+  function historyArchiveAddWatched(accountId, id, title, episodes, ph, src, genres) {
     const d = watchedDetailFromPlayheads(id, title, episodes, ph);
+    if (d && genres && genres.length) d.genres = [...genres];
     return d ? historyArchiveMerge(accountId, [d], src) : 0;
   }
   // Historique ∪ archive (ids + détail). Pour une série présente des deux côtés, l'archive
@@ -3600,17 +3606,40 @@
     const btn = running
       ? `<button class="crrav-btn" data-act="hist-recover-stop">⏸ Pause · ${R.checked} vérifiées · ${R.found.length} retrouvées</button>`
       : `<button class="crrav-btn" data-act="hist-recover" title="Crunchyroll ne montre que tes ~1000 dernières entrées d'historique : le script parcourt les séries populaires et lit ton avancement réel pour retrouver celles déjà vues.">🧩 Retrouver mes séries déjà vues${found ? ` · ${found} retrouvées` : ''}</button>`;
-    return `<div id="crrav-histrec-orph" class="crrav-orphan-recover">${btn}</div>`;
+    // (v4.11.1) Les séries retrouvées TERMINÉES ne vont pas dans Hors listes (rien à voir) :
+    // on le dit, sinon « 5 retrouvées » et une liste qui ne bouge pas semblent contradictoires.
+    const fin = (st.found || []).filter((f) => f.finished === true).length;
+    const todo = (st.found || []).filter((f) => f.finished === false).length;
+    const note = (fin || todo) ? `<small class="crrav-orphan-recover-note">${todo + fin} ajoutées ci-dessous : ${todo} à finir · ${fin} à jour</small>` : '';
+    return `<div id="crrav-histrec-orph" class="crrav-orphan-recover">${btn}${note}</div>`;
   }
   // Vérifie UNE série : épisodes (cache discep:) + progressions réelles. true si déjà vue/commencée.
   async function historyRecoverCheck(accountId, panel) {
     const eps = await getEpisodesForDiscover(panel.id);
     const list = eps.episodes || [];
-    if (!list.length) return false;
+    if (!list.length) return { hit: false };
     const epIds = [...new Set(list.flatMap((e) => e.ids || []))];
     const ph = await getPlayheads(accountId, epIds);
-    return historyArchiveAddWatched(accountId, panel.id, panel.title, list, ph, 'recovered') > 0
+    // Genres du panel de classement : gratuits, ils complètent tout de suite les Stats par genre.
+    const hit = historyArchiveAddWatched(accountId, panel.id, panel.title, list, ph, 'recovered', extractGenres(panel)) > 0
       || !!historyArchiveLoad(accountId).series[panel.id];
+    return { hit, eps, ph };
+  }
+  // (v4.11.1) Série retrouvée : si elle est commencée mais pas finie, elle rejoint Hors listes
+  // IMMÉDIATEMENT (sans rescan complet de l'onglet). Renvoie true si elle est terminée.
+  function onRecoveredSeries(panel, eps, ph) {
+    const entry = buildSeriesEntry(panel, eps.episodes || [], eps.maxAir || null, getRatingCached(panel.id),
+      0, ph, getMyRatingCached(panel.id));
+    const finished = entry.total > 0 && entry.remaining === 0;
+    const O = STATE.orphan;
+    if (entry.total > 0 && !O.series.some((s) => s.id === entry.id)) {   // (v4.12.0) toutes, rangées par section
+      entry.order = O.series.length;
+      O.series = [...O.series, entry];
+      if (O.stats) O.stats.kept = O.series.length;
+      orphanSnapshotSave();
+      render();
+    }
+    return finished;
   }
 
   let histRecoverTask = null;
@@ -3649,8 +3678,8 @@
             if (!R.manual && historyRecoverBusy()) { budget = 0; break; }
             if (!p || !p.id || checkedSet.has(p.id)) continue;
             if (known.has(p.id)) { checkedSet.add(p.id); st.checked.push(p.id); continue; }   // déjà connue : 0 requête
-            let hit = false;
-            try { hit = await historyRecoverCheck(accountId, p); } catch (e) {
+            let hit = false, chk = null;
+            try { chk = await historyRecoverCheck(accountId, p); hit = chk.hit; } catch (e) {
               R.error = String(e.message || e);
               checkedSet.add(p.id); st.checked.push(p.id);    // on avance quand même (jamais de boucle sur une série en erreur)
               await sleep(R.manual ? HIST_RECOVER_MANUAL_GAP_MS : HIST_RECOVER_AUTO_GAP_MS);
@@ -3659,8 +3688,11 @@
             checkedSet.add(p.id); st.checked.push(p.id);
             R.checked++; budget--;
             if (hit) {
+              let finished = false;
+              try { finished = onRecoveredSeries(p, chk.eps, chk.ph); } catch (e) { safeCall.log(e, 'onRecoveredSeries'); }
               R.found.push(p.title || p.id);
-              st.found.push({ id: p.id, title: p.title || '' });
+              if (finished) R.finished = (R.finished || 0) + 1;
+              st.found.push({ id: p.id, title: p.title || '', finished });
               known.add(p.id);
             }
             if (R.checked % 5 === 0 || hit) { historyRecoverSave(accountId, st); historyRecoverPaint(); }
@@ -3679,15 +3711,13 @@
         R.running = false;
         histRecoverTask = null;
         historyRecoverPaint();
-        // (v4.11.0) Séries retrouvées : Hors listes / Stats doivent les voir sans manipulation.
-        if (R.found.length && typeof onHistoryRecovered === 'function') safeCall(onHistoryRecovered, undefined, 'onHistoryRecovered');
+        // (v4.11.1) Plus de rechargement complet de Hors listes en fin de complétion : chaque
+        // série retrouvée y est ajoutée au fil de l'eau (onRecoveredSeries), sans rescan.
       }
     })();
     return histRecoverTask;
   }
-  function onHistoryRecovered() {
-    if (STATE.tab === 'orphelines' && !(STATE.orphan && STATE.orphan.loading) && typeof refreshOrphelines === 'function') refreshOrphelines();
-  }
+
   // Lancement automatique, discret : seulement si l'historique est partiel, une fois par
   // session, au repos, bien après le chargement (jamais pendant que l'utilisateur attend).
   let histRecoverScheduled = false;
@@ -5845,6 +5875,7 @@
     suiviGroupBy: true,
     suiviGroupOrder: ['started', 'notstarted', 'done'],
     suiviGroupCollapsed: [],
+    orphanGroupCollapsed: [],   // (v4.12.0) sections repliées de Hors listes
     // Scopes dont la liste de genres (puces garder/exclure) est DÉPLIÉE. Vide = tout replié
     // par défaut (la liste peut être longue).
     genresOpen: [],
@@ -8806,7 +8837,9 @@
       // Double vérification : une série peut apparaître dans l'historique sans qu'aucun
       // épisode ne soit réellement marqué vu (lecture interrompue très tôt, etc.) — on ne
       // garde que celles avec au moins un épisode vu ET au moins un épisode restant.
-      O.series = markNew(built.filter((s) => s.total > 0 && s.seen > 0 && s.remaining > 0));
+      // (v4.12.0) Hors listes montre désormais TOUT ce qui a été entamé hors de tes listes —
+      // terminé compris —, rangé par sections (voir ORPHAN_GROUPS) au lieu d'être filtré.
+      O.series = markNew(built.filter((s) => s.total > 0));
       // (v4.8.0) Bilan affiché sous l'en-tête : sans lui, impossible de savoir pourquoi une
       // série de l'historique n'apparaît pas (terminée ? juste entamée ? analyse en échec ?).
       O.stats = {
@@ -8956,6 +8989,56 @@
       // indépendants des chips de statut (filtre exclusif).
       `<button class="crrav-chip crrav-chip-toggle" data-toggle="${k}" aria-pressed="${!!f[k]}"
         title="${title}">${label}</button>`).join('');
+  }
+
+  // (v4.12.0) Sections de Hors listes — partition complète et disjointe :
+  //  · À jour : plus aucun épisode sorti à voir (terminé, ou rattrapé en diffusion) ;
+  //  · Au moins une saison vue : une saison (hors films) entièrement vue, reste à finir ;
+  //  · À peine commencé : quelques épisodes vus/entamés, aucune saison complète.
+  const ORPHAN_GROUPS = {
+    barely:   { label: 'À peine commencé' },
+    season:   { label: 'Au moins une saison vue' },
+    uptodate: { label: 'À jour' },
+  };
+  const ORPHAN_GROUPS_ORDER = ['barely', 'season', 'uptodate'];
+  function hasFullSeasonSeen(s) {
+    const sp = splitMovies(s);
+    const eps = sp ? sp.eps : (s.episodes || []);
+    const bySeason = new Map();
+    for (const e of eps) {
+      const k = e.season ?? 0;
+      const g = bySeason.get(k) || { n: 0, seen: 0 };
+      g.n++; if (e.seen) g.seen++;
+      bySeason.set(k, g);
+    }
+    for (const g of bySeason.values()) if (g.n > 0 && g.seen === g.n) return true;
+    return false;
+  }
+  function orphanGroupOf(s) {
+    if (s.total > 0 && s.remaining === 0) return 'uptodate';
+    return hasFullSeasonSeen(s) ? 'season' : 'barely';
+  }
+  function orphanGroupCollapsed(f) {
+    return Array.isArray(f.orphanGroupCollapsed) ? f.orphanGroupCollapsed.filter((k) => ORPHAN_GROUPS[k]) : [];
+  }
+  function renderOrphanGroups(list) {
+    const f = STATE.filters;
+    const gridCls = f.view === 'list' ? ' crrav-list' : '';
+    const collapsed = orphanGroupCollapsed(f);
+    return ORPHAN_GROUPS_ORDER.map((k) => {
+      const items = list.filter((s) => orphanGroupOf(s) === k);
+      if (!items.length) return '';
+      const isCollapsed = collapsed.includes(k);
+      const secLeftGroup = items.reduce((a, s) => a + (s.secLeft || 0), 0);
+      return `<section class="crrav-group${isCollapsed ? ' crrav-group-collapsed' : ''}" data-ogroup="${k}">
+        <div class="crrav-group-hrow">
+          <button type="button" class="crrav-group-h" data-act="orphan-group-collapse" data-g="${k}"
+            aria-expanded="${!isCollapsed}">${isCollapsed ? '▸' : '▾'} ${ORPHAN_GROUPS[k].label}<span class="crrav-group-n">${items.length}</span>${
+              secLeftGroup ? `<span class="crrav-group-time">${fmtDuration(secLeftGroup)}</span>` : ''}</button>
+        </div>
+        ${isCollapsed ? '' : `<div class="crrav-grid${gridCls}">${items.map((s, i) => card(s, i, 'orphan')).join('')}</div>`}
+      </section>`;
+    }).join('');
   }
 
   function visibleOrphelines() {
@@ -10969,6 +11052,7 @@
   .crrav-globalloading{color:#9a9aa4;font:600 12.5px/1 system-ui;margin:0 0 10px}
   .crrav-diagpicker{margin:6px 0 10px}
   .crrav-orphan-recover{margin:6px 0 12px}
+  .crrav-orphan-recover-note{display:block;margin-top:6px;color:#8a8a94;text-align:center}
   .crrav-orphan-recover .crrav-btn{width:100%}
   .crrav-diagsearch{width:100%;padding:10px 14px;font-size:14.5px;background:rgba(255,255,255,.07)}
   .crrav-diagcur{display:flex;align-items:center;gap:12px;width:100%;margin:6px 0 10px;padding:12px 14px;
@@ -14958,7 +15042,7 @@
       // Rafraîchissement en fond avec liste déjà connue : on la garde affichée (mêmes
       // cartes que l'état stabilisé), la progression restant visible en pied de grille —
       // pas de squelettes qui remplaceraient des cartes encore valides.
-      body = `<div class="crrav-grid${STATE.filters.view === 'list' ? ' crrav-list' : ''}">${list.map((s, i) => card(s, i, 'orphan')).join('')}</div>
+      body = `${renderOrphanGroups(list)}
         <div class="crrav-foot">${escapeHtml(progressMsgOrphan)}</div>`;
     } else if (O.error) {
       body = `<div class="crrav-msg"><h3>Ça n'a pas marché</h3><p>${escapeHtml(O.error)}</p>
@@ -14967,9 +15051,9 @@
       body = `<div class="crrav-msg"><h3>Rien à afficher</h3>
         <p>${O.series.length
           ? 'Aucune série ne correspond à cette recherche.'
-          : "Aucune série entamée hors de tes listes pour l'instant."}</p></div>`;
+          : "Aucune série entamée hors de tes listes pour l'instant — essaie « Retrouver mes séries déjà vues »."}</p></div>`;
     } else {
-      body = `<div class="crrav-grid${STATE.filters.view === 'list' ? ' crrav-list' : ''}">${list.map((s, i) => card(s, i, 'orphan')).join('')}</div>`;
+      body = renderOrphanGroups(list);
     }
 
     return `
@@ -14977,8 +15061,8 @@
               ${O.fromSnapshot
                 ? 'Affichage du dernier état connu — actualisation en cours…'
                 : 'Chargement en cours — les séries apparaissent au fur et à mesure.'}</p>` : ''}
-        ${hintBlock('orphan-intro', `Séries dont tu as vu au moins un épisode mais qui ne sont dans aucune de tes listes
-          (watchlist ou Crunchylists), et qu'il te reste à finir.`)}
+        ${hintBlock('orphan-intro', `Toutes les séries que tu as entamées sans les mettre dans une de tes listes
+          (watchlist ou Crunchylists), rangées en trois sections : à peine commencées, au moins une saison vue, à jour.`)}
         ${O.warning ? `<p class="crrav-warn">${escapeHtml(O.warning)}</p>` : ''}
         ${historyRecoverOrphanHtml()}
         <div class="crrav-statsrow">
@@ -19616,6 +19700,13 @@
           const gi = o.indexOf(act.dataset.g);
           if (gi >= 0 && gi < o.length - 1) { [o[gi], o[gi + 1]] = [o[gi + 1], o[gi]]; STATE.filters.suiviGroupOrder = o; saveFilters(); render(); }
           return;
+        }
+        if (act.dataset.act === 'orphan-group-collapse') {
+          const collapsed = orphanGroupCollapsed(STATE.filters).slice();
+          const gi = collapsed.indexOf(act.dataset.g);
+          if (gi >= 0) collapsed.splice(gi, 1); else collapsed.push(act.dataset.g);
+          STATE.filters.orphanGroupCollapsed = collapsed;
+          saveFilters(); render(); return;
         }
         if (act.dataset.act === 'group-collapse') {
           const collapsed = suiviGroupCollapsed(STATE.filters).slice();
