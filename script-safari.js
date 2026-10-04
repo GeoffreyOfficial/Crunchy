@@ -22,14 +22,8 @@
 // AniList — qui, empiriquement, n'est PAS bloqué par la CSP de Crunchyroll sous Safari/
 // WebKit (contrairement à Firefox, où fetch() vers anilist.co est bloqué et GM reste donc
 // nécessaire). Sur Safari, retirer le grant ne fait donc perdre AUCUNE fonctionnalité.
-// @grant        GM_xmlhttpRequest
-// @grant        GM.xmlHttpRequest
-// @connect      anilist.co
-// @connect      graphql.anilist.co
-// @connect      www.crunchyroll.com
-// @connect      crunchyroll.com
-// @updateURL    https://raw.githubusercontent.com/GeoffreyOfficial/Crunchy/refs/heads/main/script.js
-// @downloadURL  https://raw.githubusercontent.com/GeoffreyOfficial/Crunchy/refs/heads/main/script.js
+// @updateURL    https://raw.githubusercontent.com/GeoffreyOfficial/Crunchy/refs/heads/main/script-safari.js
+// @downloadURL  https://raw.githubusercontent.com/GeoffreyOfficial/Crunchy/refs/heads/main/script-safari.js
 // @supportURL   https://github.com/GeoffreyOfficial/Crunchy/issues
 // ==/UserScript==
 
