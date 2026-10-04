@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      4.7.0
+// @version      4.8.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '4.7.0';
+  const SCRIPT_VERSION = '4.8.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -3412,6 +3412,10 @@
       cv: (historyGapPages || !Math.max(newMarkTs, incremental ? prevMarkTs : 0)) ? 1 : HISTORY_CACHE_CV,
       // Date du dernier scan COMPLET : héritée par l'incrémental, posée à maintenant sinon.
       fullAt: (incremental && stopAtMark) ? prev.fullAt : (historyGapPages ? 0 : Date.now()),
+      // (v4.8.0) Pour le diagnostic : taille RÉELLE de l'historique (entrées lues au dernier scan
+      // complet — le `total` de l'API ne vaut que la taille d'une page) et date du dernier scan.
+      fullEntries: (incremental && stopAtMark) ? (prev.fullEntries || 0) : scanned,
+      scanAt: Date.now(),
     });
     if (historyGapPages) console.warn(`[reste-à-voir] historique : ${historyGapPages} page(s) illisible(s) — scan à refaire au prochain lancement`);
     return ids;
@@ -4317,6 +4321,10 @@
   }
   function anilistClearCooldown() {
     try { localStorage.removeItem(LS + ANILIST_COOLDOWN_KEY); } catch (_) { /* ignore */ }
+    // (v4.8.0) BUG corrigé : la pause est écrite par cacheSet (cache IndexedDB / BIGCACHE),
+    // pas dans localStorage — seule la ligne ci-dessus (reliquat d'avant IndexedDB) ne levait
+    // donc RIEN : après un succès AniList, l'enrichissement restait bloqué jusqu'à 2 h.
+    if (BIGCACHE[ANILIST_COOLDOWN_KEY]) { delete BIGCACHE[ANILIST_COOLDOWN_KEY]; markDeleted(ANILIST_COOLDOWN_KEY); }
     anilistTransportFailAt = 0;
   }
   // Témoin permanent du DERNIER appel AniList (résultat + motif + horodatage). Sert au bloc
@@ -7025,6 +7033,7 @@
         if (anilistCooldownRemainingMs() > 0) { aniExhausted = true; return; }
         const roundTarget = Math.min(ANI_ROUND_SIZE, target - matches.length);
         if (roundTarget <= 0) return;
+        const pageBefore = aniCursor.page;
         onProgress(stepLabel(3, 3, `Découverte : lot AniList (page ${aniCursor.page})…`));
         const aniFound = await scanAnilistPopularity(
           aniProfile, excluded, seenCandidate, seenTitlesNorm, knownTitlesNorm, roundTarget,
@@ -7044,6 +7053,9 @@
         }
         if (aniFound.length) publishFound();
         if (!aniCursor.hasNext || anilistCooldownRemainingMs() > 0) aniExhausted = true;
+        // (v4.8.0) Filet général : un lot qui n'a ni trouvé quoi que ce soit ni fait avancer le
+        // curseur ne progressera jamais — on considère AniList épuisé plutôt que de boucler.
+        if (!aniFound.length && aniCursor.page === pageBefore) aniExhausted = true;
       };
 
       // (fix) Le curseur légendaire (`start`) reprend à une position ABSOLUE dans le
@@ -8099,11 +8111,15 @@
 
     // ── Découverte normale (ou similaire sans reco exploitable) : tag_in + popularité ──
     // Profil neuf/vide : rien à cibler côté AniList — zéro requête plutôt qu'un scan large.
-    if (!profile || !profile.size) return found;
+    // (v4.8.0) On marque aussi le curseur ÉPUISÉ : sinon l'appelant (runAniBatch) le croyait
+    // toujours plein et la boucle de rattrapage de loadDiscover tournait à l'infini sans
+    // jamais rendre la main (onglet figé), quand le classement Crunchyroll s'épuisait avant
+    // la cible avec un profil sans tags AniList.
+    if (!profile || !profile.size) { if (cursor) cursor.hasNext = false; return found; }
     // On ne cible QUE via tag_in : `tag:Nom` vient TOUJOURS d'AniList (nom directement
     // utilisable), alors qu'un `genre:` peut venir de Crunchyroll localisé (→ 0 résultat).
     const tagIn = (profile.top || []).filter((k) => k.startsWith('tag:')).map((k) => k.slice(4));
-    if (!tagIn.length) return found;   // profil basé uniquement sur des genres : rien d'exploitable ici
+    if (!tagIn.length) { if (cursor) cursor.hasNext = false; return found; }   // profil basé uniquement sur des genres : rien d'exploitable ici (v4.8.0 : curseur épuisé, voir plus haut)
     const minRatingAni = D.similarTo ? 0 : CFG.discoverMinRatingAni;
     const scoreMin = minRatingAni > 0 ? Math.round(Math.max(0, Math.min(5, minRatingAni)) * 20) : null;
     const maxPages = POPULAR_SCAN_SAFETY_CAP;
@@ -8120,7 +8136,7 @@
       let data;
       try {
         data = await anilistQuery(ANILIST_DISCOVER_QUERY, { page, perPage, tagIn, scoreMin, formatIn: ANILIST_DISCOVER_FORMATS });
-      } catch (e) { safeCall.log(e, 'scanAnilistPopularity'); break; }   // 429/mur d'accès : on s'arrête net
+      } catch (e) { safeCall.log(e, 'scanAnilistPopularity'); hasNext = false; break; }   // 429/mur d'accès/erreur GraphQL : on s'arrête net (v4.8.0 : et on le dit à l'appelant)
       const pageData = data && data.Page;
       const media = (pageData && pageData.media) || [];
       hasNext = !!(pageData && pageData.pageInfo && pageData.pageInfo.hasNextPage);
@@ -8423,27 +8439,56 @@
       }
 
       // (fix v3.80.8) paceLimit() — même bug, chemin « Hors listes » cette fois.
-      const results = await pool(candidateIds, async (id, idx) => {
+      const analyse = async (id, idx) => {
         const panel = await getSeriesPanel(id);
         if (!panel) return null;
         const eps = await getEpisodes(id);
         const rating = getRatingCached(id);            // sans requête : complété plus tard
         const myRating = getMyRatingCached(id);         // idem, note perso
         return { panel, episodes: eps.episodes, maxAir: eps.maxAir, rating, myRating, order: idx };
-      }, paceLimit(), (done, total) => onProgress(stepLabel(3, 4, `Analyse des épisodes… ${done}/${total}`)));
+      };
+      const results = await pool(candidateIds, analyse, paceLimit(),
+        (done, total) => onProgress(stepLabel(3, 4, `Analyse des épisodes… ${done}/${total}`)));
+      // (v4.8.0) Avec l'historique désormais lu en entier (v4.7.0), il y a des centaines de
+      // candidats : une série dont l'analyse échouait (429/timeout après les reprises d'api())
+      // était SAUTÉE EN SILENCE par pool() — elle manquait de Hors listes, et l'instantané
+      // enregistré la faisait disparaître durablement. On rejoue les échecs à faible débit,
+      // puis on signale ce qui reste illisible au lieu de le taire.
+      for (let round = 1; round <= 2; round++) {
+        const failedIdx = results.map((r, i) => (r ? -1 : i)).filter((i) => i >= 0);
+        if (!failedIdx.length) break;
+        onProgress(stepLabel(3, 4, `Nouvel essai pour ${failedIdx.length} série(s)…`));
+        await sleep(1000 * round);
+        const again = await pool(failedIdx, (i) => analyse(candidateIds[i], i), Math.min(2, paceLimit()));
+        failedIdx.forEach((i, k) => { if (again[k]) results[i] = again[k]; });
+      }
 
       const ok = results.filter(Boolean);
+      const failedCount = results.length - ok.length;
       const allIds = [...new Set(ok.flatMap((r) => r.episodes.flatMap((e) => e.ids)))];
 
       onProgress(stepLabel(4, 4, 'Vérification de ce que tu as vu…'));
       const ph = allIds.length ? await getPlayheads(accountId, allIds) : new Map();
 
-      O.series = markNew(ok
-        .map(({ panel, episodes, maxAir, rating, myRating, order }) => buildSeriesEntry(panel, episodes, maxAir, rating, order, ph, myRating)))
-        // Double vérification : une série peut apparaître dans l'historique sans qu'aucun
-        // épisode ne soit réellement marqué vu (lecture interrompue très tôt, etc.) — on ne
-        // garde que celles avec au moins un épisode vu ET au moins un épisode restant.
-        .filter((s) => s.total > 0 && s.seen > 0 && s.remaining > 0);
+      const built = ok
+        .map(({ panel, episodes, maxAir, rating, myRating, order }) => buildSeriesEntry(panel, episodes, maxAir, rating, order, ph, myRating));
+      // Double vérification : une série peut apparaître dans l'historique sans qu'aucun
+      // épisode ne soit réellement marqué vu (lecture interrompue très tôt, etc.) — on ne
+      // garde que celles avec au moins un épisode vu ET au moins un épisode restant.
+      O.series = markNew(built.filter((s) => s.total > 0 && s.seen > 0 && s.remaining > 0));
+      // (v4.8.0) Bilan affiché sous l'en-tête : sans lui, impossible de savoir pourquoi une
+      // série de l'historique n'apparaît pas (terminée ? juste entamée ? analyse en échec ?).
+      O.stats = {
+        history: watchedIds.size, inLists: watchedIds.size - candidateIds.length,
+        candidates: candidateIds.length, kept: O.series.length, failed: failedCount,
+        finished: built.filter((s) => s.total > 0 && s.remaining === 0).length,
+        barelyStarted: built.filter((s) => s.total > 0 && s.seen === 0).length,
+        noEpisodes: built.filter((s) => !s.total).length,
+      };
+      if (failedCount) {
+        O.warning = `${failedCount} série(s) de ton historique n'ont pas pu être analysées (Crunchyroll n'a pas répondu) — ` +
+          'tire pour actualiser plus tard.';
+      }
       O.lastSync = new Date();
       O.fromSnapshot = false;
       orphanSnapshotSave();
@@ -14602,6 +14647,10 @@
         ${hintBlock('orphan-intro', `Séries dont tu as vu au moins un épisode mais qui ne sont dans aucune de tes listes
           (watchlist ou Crunchylists), et qu'il te reste à finir.`)}
         ${O.warning ? `<p class="crrav-warn">${escapeHtml(O.warning)}</p>` : ''}
+        ${O.stats && !O.loading ? `<details class="crrav-orphan-bilan"><summary>Bilan : ${O.stats.history} séries dans ton historique, ${O.stats.kept} affichées ici</summary>
+          <p class="crrav-diagcard-note">${O.stats.inLists} déjà dans tes listes (Reste à voir) · ${O.stats.finished} terminées ·
+          ${O.stats.barelyStarted} à peine entamées (aucun épisode vu à ${Math.round(CFG.watchedRatio * 100)} %)${O.stats.noEpisodes ? ` · ${O.stats.noEpisodes} sans épisode disponible` : ''}${O.stats.failed ? ` · <b>${O.stats.failed} non analysées (erreur)</b>` : ''}.</p>
+        </details>` : ''}
         <div class="crrav-statsrow">
           <div class="crrav-stats">
             <div class="crrav-stat"><b data-countup="${list.length}" data-countup-key="orph-series">${list.length}</b><small>séries</small></div>
@@ -16444,7 +16493,7 @@
       const firstCount = (first.data || []).length;
       const total = typeof first.total === 'number' ? first.total : null;
       rows.push({ label: 'page 1 (page_size=100)', count: firstCount,
-        note: total !== null ? `total annoncé : ${total}` : 'pas de total annoncé',
+        note: total !== null ? `total annoncé : ${total}${total <= firstCount ? ' (= taille de page, non fiable)' : ''}` : 'pas de total annoncé',
         ms: Math.round(performance.now() - t0) });
 
       // 2. Vérifie que page=2 renvoie des entrées DIFFÉRENTES (pagination correcte).
@@ -16571,7 +16620,7 @@
         <thead><tr><th>requête</th><th>reçu</th><th>état</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
-      ${advice}${extractBlock}
+      ${historyScanStateHtml()}${advice}${extractBlock}
     </div>`;
   }
 
@@ -16585,6 +16634,29 @@
   // ORCHESTRATEUR, pas une réimplémentation.
 
   // Verdict à partir du résultat déjà produit par runHistoryProbe().
+  // (v4.8.0) Ce que le script a RÉELLEMENT lu de l'historique au dernier scan (cache, zéro
+  // requête). Le test ci-dessous ne lit que 2 pages et l'API annonce un `total` qui n'est que
+  // la taille d'une page (100) : sans ce bloc, le diagnostic laissait croire à 100 entrées.
+  function historyScanState() {
+    const c = ACCOUNT_ID ? cacheGetStale('watchedids:' + ACCOUNT_ID) : null;
+    if (!c || Array.isArray(c)) return null;
+    return {
+      series: Array.isArray(c.ids) ? c.ids.length : 0,
+      entries: Number.isFinite(c.fullEntries) ? c.fullEntries : null,
+      complete: !!c.complete, gap: c.cv === 1, scanAt: c.scanAt || null, fullAt: c.fullAt || null,
+    };
+  }
+  function historyScanStateHtml() {
+    const st = historyScanState();
+    if (!st) return `<p class="crrav-diagcard-note">Historique pas encore lu par le script : ouvre Découverte ou Hors listes, puis relance ce test.</p>`;
+    const when = (ts) => ts ? new Date(ts).toLocaleString('fr-FR', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—';
+    return `<div class="crrav-probe-extract ${st.complete && !st.gap ? 'ok' : 'ko'}">
+      <b>Historique réellement lu par le script :</b> ${st.entries != null ? `<b>${st.entries}</b> entrées · ` : ''}<b>${st.series}</b> séries ·
+      ${st.gap ? 'scan TROUÉ (pages illisibles) — refait au prochain lancement' : st.complete ? 'scan complet ✅' : 'scan partiel ⚠'}
+      <br><small>dernier scan complet : ${when(st.fullAt)} · dernière mise à jour : ${when(st.scanAt)}</small>
+    </div>`;
+  }
+
   function summarizeHistoryProbe(r) {
     if (!r) return { status: 'err', note: "Le test n'a produit aucun résultat." };
     if (r.error) return { status: 'err', note: r.error };
@@ -16598,7 +16670,9 @@
     // (v4.7.0) Total annoncé = taille de la page 1 alors que la page 2 est pleine : ce n'est
     // PAS le vrai total (Crunchyroll renvoie la taille de page). Le scan l'ignore désormais.
     if (r.total != null && r.total <= r.depth && r.startWorks) {
-      return { status: 'ok', note: `Total annoncé (${r.total}) = taille de page, non fiable : le scan pagine jusqu’à la fin réelle · pagination et extraction OK.` };
+      const st = historyScanState();
+      const real = st ? `${st.entries != null ? st.entries + ' entrées · ' : ''}${st.series} séries lues par le script` : 'taille réelle inconnue (pas encore scanné)';
+      return { status: 'ok', note: `Historique : ${real} · pagination et extraction OK (le « total ${r.total} » de l’API n’est que la taille d’une page).` };
     }
     return { status: 'ok', note: `${r.total ?? '?'} entrées au total côté Crunchyroll · pagination et extraction OK.` };
   }
