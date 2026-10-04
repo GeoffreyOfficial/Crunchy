@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      4.9.0
+// @version      4.9.1
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '4.9.0';
+  const SCRIPT_VERSION = '4.9.1';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -3261,6 +3261,24 @@
     const lastPage = totalTrusted ? Math.max(1, Math.ceil(total / PAGE_SIZE)) : HISTORY_MAX_PAGES;
 
     let reachedEnd = firstData.length < PAGE_SIZE || lastPage <= 1;
+    // (v4.9.1) Trace du scan pour le diagnostic : où et pourquoi la lecture s'est arrêtée.
+    const scanInfo = { lastOkPage: 1, repeatedPages: 0, tailErrors: false, lastPageError: null };
+    // Entrées déjà lues (par id) : une page qui ne contient QUE des entrées déjà vues signifie
+    // que l'API ressert les mêmes données (pagination plafonnée) — on s'arrête au lieu de
+    // compter mille fois les mêmes entrées.
+    const entrySeen = new Set();
+    for (const it of firstData) { const m = historyMark(it); if (m) entrySeen.add(m); }
+    const fetchHistoryPage = async (pg) => {
+      try {
+        const r = await api(`/content/v2/${accountId}/watch-history`, {
+          page: pg, page_size: PAGE_SIZE, locale: CFG.locale, preferred_audio_language: 'ja-JP',
+        });
+        return r.data || [];
+      } catch (e) {
+        scanInfo.lastPageError = { page: pg, msg: String((e && e.message) || e).slice(0, 160) };
+        throw e;
+      }
+    };
     if (stopAtMark) {
       // Rattrapage terminé dès la 1re page : rien de plus à lire.
       LOG(`historique : scan incrémental — ${scanned} entrées relues, repère atteint`);
@@ -3282,18 +3300,20 @@
       const notePage = (pg, data) => {
         if (pg > maxOkPage) maxOkPage = pg;
         if (data.length < PAGE_SIZE && pg < endPage) endPage = pg;
+        let fresh = 0;
+        for (const it of data) {
+          const m = historyMark(it);
+          if (!m || !entrySeen.has(m)) fresh++;
+          if (m) entrySeen.add(m);
+        }
+        if (data.length && !fresh) { scanInfo.repeatedPages++; stop = true; }
       };
       for (let i = 0; i < pageNums.length && !stop; i += CFG.concurrency) {
         const wave = pageNums.slice(i, i + CFG.concurrency);
         // (fix v3.80.8) paceLimit() dans le pool — la taille de la « vague » ci-dessus reste
         // basée sur CFG.concurrency (juste un découpage en tranches), mais l'exécution
         // réelle en parallèle doit, elle, respecter le rythme adaptatif courant.
-        const pages = await pool(wave, async (pg) => {
-          const r = await api(`/content/v2/${accountId}/watch-history`, {
-            page: pg, page_size: PAGE_SIZE, locale: CFG.locale, preferred_audio_language: 'ja-JP',
-          });
-          return r.data || [];
-        }, paceLimit());
+        const pages = await pool(wave, fetchHistoryPage, paceLimit());
         for (let k = 0; k < pages.length; k++) {
           const data = pages[k];
           if (!data) { failedPages.push(wave[k]); continue; }   // (v4.5.5) page perdue : on la rejoue plus bas
@@ -3314,12 +3334,7 @@
           let recovered = false;
           for (let round = 1; round <= 3 && !recovered; round++) {
             await sleep(800 * round);
-            const again = await pool(wave, async (pg) => {
-              const r = await api(`/content/v2/${accountId}/watch-history`, {
-                page: pg, page_size: PAGE_SIZE, locale: CFG.locale, preferred_audio_language: 'ja-JP',
-              });
-              return r.data || [];
-            }, Math.min(2, paceLimit()));
+            const again = await pool(wave, fetchHistoryPage, Math.min(2, paceLimit()));
             if (!again.some((d) => d)) continue;
             recovered = true;
             for (let k = 0; k < again.length; k++) {
@@ -3350,12 +3365,7 @@
         await sleep(800 * round);
         const retry = failedPages.splice(0, failedPages.length);
         LOG(`historique : ${retry.length} page(s) à rejouer (tour ${round})`);
-        const got = await pool(retry, async (pg) => {
-          const r = await api(`/content/v2/${accountId}/watch-history`, {
-            page: pg, page_size: PAGE_SIZE, locale: CFG.locale, preferred_audio_language: 'ja-JP',
-          });
-          return r.data || [];
-        }, Math.min(2, paceLimit()));
+        const got = await pool(retry, fetchHistoryPage, Math.min(2, paceLimit()));
         for (let k = 0; k < got.length; k++) {
           if (!got[k]) { failedPages.push(retry[k]); continue; }
           notePage(retry[k], got[k]);
@@ -3374,7 +3384,11 @@
         else if (!totalTrusted && pg > maxOkPage) { failedPages.splice(k, 1); tailErrors = true; }
       }
       historyGapPages = failedPages.length;
-      reachedEnd = stop && !tailErrors;
+      // (v4.9.1) Pages resservies à l'identique = l'API ne laisse pas lire plus loin : pas une
+      // vraie fin, donc jamais « complet » (le filet playheads de Découverte reste actif).
+      reachedEnd = stop && !tailErrors && !scanInfo.repeatedPages;
+      scanInfo.lastOkPage = maxOkPage;
+      scanInfo.tailErrors = tailErrors;
     }
 
     // Un scan incrémental hérite de l'exhaustivité du scan précédent : on n'a relu que
@@ -3423,6 +3437,8 @@
       // complet — le `total` de l'API ne vaut que la taille d'une page) et date du dernier scan.
       fullEntries: (incremental && stopAtMark) ? (prev.fullEntries || 0) : scanned,
       scanAt: Date.now(),
+      // (v4.9.1) Où et pourquoi le dernier scan COMPLET s'est arrêté (affiché au diagnostic).
+      scanInfo: (incremental && stopAtMark) ? (prev.scanInfo || null) : scanInfo,
     });
     if (historyGapPages) console.warn(`[reste-à-voir] historique : ${historyGapPages} page(s) illisible(s) — scan à refaire au prochain lancement`);
     return ids;
@@ -16534,9 +16550,49 @@
           : 'MÊMES entrées (pagination cassée ❌)',
         ms: 0 });
 
+      // (v4.9.1) Sonde de PROFONDEUR : le scan réel s'arrête à ~1000 entrées. On vérifie page
+      // par page si l'API sert encore des entrées NOUVELLES (pas une redite des pages
+      // précédentes), où elle cesse, et si une autre pagination (offset `start`) va plus loin.
+      const seenEntries = new Set([...(first.data || []), ...p2Data].map((x) => historyMark(x)).filter(Boolean));
+      const seenSeries = new Set([...(first.data || []), ...p2Data].map((x) => { const r = extractSeriesRef(x); return r && r.id; }).filter(Boolean));
+      const day = (it) => { const t = historyTs(it); return t ? new Date(t).toLocaleDateString('fr-FR') : '?'; };
+      for (const pg of [3, 5, 8, 10, 11, 12]) {
+        try {
+          const r = await api(`/content/v2/${accountId}/watch-history`, {
+            page: pg, page_size: 100, locale: CFG.locale, preferred_audio_language: 'ja-JP',
+          });
+          const d = r.data || [];
+          const fresh = d.filter((x) => { const m = historyMark(x); return m && !seenEntries.has(m); }).length;
+          let newSeries = 0;
+          for (const x of d) {
+            const m = historyMark(x); if (m) seenEntries.add(m);
+            const ref = extractSeriesRef(x);
+            if (ref && ref.id && !seenSeries.has(ref.id)) { seenSeries.add(ref.id); newSeries++; }
+          }
+          rows.push({ label: `page ${pg}`, count: d.length,
+            note: d.length ? `${fresh} nouvelles · +${newSeries} séries · du ${day(d[0])} au ${day(d[d.length - 1])}${!fresh ? ' ❌ redite' : ''}` : 'vide (fin)' });
+          if (!d.length) break;
+        } catch (e) {
+          rows.push({ label: `page ${pg}`, count: 0, note: `❌ refusée : ${String(e.message || e).slice(0, 120)}` });
+          break;
+        }
+      }
+      try {
+        const alt = await api(`/content/v2/${accountId}/watch-history`, {
+          start: 1000, page_size: 100, locale: CFG.locale, preferred_audio_language: 'ja-JP',
+        });
+        const d = alt.data || [];
+        const same = d.length && historyMark(d[0]) === historyMark((first.data || [])[0]);
+        rows.push({ label: 'start=1000 (offset)', count: d.length,
+          note: !d.length ? 'vide' : same ? 'ignoré (renvoie la page 1)' : `autres entrées ✅ dès le ${day(d[0])}` });
+      } catch (e) {
+        rows.push({ label: 'start=1000 (offset)', count: 0, note: `❌ refusée : ${String(e.message || e).slice(0, 120)}` });
+      }
+
       STATE.probeResult = { rows, depth: firstCount, total, realPageSize: firstCount,
         deep: true, startWorks, paginationField,
-        firstMeta: JSON.stringify(Object.keys(first)) };
+        firstMeta: JSON.stringify(Object.keys(first)),
+        metaRaw: first.meta ? JSON.stringify(first.meta).slice(0, 600) : null };
 
       // 3. Extraction (comme avant), sur la première page.
       const sample = (first.data || []).slice(0, 25);
@@ -16641,6 +16697,9 @@
         <tbody>${rows}</tbody>
       </table>
       ${historyScanStateHtml()}${advice}${extractBlock}
+      <details><summary>Réponse brute : clés et méta (page 1)</summary>
+        <div class="crrav-probe-raw">${escapeHtml(r.firstMeta || '')}${r.metaRaw ? '\nmeta : ' + escapeHtml(r.metaRaw) : ''}</div>
+      </details>
     </div>`;
   }
 
@@ -16664,6 +16723,7 @@
       series: Array.isArray(c.ids) ? c.ids.length : 0,
       entries: Number.isFinite(c.fullEntries) ? c.fullEntries : null,
       complete: !!c.complete, gap: c.cv === 1, scanAt: c.scanAt || null, fullAt: c.fullAt || null,
+      info: c.scanInfo || null,
     };
   }
   function historyScanStateHtml() {
@@ -16674,6 +16734,7 @@
       <b>Historique réellement lu par le script :</b> ${st.entries != null ? `<b>${st.entries}</b> entrées · ` : ''}<b>${st.series}</b> séries ·
       ${st.gap ? 'scan TROUÉ (pages illisibles) — refait au prochain lancement' : st.complete ? 'scan complet ✅' : 'scan partiel ⚠'}
       <br><small>dernier scan complet : ${when(st.fullAt)} · dernière mise à jour : ${when(st.scanAt)}</small>
+      ${st.info ? `<br><small>arrêt : dernière page lue ${st.info.lastOkPage}${st.info.repeatedPages ? ` · ${st.info.repeatedPages} page(s) resservie(s) à l'identique (pagination plafonnée)` : ''}${st.info.tailErrors ? ' · pages suivantes refusées par Crunchyroll' : ''}${st.info.lastPageError ? ` · erreur page ${st.info.lastPageError.page} : ${escapeHtml(st.info.lastPageError.msg)}` : ''}</small>` : ''}
     </div>`;
   }
 
@@ -16686,6 +16747,15 @@
     if (r.extract && r.extract.sampleSize) {
       const rate = Math.round((r.extract.extracted / r.extract.sampleSize) * 100);
       if (rate < 80) return { status: 'warn', note: `Taux d'extraction bas (${rate} %) sur l'échantillon testé.` };
+    }
+    // (v4.9.1) Sonde de profondeur : une page refusée ou resservie à l'identique = Crunchyroll
+    // ne laisse pas lire l'historique plus loin. Le dire clairement : c'est LA cause de séries
+    // anciennes absentes de Hors listes / des stats.
+    const depthBad = (r.rows || []).find((row) => /^page \d+$/.test(row.label) && /❌/.test(row.note));
+    if (depthBad) {
+      const st = historyScanState();
+      return { status: 'warn', note: `Crunchyroll ne laisse lire ton historique que jusqu'à la ${depthBad.label.replace('page ', 'page ')} exclue`
+        + `${st ? ` (${st.entries != null ? st.entries + ' entrées · ' : ''}${st.series} séries lues)` : ''} : les séries plus anciennes sont invisibles via l'historique.` };
     }
     // (v4.7.0) Total annoncé = taille de la page 1 alors que la page 2 est pleine : ce n'est
     // PAS le vrai total (Crunchyroll renvoie la taille de page). Le scan l'ignore désormais.
@@ -17663,6 +17733,34 @@
     });
   }
 
+  // (v4.9.1) Remplace le contenu de .crrav-content SAUF la ligne de recherche globale si
+  // l'utilisateur est en train d'y écrire : le nœud <input> (et donc le clavier virtuel)
+  // survit au rendu. Repli : remplacement complet si la structure ne s'y prête pas.
+  function replaceContentKeepingSearch(content, html) {
+    const ae = document.activeElement;
+    const typing = ae && ae.classList && ae.classList.contains('crrav-search-global') && content.contains(ae);
+    const oldRow = typing ? ae.closest('.crrav-globalrow') : null;
+    if (!oldRow || oldRow.parentNode !== content) { content.innerHTML = html; return; }
+    const tpl = document.createElement('template');
+    tpl.innerHTML = html;
+    const newRow = tpl.content.querySelector('.crrav-globalrow');
+    if (!newRow || newRow.parentNode !== tpl.content) { content.innerHTML = html; return; }
+    // Bouton « effacer » : seul élément de la ligne qui dépend de la saisie.
+    const oldClr = oldRow.querySelector('.crrav-globalclear');
+    const newClr = newRow.querySelector('.crrav-globalclear');
+    if (oldClr && !newClr) oldClr.remove();
+    else if (!oldClr && newClr) oldRow.appendChild(newClr);
+    const before = [], after = [];
+    let past = false;
+    for (const n of [...tpl.content.childNodes]) {
+      if (n === newRow) { past = true; continue; }
+      (past ? after : before).push(n);
+    }
+    for (const n of [...content.childNodes]) if (n !== oldRow) n.remove();
+    oldRow.before(...before);
+    oldRow.after(...after);
+  }
+
   function patchSettingsSheetInPlace(sheetEl) {
     // (46) Boutons Annuler/Rétablir dans l'en-tête de la sheet : leur état disabled dépend
     // d'appHistoryIndex, qui change à chaque ignorer/réafficher — ces actions passent TOUTES
@@ -18283,7 +18381,7 @@
     // recherche » sans aucun champ visible pour la voir ou l'effacer — on la vide.
     if (!searchVisible && STATE.filters.globalQ) { STATE.filters.globalQ = ''; saveFilters(); }
 
-    content.innerHTML = `
+    const contentHtml = `
       <div class="crrav-top">
         <div class="crrav-row crrav-row-main">
           <h1 class="crrav-brand">${logoSvg('panel', 18)}<span class="crrav-brand-text">Mon <span>Crunchy</span></span></h1>
@@ -18326,6 +18424,12 @@
           : STATE.tab === 'calendrier' ? renderCalendrier()
           : renderSuivi()}`
       + settingsSheet;
+    // (v4.9.1) Clavier qui se fermait en pleine frappe dans la recherche principale : chaque
+    // frappe reconstruisait tout content.innerHTML, champ compris, puis le refocalisait — or un
+    // focus() programmatique ne rouvre jamais le clavier virtuel (Android/iOS). On fait
+    // désormais comme la recherche du diagnostic : le CHAMP lui-même n'est jamais recréé
+    // pendant la saisie, seul tout ce qui l'entoure (résultats, onglets, barres) l'est.
+    replaceContentKeepingSearch(content, contentHtml);
 
     // Restauration du défilement, juste après le remplacement du DOM.
     if (prevScroll > 0 && scrollEl.scrollHeight > scrollEl.clientHeight) scrollEl.scrollTop = prevScroll;
@@ -18473,7 +18577,10 @@
     wireGenreFields(content);
 
     const search = content.querySelector('.crrav-search-global');
-    if (search) {
+    // (v4.9.1) Le champ peut désormais survivre à un rendu (voir replaceContentKeepingSearch) :
+    // câblage idempotent, sinon un écouteur de plus à chaque frappe.
+    if (search && !search.dataset.globalWired) {
+      search.dataset.globalWired = '1';
       search.addEventListener('input', debounce((e) => {
         STATE.filters.globalQ = e.target.value;
         // (7) La recherche porte sur les 3 sources, mais Hors listes / Découverte ne sont
@@ -18488,7 +18595,9 @@
         try { renderNow(); }                // le focus est repris juste après : rendu immédiat
         finally { liveSearchRenderInFlight = false; }
         const s = root.querySelector('.crrav-search-global');
-        if (s) { s.focus(); s.setSelectionRange(s.value.length, s.value.length); }
+        // (v4.9.1) Le champ est désormais conservé pendant la saisie : on ne touche ni au
+        // focus ni au curseur (le replacer en fin de texte gênait une correction au milieu).
+        if (s && document.activeElement !== s) { s.focus(); s.setSelectionRange(s.value.length, s.value.length); }
       }, 220));
     }
 
