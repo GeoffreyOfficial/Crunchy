@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      4.9.0
+// @version      4.11.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -35,7 +35,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '4.9.0';
+  const SCRIPT_VERSION = '4.11.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -3031,10 +3031,11 @@
       const cached = cacheGet('watchedids:' + accountId, CFG.discoverHistoryCacheHours * 3600e3);
       if (!cached) return null;
       const ids = Array.isArray(cached) ? cached : (cached.ids || []);
+      const merged = withHistoryArchive(accountId, ids, (!Array.isArray(cached) && cached.detail) ? cached.detail : null);
       return {
-        ids: new Set(ids),
+        ids: merged.ids,
         complete: Array.isArray(cached) ? false : !!cached.complete,
-        detail: (!Array.isArray(cached) && cached.detail) ? cached.detail : null,
+        detail: merged.detail || null,
       };
     } catch (_) { return null; }
   }
@@ -3154,10 +3155,13 @@
       const ids = Array.isArray(cached) ? cached : (cached.ids || []);
       historyComplete = Array.isArray(cached) ? false : !!cached.complete;
       // On mémorise aussi le détail agrégé s'il est présent (format 2.40+).
-      HISTORY_DETAIL = (!Array.isArray(cached) && cached.detail) ? cached.detail : null;
+      // (v4.10.0) Historique ∪ mémoire permanente (séries sorties de la fenêtre Crunchyroll).
+      const merged = withHistoryArchive(accountId, ids, (!Array.isArray(cached) && cached.detail) ? cached.detail : null);
+      HISTORY_DETAIL = merged.detail || null;
       LOG('historique de visionnage : (cache)', ids.length, 'séries',
         historyComplete ? '— scan complet' : '— scan partiel');
-      return new Set(ids);
+      if (!historyComplete) scheduleHistoryRecovery();
+      return merged.ids;
     }
 
     // ── Scan INCRÉMENTAL ────────────────────────────────────────────────────────
@@ -3255,6 +3259,24 @@
     const lastPage = totalTrusted ? Math.max(1, Math.ceil(total / PAGE_SIZE)) : HISTORY_MAX_PAGES;
 
     let reachedEnd = firstData.length < PAGE_SIZE || lastPage <= 1;
+    // (v4.9.1) Trace du scan pour le diagnostic : où et pourquoi la lecture s'est arrêtée.
+    const scanInfo = { lastOkPage: 1, repeatedPages: 0, tailErrors: false, lastPageError: null };
+    // Entrées déjà lues (par id) : une page qui ne contient QUE des entrées déjà vues signifie
+    // que l'API ressert les mêmes données (pagination plafonnée) — on s'arrête au lieu de
+    // compter mille fois les mêmes entrées.
+    const entrySeen = new Set();
+    for (const it of firstData) { const m = historyMark(it); if (m) entrySeen.add(m); }
+    const fetchHistoryPage = async (pg) => {
+      try {
+        const r = await api(`/content/v2/${accountId}/watch-history`, {
+          page: pg, page_size: PAGE_SIZE, locale: CFG.locale, preferred_audio_language: 'ja-JP',
+        });
+        return r.data || [];
+      } catch (e) {
+        scanInfo.lastPageError = { page: pg, msg: String((e && e.message) || e).slice(0, 160) };
+        throw e;
+      }
+    };
     if (stopAtMark) {
       // Rattrapage terminé dès la 1re page : rien de plus à lire.
       LOG(`historique : scan incrémental — ${scanned} entrées relues, repère atteint`);
@@ -3276,18 +3298,20 @@
       const notePage = (pg, data) => {
         if (pg > maxOkPage) maxOkPage = pg;
         if (data.length < PAGE_SIZE && pg < endPage) endPage = pg;
+        let fresh = 0;
+        for (const it of data) {
+          const m = historyMark(it);
+          if (!m || !entrySeen.has(m)) fresh++;
+          if (m) entrySeen.add(m);
+        }
+        if (data.length && !fresh) { scanInfo.repeatedPages++; stop = true; }
       };
       for (let i = 0; i < pageNums.length && !stop; i += CFG.concurrency) {
         const wave = pageNums.slice(i, i + CFG.concurrency);
         // (fix v3.80.8) paceLimit() dans le pool — la taille de la « vague » ci-dessus reste
         // basée sur CFG.concurrency (juste un découpage en tranches), mais l'exécution
         // réelle en parallèle doit, elle, respecter le rythme adaptatif courant.
-        const pages = await pool(wave, async (pg) => {
-          const r = await api(`/content/v2/${accountId}/watch-history`, {
-            page: pg, page_size: PAGE_SIZE, locale: CFG.locale, preferred_audio_language: 'ja-JP',
-          });
-          return r.data || [];
-        }, paceLimit());
+        const pages = await pool(wave, fetchHistoryPage, paceLimit());
         for (let k = 0; k < pages.length; k++) {
           const data = pages[k];
           if (!data) { failedPages.push(wave[k]); continue; }   // (v4.5.5) page perdue : on la rejoue plus bas
@@ -3308,12 +3332,7 @@
           let recovered = false;
           for (let round = 1; round <= 3 && !recovered; round++) {
             await sleep(800 * round);
-            const again = await pool(wave, async (pg) => {
-              const r = await api(`/content/v2/${accountId}/watch-history`, {
-                page: pg, page_size: PAGE_SIZE, locale: CFG.locale, preferred_audio_language: 'ja-JP',
-              });
-              return r.data || [];
-            }, Math.min(2, paceLimit()));
+            const again = await pool(wave, fetchHistoryPage, Math.min(2, paceLimit()));
             if (!again.some((d) => d)) continue;
             recovered = true;
             for (let k = 0; k < again.length; k++) {
@@ -3344,12 +3363,7 @@
         await sleep(800 * round);
         const retry = failedPages.splice(0, failedPages.length);
         LOG(`historique : ${retry.length} page(s) à rejouer (tour ${round})`);
-        const got = await pool(retry, async (pg) => {
-          const r = await api(`/content/v2/${accountId}/watch-history`, {
-            page: pg, page_size: PAGE_SIZE, locale: CFG.locale, preferred_audio_language: 'ja-JP',
-          });
-          return r.data || [];
-        }, Math.min(2, paceLimit()));
+        const got = await pool(retry, fetchHistoryPage, Math.min(2, paceLimit()));
         for (let k = 0; k < got.length; k++) {
           if (!got[k]) { failedPages.push(retry[k]); continue; }
           notePage(retry[k], got[k]);
@@ -3368,7 +3382,11 @@
         else if (!totalTrusted && pg > maxOkPage) { failedPages.splice(k, 1); tailErrors = true; }
       }
       historyGapPages = failedPages.length;
-      reachedEnd = stop && !tailErrors;
+      // (v4.9.1) Pages resservies à l'identique = l'API ne laisse pas lire plus loin : pas une
+      // vraie fin, donc jamais « complet » (le filet playheads de Découverte reste actif).
+      reachedEnd = stop && !tailErrors && !scanInfo.repeatedPages;
+      scanInfo.lastOkPage = maxOkPage;
+      scanInfo.tailErrors = tailErrors;
     }
 
     // Un scan incrémental hérite de l'exhaustivité du scan précédent : on n'a relu que
@@ -3399,7 +3417,11 @@
     }
 
     const detailArr = serializeDetail(detail);
-    HISTORY_DETAIL = detailArr;
+    // (v4.10.0) Tout ce que l'historique montre entre dans la mémoire permanente : quand ces
+    // séries sortiront de la fenêtre des ~1000 dernières entrées, elles resteront connues.
+    historyArchiveMerge(accountId, detailArr, 'history');
+    const withArch = withHistoryArchive(accountId, ids, detailArr);
+    HISTORY_DETAIL = withArch.detail;
     // Trou dans le scan : on garde les ids lus mais SANS repère → le prochain scan repart de zéro
     // (au lieu de l'incrémental, qui aurait figé le trou), et Découverte retombe sur son filet
     // playheads puisque complete=false.
@@ -3417,9 +3439,287 @@
       // complet — le `total` de l'API ne vaut que la taille d'une page) et date du dernier scan.
       fullEntries: (incremental && stopAtMark) ? (prev.fullEntries || 0) : scanned,
       scanAt: Date.now(),
+      // (v4.9.1) Où et pourquoi le dernier scan COMPLET s'est arrêté (affiché au diagnostic).
+      scanInfo: (incremental && stopAtMark) ? (prev.scanInfo || null) : scanInfo,
     });
     if (historyGapPages) console.warn(`[reste-à-voir] historique : ${historyGapPages} page(s) illisible(s) — scan à refaire au prochain lancement`);
-    return ids;
+    if (!historyComplete) scheduleHistoryRecovery();
+    return withArch.ids;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  (v4.10.0) Mémoire PERMANENTE de l'historique + complétion par l'avancement réel
+  // ─────────────────────────────────────────────────────────────
+  // Crunchyroll ne sert que les ~1000 DERNIÈRES entrées de watch-history (page 11 refusée en
+  // 400, offset ignoré — constaté au diagnostic). Une série vue avant cette fenêtre (ex. Mashle)
+  // était donc invisible pour Hors listes, les stats et le filet titre. Deux mécanismes :
+  //  1. ARCHIVE : chaque série vue un jour (historique, complétion, Découverte) est gardée pour
+  //     toujours (clé non évictable), avec ses épisodes logiques — comme si elle venait de
+  //     l'historique. getWatchedSeriesIds/cachedWatchedIds renvoient historique ∪ archive.
+  //  2. COMPLÉTION : en tâche de fond, très lentement (1 série à la fois, pauses, jamais
+  //     pendant un autre scan ni onglet masqué), on parcourt le classement de popularité
+  //     Crunchyroll et on lit l'avancement RÉEL (/playheads) de chaque série inconnue : si un
+  //     épisode est vu ou commencé, la série entre dans l'archive. Bouton dédié au diagnostic
+  //     pour aller plus vite / jusqu'au bout.
+  const HIST_ARCHIVE_PREFIX = 'histarchive:';
+  const HIST_RECOVER_PREFIX = 'histrecover:';
+  const HIST_RECOVER_AUTO_BUDGET = 30;        // séries vérifiées max par session en automatique
+  const HIST_RECOVER_AUTO_GAP_MS = 2500;      // pause entre deux séries (automatique)
+  const HIST_RECOVER_MANUAL_GAP_MS = 250;     // pause entre deux séries (bouton)
+  const HIST_RECOVER_MAX_START = 3000;        // profondeur max du classement parcouru
+  const HIST_RECOVER_PAGE = 50;
+
+  function historyArchiveLoad(accountId) {
+    const a = accountId ? cacheGetStale(HIST_ARCHIVE_PREFIX + accountId) : null;
+    return (a && a.series && typeof a.series === 'object') ? a : { v: 1, series: {} };
+  }
+  function historyArchiveSave(accountId, a) {
+    if (accountId) cacheSet(HIST_ARCHIVE_PREFIX + accountId, a);
+  }
+  // Fusionne des entrées au format détail ({id,title,eps,seconds,genres}) dans l'archive.
+  // Union des épisodes ; la durée par épisode la plus récente prime. Renvoie le nb d'ajouts.
+  function historyArchiveMerge(accountId, detailArr, src) {
+    if (!accountId || !Array.isArray(detailArr) || !detailArr.length) return 0;
+    const a = historyArchiveLoad(accountId);
+    let added = 0, changed = false;
+    for (const d of detailArr) {
+      if (!d || !d.id) continue;
+      const cur = a.series[d.id];
+      const newKeys = d.eps || [];
+      const perNew = newKeys.length ? (d.seconds || 0) / newKeys.length : 0;
+      if (!cur) {
+        a.series[d.id] = { id: d.id, title: d.title || '', eps: [...newKeys], seconds: Math.round(d.seconds || 0),
+          genres: [...(d.genres || [])], src: src || 'history', at: Date.now() };
+        added++; changed = true;
+        continue;
+      }
+      const oldKeys = cur.eps || [];
+      const perOld = oldKeys.length ? (cur.seconds || 0) / oldKeys.length : 0;
+      const union = new Set([...oldKeys, ...newKeys]);
+      if (union.size !== oldKeys.length || (!cur.title && d.title) || (d.genres && d.genres.length && !(cur.genres || []).length)) {
+        const nk = new Set(newKeys);
+        cur.eps = [...union];
+        cur.seconds = Math.round([...union].reduce((s, k) => s + (nk.has(k) ? perNew : perOld), 0));
+        if (!cur.title) cur.title = d.title || '';
+        cur.genres = mergeGenreLists(cur.genres || [], d.genres || []);
+        changed = true;
+      }
+    }
+    if (changed) historyArchiveSave(accountId, a);
+    return added;
+  }
+  // Construit l'entrée détail d'une série à partir de ses épisodes + progressions réelles.
+  // Épisode compté s'il est vu OU commencé (comme une entrée d'historique Crunchyroll).
+  function watchedDetailFromPlayheads(id, title, episodes, ph) {
+    const eps = [];
+    let seconds = 0;
+    for (const e of episodes || []) {
+      const st = seenState(e, ph);
+      if (st === 'none') continue;
+      const key = (e.season != null && e.n != null) ? `s${e.season}e${e.n}` : (e.id || null);
+      if (!key) continue;
+      eps.push(key);
+      if (st === 'seen') seconds += e.dur || 0;
+      else {
+        let p = 0;
+        for (const cid of e.ids || []) { const x = ph.get(cid); if (x && x.p > p) p = x.p; }
+        seconds += Math.min(p, e.dur || p);
+      }
+    }
+    return eps.length ? { id, title: title || '', eps, seconds, genres: [] } : null;
+  }
+  function historyArchiveAddWatched(accountId, id, title, episodes, ph, src) {
+    const d = watchedDetailFromPlayheads(id, title, episodes, ph);
+    return d ? historyArchiveMerge(accountId, [d], src) : 0;
+  }
+  // Historique ∪ archive (ids + détail). Pour une série présente des deux côtés, l'archive
+  // (déjà fusionnée avec ce que l'historique vient de montrer) est un SUR-ENSEMBLE des épisodes :
+  // c'est elle qui fait foi pour les épisodes/durée (sinon une série vue à cheval sur la fenêtre
+  // Crunchyroll n'affichait que ses épisodes récents) ; titre et genres restent ceux de l'historique.
+  function withHistoryArchive(accountId, ids, detailArr) {
+    const a = historyArchiveLoad(accountId);
+    const outIds = new Set(ids);
+    if (Array.isArray(detailArr)) {
+      detailArr = detailArr.map((d) => {
+        const ar = d && d.id ? a.series[d.id] : null;
+        if (!ar || (ar.eps || []).length <= (d.eps || []).length) return d;
+        return { ...d, eps: [...ar.eps], episodes: ar.eps.length, seconds: Math.max(d.seconds || 0, ar.seconds || 0),
+          genres: mergeGenreLists(d.genres || [], ar.genres || []) };
+      });
+    }
+    const known = new Set((detailArr || []).map((d) => d && d.id));
+    const extra = [];
+    for (const d of Object.values(a.series)) {
+      outIds.add(d.id);
+      if (!known.has(d.id)) extra.push({ id: d.id, title: d.title, episodes: (d.eps || []).length,
+        seconds: d.seconds || 0, eps: d.eps || [], genres: d.genres || [], archived: true });
+    }
+    const detail = (detailArr || extra.length)
+      ? [...(detailArr || []), ...extra].sort((x, y) => (y.seconds || 0) - (x.seconds || 0) || (y.episodes || 0) - (x.episodes || 0))
+      : detailArr;
+    return { ids: outIds, detail };
+  }
+  function historyArchiveCount(accountId) {
+    return Object.keys(historyArchiveLoad(accountId).series).length;
+  }
+
+  // ── Complétion par l'avancement réel ──────────────────────────────────────────
+  function historyRecoverLoad(accountId) {
+    const s = accountId ? cacheGetStale(HIST_RECOVER_PREFIX + accountId) : null;
+    return (s && Array.isArray(s.checked)) ? s : { start: 0, checked: [], found: [], done: false };
+  }
+  function historyRecoverSave(accountId, s) { if (accountId) cacheSet(HIST_RECOVER_PREFIX + accountId, s); }
+  // Autre traitement lourd en cours : la complétion s'efface (jamais de concurrence avec l'IHM).
+  function historyRecoverBusy() {
+    return !!(STATE.loading || (STATE.discover && STATE.discover.loading) || (STATE.orphan && STATE.orphan.loading)
+      || (typeof document !== 'undefined' && document.hidden));
+  }
+  // Rafraîchit UNIQUEMENT les blocs de complétion (diagnostic, Hors listes) — jamais un
+  // rendu complet de l'interface.
+  function historyRecoverPaint() {
+    try {
+      if (typeof document === 'undefined') return;
+      const el = document.getElementById('crrav-histrec');
+      if (el) el.outerHTML = historyRecoverBlockHtml();
+      const el2 = document.getElementById('crrav-histrec-orph');
+      if (el2) el2.outerHTML = historyRecoverOrphanHtml();
+    } catch (_) { /* best-effort */ }
+  }
+  // (v4.11.0) Hors listes : bouton « retrouver mes séries déjà vues » (remplace le Bilan).
+  function historyRecoverOrphanHtml() {
+    const R = STATE.histRecover;
+    const running = !!(R && R.running);
+    const st = historyRecoverLoad(ACCOUNT_ID);
+    const found = (st.found || []).length;
+    const btn = running
+      ? `<button class="crrav-btn" data-act="hist-recover-stop">⏸ Pause · ${R.checked} vérifiées · ${R.found.length} retrouvées</button>`
+      : `<button class="crrav-btn" data-act="hist-recover" title="Crunchyroll ne montre que tes ~1000 dernières entrées d'historique : le script parcourt les séries populaires et lit ton avancement réel pour retrouver celles déjà vues.">🧩 Retrouver mes séries déjà vues${found ? ` · ${found} retrouvées` : ''}</button>`;
+    return `<div id="crrav-histrec-orph" class="crrav-orphan-recover">${btn}</div>`;
+  }
+  // Vérifie UNE série : épisodes (cache discep:) + progressions réelles. true si déjà vue/commencée.
+  async function historyRecoverCheck(accountId, panel) {
+    const eps = await getEpisodesForDiscover(panel.id);
+    const list = eps.episodes || [];
+    if (!list.length) return false;
+    const epIds = [...new Set(list.flatMap((e) => e.ids || []))];
+    const ph = await getPlayheads(accountId, epIds);
+    return historyArchiveAddWatched(accountId, panel.id, panel.title, list, ph, 'recovered') > 0
+      || !!historyArchiveLoad(accountId).series[panel.id];
+  }
+
+  let histRecoverTask = null;
+  async function runHistoryRecovery(opts) {
+    const manual = !!(opts && opts.manual);
+    if (histRecoverTask) {                     // déjà en cours : un clic manuel l'accélère
+      if (manual && STATE.histRecover) STATE.histRecover.manual = true;
+      return histRecoverTask;
+    }
+    histRecoverTask = (async () => {
+      const R = STATE.histRecover = { running: true, manual, checked: 0, found: [], error: null, stopRequested: false };
+      historyRecoverPaint();
+      try {
+        const accountId = await getAccountId();
+        const st = historyRecoverLoad(accountId);
+        if (manual && st.done) { st.start = 0; st.done = false; }      // relance complète à la demande
+        const checkedSet = new Set(st.checked);
+        const known = new Set(STATE.series.map((s) => s.id));
+        for (const it of STATE.raw || []) { const r = extractSeriesRef(it); if (r && r.id) known.add(r.id); }
+        const cw = cachedWatchedIds();
+        if (cw) for (const id of cw.ids) known.add(id);
+        let budget = R.manual ? Infinity : HIST_RECOVER_AUTO_BUDGET;
+        while (!R.stopRequested && st.start < HIST_RECOVER_MAX_START && budget > 0) {
+          if (!R.manual && historyRecoverBusy()) break;           // l'IHM d'abord : on reprendra plus tard
+          const bkey = 'discbrowse:' + st.start + ':' + HIST_RECOVER_PAGE;
+          let page = cacheGet(bkey, 24 * 3600e3);
+          if (!page) {
+            const r = await api('/content/v2/discover/browse', { sort_by: 'popularity', n: HIST_RECOVER_PAGE,
+              start: st.start, locale: CFG.locale, type: 'series' });
+            page = r.data || [];
+            cacheSet(bkey, page);
+          }
+          if (!page.length) { st.done = true; break; }
+          for (const p of page) {
+            if (R.stopRequested || budget <= 0) break;
+            if (!R.manual && historyRecoverBusy()) { budget = 0; break; }
+            if (!p || !p.id || checkedSet.has(p.id)) continue;
+            if (known.has(p.id)) { checkedSet.add(p.id); st.checked.push(p.id); continue; }   // déjà connue : 0 requête
+            let hit = false;
+            try { hit = await historyRecoverCheck(accountId, p); } catch (e) {
+              R.error = String(e.message || e);
+              checkedSet.add(p.id); st.checked.push(p.id);    // on avance quand même (jamais de boucle sur une série en erreur)
+              await sleep(R.manual ? HIST_RECOVER_MANUAL_GAP_MS : HIST_RECOVER_AUTO_GAP_MS);
+              continue;
+            }
+            checkedSet.add(p.id); st.checked.push(p.id);
+            R.checked++; budget--;
+            if (hit) {
+              R.found.push(p.title || p.id);
+              st.found.push({ id: p.id, title: p.title || '' });
+              known.add(p.id);
+            }
+            if (R.checked % 5 === 0 || hit) { historyRecoverSave(accountId, st); historyRecoverPaint(); }
+            await sleep(R.manual ? HIST_RECOVER_MANUAL_GAP_MS : HIST_RECOVER_AUTO_GAP_MS);
+          }
+          if (budget > 0 && !R.stopRequested && page.every((p) => !p || checkedSet.has(p.id))) st.start += HIST_RECOVER_PAGE;
+          if (page.length < HIST_RECOVER_PAGE) { st.done = true; break; }
+        }
+        if (st.start >= HIST_RECOVER_MAX_START) st.done = true;
+        st.lastRun = Date.now();
+        historyRecoverSave(accountId, st);
+        LOG(`complétion historique : ${R.checked} séries vérifiées, ${R.found.length} retrouvées`);
+      } catch (e) {
+        R.error = String((e && e.message) || e);
+      } finally {
+        R.running = false;
+        histRecoverTask = null;
+        historyRecoverPaint();
+        // (v4.11.0) Séries retrouvées : Hors listes / Stats doivent les voir sans manipulation.
+        if (R.found.length && typeof onHistoryRecovered === 'function') safeCall(onHistoryRecovered, undefined, 'onHistoryRecovered');
+      }
+    })();
+    return histRecoverTask;
+  }
+  function onHistoryRecovered() {
+    if (STATE.tab === 'orphelines' && !(STATE.orphan && STATE.orphan.loading) && typeof refreshOrphelines === 'function') refreshOrphelines();
+  }
+  // Lancement automatique, discret : seulement si l'historique est partiel, une fois par
+  // session, au repos, bien après le chargement (jamais pendant que l'utilisateur attend).
+  let histRecoverScheduled = false;
+  function scheduleHistoryRecovery() {
+    if (histRecoverScheduled || typeof window === 'undefined') return;
+    histRecoverScheduled = true;
+    setTimeout(() => {
+      const go = () => {
+        if (historyComplete) return;
+        const st = historyRecoverLoad(ACCOUNT_ID);
+        if (st.done) return;
+        runHistoryRecovery({ manual: false });
+      };
+      (window.requestIdleCallback || ((fn) => setTimeout(fn, 200)))(go);
+    }, 30e3);
+  }
+  function historyRecoverBlockHtml() {
+    const R = STATE.histRecover;
+    const st = historyRecoverLoad(ACCOUNT_ID);
+    const scan = historyScanState();
+    const partial = !scan || !scan.complete || (scan.info && (scan.info.tailErrors || scan.info.repeatedPages));
+    const arch = historyArchiveCount(ACCOUNT_ID);
+    if (!partial && !arch && !(R && R.running)) return '<div id="crrav-histrec"></div>';
+    const found = st.found || [];
+    const running = !!(R && R.running);
+    const btn = running
+      ? `<button class="crrav-btn" data-act="hist-recover-stop">⏸ Mettre en pause</button>`
+      : `<button class="crrav-btn" data-act="hist-recover">🧩 ${st.checked.length ? 'Continuer à compléter' : 'Compléter mon historique'}</button>`;
+    return `<div id="crrav-histrec" class="crrav-probe-extract ${partial ? 'ko' : 'ok'}">
+      <b>Complétion de l'historique</b> — Crunchyroll ne sert que tes ~1000 dernières entrées. Le script
+      parcourt les séries populaires et lit ton avancement réel : chaque série déjà vue ou commencée
+      est ajoutée à ta mémoire d'historique, comme si elle venait de Crunchyroll.
+      <br><small>${st.checked.length} séries vérifiées · <b>${found.length}</b> retrouvées · ${arch} séries en mémoire permanente
+      ${running ? ` · ⏳ en cours${R.manual ? '' : ' (en arrière-plan, au ralenti)'}…` : st.done ? ' · classement parcouru ✅' : ''}
+      ${R && R.error ? ` · dernière erreur : ${escapeHtml(R.error.slice(0, 100))}` : ''}</small>
+      ${found.length ? `<br><small>Dernières retrouvées : ${escapeHtml(found.slice(-6).map((f) => f.title || f.id).join(', '))} — actualise Hors listes / Stats pour les voir.</small>` : ''}
+      <div style="margin-top:8px">${btn}</div>
+    </div>`;
   }
 
   // Enrichit les genres MANQUANTS des séries de l'historique QUI SONT HORS DE TES LISTES,
@@ -3553,7 +3853,11 @@
           const merged = prev.detail.map((d) => (d && found.has(d.id)
             ? { ...d, genres: mergeGenreLists(d.genres || [], found.get(d.id)) } : d));
           cacheSet(cacheKey, { ...prev, detail: merged });
-          HISTORY_DETAIL = merged;
+          // (v4.10.0) Genres aussi reportés dans la mémoire permanente, et le détail en mémoire
+          // garde les séries archivées (sinon elles disparaissaient des stats jusqu'au scan suivant).
+          historyArchiveMerge(accountId, detail.filter((d) => d && d.id && d.genres && d.genres.length && found.has(d.id))
+            .map((d) => ({ id: d.id, title: d.title, eps: [], seconds: 0, genres: d.genres })), 'history');
+          HISTORY_DETAIL = withHistoryArchive(accountId, prev.ids || [], merged).detail;
         }
         render();
       }
@@ -6571,7 +6875,14 @@
           }
           return false;
         });
-        if (started) { REJ.progressPlayhead++; return { ok: false }; }
+        if (started) {
+          REJ.progressPlayhead++;
+          // (v4.10.0) Série déjà vue que l'historique (limité aux ~1000 dernières entrées)
+          // ignorait : on l'ajoute à la mémoire permanente — elle rejoint Hors listes / Stats et
+          // ne coûtera plus aucune requête aux prochains scans Découverte.
+          try { historyArchiveAddWatched(accountId, p.id, p.title, eps.episodes, ph, 'discover'); } catch (_) { /* best-effort */ }
+          return { ok: false };
+        }
       }
       return { ok: true, episodes, secTotal, maxAir };
     } catch (e) {
@@ -10651,6 +10962,8 @@
   .crrav-globalscan>.crrav-btn{width:100%}
   .crrav-globalloading{color:#9a9aa4;font:600 12.5px/1 system-ui;margin:0 0 10px}
   .crrav-diagpicker{margin:6px 0 10px}
+  .crrav-orphan-recover{margin:6px 0 12px}
+  .crrav-orphan-recover .crrav-btn{width:100%}
   .crrav-diagsearch{width:100%;padding:10px 14px;font-size:14.5px;background:rgba(255,255,255,.07)}
   .crrav-diagcur{display:flex;align-items:center;gap:12px;width:100%;margin:6px 0 10px;padding:12px 14px;
     text-align:left;color:#f2f2f4;cursor:pointer;background:#1c1c22;border:1px solid rgba(255,255,255,.14);
@@ -14661,10 +14974,7 @@
         ${hintBlock('orphan-intro', `Séries dont tu as vu au moins un épisode mais qui ne sont dans aucune de tes listes
           (watchlist ou Crunchylists), et qu'il te reste à finir.`)}
         ${O.warning ? `<p class="crrav-warn">${escapeHtml(O.warning)}</p>` : ''}
-        ${O.stats && !O.loading ? `<details class="crrav-orphan-bilan"><summary>Bilan : ${O.stats.history} séries dans ton historique, ${O.stats.kept} affichées ici</summary>
-          <p class="crrav-diagcard-note">${O.stats.inLists} déjà dans tes listes (Reste à voir) · ${O.stats.finished} terminées ·
-          ${O.stats.barelyStarted} à peine entamées (aucun épisode vu à ${Math.round(CFG.watchedRatio * 100)} %)${O.stats.noEpisodes ? ` · ${O.stats.noEpisodes} sans épisode disponible` : ''}${O.stats.failed ? ` · <b>${O.stats.failed} non analysées (erreur)</b>` : ''}.</p>
-        </details>` : ''}
+        ${historyRecoverOrphanHtml()}
         <div class="crrav-statsrow">
           <div class="crrav-stats">
             <div class="crrav-stat"><b data-countup="${list.length}" data-countup-key="orph-series">${list.length}</b><small>séries</small></div>
@@ -15867,6 +16177,7 @@
             <button class="crrav-btn" data-act="probe-history"${STATE.probeRunning ? ' disabled' : ''}>
               ${STATE.probeRunning ? '⏳ Test en cours…' : '🔍 Analyser mon historique'}</button>
             ${renderProbeResult()}
+            ${historyRecoverBlockHtml()}
           </div>
 
           <div class="crrav-probe">
@@ -16528,9 +16839,49 @@
           : 'MÊMES entrées (pagination cassée ❌)',
         ms: 0 });
 
+      // (v4.9.1) Sonde de PROFONDEUR : le scan réel s'arrête à ~1000 entrées. On vérifie page
+      // par page si l'API sert encore des entrées NOUVELLES (pas une redite des pages
+      // précédentes), où elle cesse, et si une autre pagination (offset `start`) va plus loin.
+      const seenEntries = new Set([...(first.data || []), ...p2Data].map((x) => historyMark(x)).filter(Boolean));
+      const seenSeries = new Set([...(first.data || []), ...p2Data].map((x) => { const r = extractSeriesRef(x); return r && r.id; }).filter(Boolean));
+      const day = (it) => { const t = historyTs(it); return t ? new Date(t).toLocaleDateString('fr-FR') : '?'; };
+      for (const pg of [3, 5, 8, 10, 11, 12]) {
+        try {
+          const r = await api(`/content/v2/${accountId}/watch-history`, {
+            page: pg, page_size: 100, locale: CFG.locale, preferred_audio_language: 'ja-JP',
+          });
+          const d = r.data || [];
+          const fresh = d.filter((x) => { const m = historyMark(x); return m && !seenEntries.has(m); }).length;
+          let newSeries = 0;
+          for (const x of d) {
+            const m = historyMark(x); if (m) seenEntries.add(m);
+            const ref = extractSeriesRef(x);
+            if (ref && ref.id && !seenSeries.has(ref.id)) { seenSeries.add(ref.id); newSeries++; }
+          }
+          rows.push({ label: `page ${pg}`, count: d.length,
+            note: d.length ? `${fresh} nouvelles · +${newSeries} séries · du ${day(d[0])} au ${day(d[d.length - 1])}${!fresh ? ' ❌ redite' : ''}` : 'vide (fin)' });
+          if (!d.length) break;
+        } catch (e) {
+          rows.push({ label: `page ${pg}`, count: 0, note: `❌ refusée : ${String(e.message || e).slice(0, 120)}` });
+          break;
+        }
+      }
+      try {
+        const alt = await api(`/content/v2/${accountId}/watch-history`, {
+          start: 1000, page_size: 100, locale: CFG.locale, preferred_audio_language: 'ja-JP',
+        });
+        const d = alt.data || [];
+        const same = d.length && historyMark(d[0]) === historyMark((first.data || [])[0]);
+        rows.push({ label: 'start=1000 (offset)', count: d.length,
+          note: !d.length ? 'vide' : same ? 'ignoré (renvoie la page 1)' : `autres entrées ✅ dès le ${day(d[0])}` });
+      } catch (e) {
+        rows.push({ label: 'start=1000 (offset)', count: 0, note: `❌ refusée : ${String(e.message || e).slice(0, 120)}` });
+      }
+
       STATE.probeResult = { rows, depth: firstCount, total, realPageSize: firstCount,
         deep: true, startWorks, paginationField,
-        firstMeta: JSON.stringify(Object.keys(first)) };
+        firstMeta: JSON.stringify(Object.keys(first)),
+        metaRaw: first.meta ? JSON.stringify(first.meta).slice(0, 600) : null };
 
       // 3. Extraction (comme avant), sur la première page.
       const sample = (first.data || []).slice(0, 25);
@@ -16635,6 +16986,9 @@
         <tbody>${rows}</tbody>
       </table>
       ${historyScanStateHtml()}${advice}${extractBlock}
+      <details><summary>Réponse brute : clés et méta (page 1)</summary>
+        <div class="crrav-probe-raw">${escapeHtml(r.firstMeta || '')}${r.metaRaw ? '\nmeta : ' + escapeHtml(r.metaRaw) : ''}</div>
+      </details>
     </div>`;
   }
 
@@ -16658,6 +17012,7 @@
       series: Array.isArray(c.ids) ? c.ids.length : 0,
       entries: Number.isFinite(c.fullEntries) ? c.fullEntries : null,
       complete: !!c.complete, gap: c.cv === 1, scanAt: c.scanAt || null, fullAt: c.fullAt || null,
+      info: c.scanInfo || null,
     };
   }
   function historyScanStateHtml() {
@@ -16668,6 +17023,7 @@
       <b>Historique réellement lu par le script :</b> ${st.entries != null ? `<b>${st.entries}</b> entrées · ` : ''}<b>${st.series}</b> séries ·
       ${st.gap ? 'scan TROUÉ (pages illisibles) — refait au prochain lancement' : st.complete ? 'scan complet ✅' : 'scan partiel ⚠'}
       <br><small>dernier scan complet : ${when(st.fullAt)} · dernière mise à jour : ${when(st.scanAt)}</small>
+      ${st.info ? `<br><small>arrêt : dernière page lue ${st.info.lastOkPage}${st.info.repeatedPages ? ` · ${st.info.repeatedPages} page(s) resservie(s) à l'identique (pagination plafonnée)` : ''}${st.info.tailErrors ? ' · pages suivantes refusées par Crunchyroll' : ''}${st.info.lastPageError ? ` · erreur page ${st.info.lastPageError.page} : ${escapeHtml(st.info.lastPageError.msg)}` : ''}</small>` : ''}
     </div>`;
   }
 
@@ -16680,6 +17036,15 @@
     if (r.extract && r.extract.sampleSize) {
       const rate = Math.round((r.extract.extracted / r.extract.sampleSize) * 100);
       if (rate < 80) return { status: 'warn', note: `Taux d'extraction bas (${rate} %) sur l'échantillon testé.` };
+    }
+    // (v4.9.1) Sonde de profondeur : une page refusée ou resservie à l'identique = Crunchyroll
+    // ne laisse pas lire l'historique plus loin. Le dire clairement : c'est LA cause de séries
+    // anciennes absentes de Hors listes / des stats.
+    const depthBad = (r.rows || []).find((row) => /^page \d+$/.test(row.label) && /❌/.test(row.note));
+    if (depthBad) {
+      const st = historyScanState();
+      return { status: 'warn', note: `Crunchyroll ne laisse lire ton historique que jusqu'à la ${depthBad.label.replace('page ', 'page ')} exclue`
+        + `${st ? ` (${st.entries != null ? st.entries + ' entrées · ' : ''}${st.series} séries lues)` : ''} : les séries plus anciennes sont invisibles via l'historique.` };
     }
     // (v4.7.0) Total annoncé = taille de la page 1 alors que la page 2 est pleine : ce n'est
     // PAS le vrai total (Crunchyroll renvoie la taille de page). Le scan l'ignore désormais.
@@ -17657,6 +18022,34 @@
     });
   }
 
+  // (v4.9.1) Remplace le contenu de .crrav-content SAUF la ligne de recherche globale si
+  // l'utilisateur est en train d'y écrire : le nœud <input> (et donc le clavier virtuel)
+  // survit au rendu. Repli : remplacement complet si la structure ne s'y prête pas.
+  function replaceContentKeepingSearch(content, html) {
+    const ae = document.activeElement;
+    const typing = ae && ae.classList && ae.classList.contains('crrav-search-global') && content.contains(ae);
+    const oldRow = typing ? ae.closest('.crrav-globalrow') : null;
+    if (!oldRow || oldRow.parentNode !== content) { content.innerHTML = html; return; }
+    const tpl = document.createElement('template');
+    tpl.innerHTML = html;
+    const newRow = tpl.content.querySelector('.crrav-globalrow');
+    if (!newRow || newRow.parentNode !== tpl.content) { content.innerHTML = html; return; }
+    // Bouton « effacer » : seul élément de la ligne qui dépend de la saisie.
+    const oldClr = oldRow.querySelector('.crrav-globalclear');
+    const newClr = newRow.querySelector('.crrav-globalclear');
+    if (oldClr && !newClr) oldClr.remove();
+    else if (!oldClr && newClr) oldRow.appendChild(newClr);
+    const before = [], after = [];
+    let past = false;
+    for (const n of [...tpl.content.childNodes]) {
+      if (n === newRow) { past = true; continue; }
+      (past ? after : before).push(n);
+    }
+    for (const n of [...content.childNodes]) if (n !== oldRow) n.remove();
+    oldRow.before(...before);
+    oldRow.after(...after);
+  }
+
   function patchSettingsSheetInPlace(sheetEl) {
     // (46) Boutons Annuler/Rétablir dans l'en-tête de la sheet : leur état disabled dépend
     // d'appHistoryIndex, qui change à chaque ignorer/réafficher — ces actions passent TOUTES
@@ -18277,7 +18670,7 @@
     // recherche » sans aucun champ visible pour la voir ou l'effacer — on la vide.
     if (!searchVisible && STATE.filters.globalQ) { STATE.filters.globalQ = ''; saveFilters(); }
 
-    content.innerHTML = `
+    const contentHtml = `
       <div class="crrav-top">
         <div class="crrav-row crrav-row-main">
           <h1 class="crrav-brand">${logoSvg('panel', 18)}<span class="crrav-brand-text">Mon <span>Crunchy</span></span></h1>
@@ -18320,6 +18713,12 @@
           : STATE.tab === 'calendrier' ? renderCalendrier()
           : renderSuivi()}`
       + settingsSheet;
+    // (v4.9.1) Clavier qui se fermait en pleine frappe dans la recherche principale : chaque
+    // frappe reconstruisait tout content.innerHTML, champ compris, puis le refocalisait — or un
+    // focus() programmatique ne rouvre jamais le clavier virtuel (Android/iOS). On fait
+    // désormais comme la recherche du diagnostic : le CHAMP lui-même n'est jamais recréé
+    // pendant la saisie, seul tout ce qui l'entoure (résultats, onglets, barres) l'est.
+    replaceContentKeepingSearch(content, contentHtml);
 
     // Restauration du défilement, juste après le remplacement du DOM.
     if (prevScroll > 0 && scrollEl.scrollHeight > scrollEl.clientHeight) scrollEl.scrollTop = prevScroll;
@@ -18467,7 +18866,10 @@
     wireGenreFields(content);
 
     const search = content.querySelector('.crrav-search-global');
-    if (search) {
+    // (v4.9.1) Le champ peut désormais survivre à un rendu (voir replaceContentKeepingSearch) :
+    // câblage idempotent, sinon un écouteur de plus à chaque frappe.
+    if (search && !search.dataset.globalWired) {
+      search.dataset.globalWired = '1';
       search.addEventListener('input', debounce((e) => {
         STATE.filters.globalQ = e.target.value;
         // (7) La recherche porte sur les 3 sources, mais Hors listes / Découverte ne sont
@@ -18482,7 +18884,9 @@
         try { renderNow(); }                // le focus est repris juste après : rendu immédiat
         finally { liveSearchRenderInFlight = false; }
         const s = root.querySelector('.crrav-search-global');
-        if (s) { s.focus(); s.setSelectionRange(s.value.length, s.value.length); }
+        // (v4.9.1) Le champ est désormais conservé pendant la saisie : on ne touche ni au
+        // focus ni au curseur (le replacer en fin de texte gênait une correction au milieu).
+        if (s && document.activeElement !== s) { s.focus(); s.setSelectionRange(s.value.length, s.value.length); }
       }, 220));
     }
 
@@ -19296,6 +19700,14 @@
         }
         if (act.dataset.act === 'probe-history') {
           runHistoryProbe();
+          return;
+        }
+        if (act.dataset.act === 'hist-recover') {
+          runHistoryRecovery({ manual: true });
+          return;
+        }
+        if (act.dataset.act === 'hist-recover-stop') {
+          if (STATE.histRecover) STATE.histRecover.stopRequested = true;
           return;
         }
         if (act.dataset.act === 'test-applink') {
@@ -20638,6 +21050,33 @@
     });
   }
 
+  // ── (v4.11.0) Fiche série ouverte : complète l'historique ──
+  // À chaque fiche série visitée (une fois par série et par session), si la série n'est connue
+  // ni de l'historique ni de la mémoire permanente, on lit ton avancement réel (épisodes en
+  // cache + 1 requête /playheads) : un épisode vu ou commencé l'ajoute à la mémoire, comme
+  // si elle venait de l'historique Crunchyroll. Au repos, jamais pendant le rendu de la page.
+  const SERIES_PAGE_CHECKED = new Set();
+  function crpSeriesArchiveCheck() {
+    const id = crpPageSeriesId();
+    if (!id || SERIES_PAGE_CHECKED.has(id)) return;
+    SERIES_PAGE_CHECKED.add(id);
+    idle(() => { checkSeriesWatchedOnOpen(id).catch((e) => safeCall.log(e, 'checkSeriesWatchedOnOpen')); });
+  }
+  async function checkSeriesWatchedOnOpen(id) {
+    const accountId = await getAccountId();
+    if (!accountId || historyArchiveLoad(accountId).series[id]) return false;
+    const cw = cachedWatchedIds();
+    if (cw && cw.ids.has(id)) return false;
+    const panel = await getSeriesPanel(id);
+    const eps = await getEpisodesForDiscover(id);
+    const list = (eps && eps.episodes) || [];
+    if (!list.length) return false;
+    const ph = await getPlayheads(accountId, [...new Set(list.flatMap((e) => e.ids || []))]);
+    const added = historyArchiveAddWatched(accountId, id, (panel && panel.title) || '', list, ph, 'page');
+    if (added) LOG(`fiche série : ${(panel && panel.title) || id} ajoutée à l'historique (épisodes déjà vus)`);
+    return added > 0;
+  }
+
   // ── Fiche série ──
   function crpPageSeriesId() {
     const m = /\/series\/([A-Z0-9]+)/i.exec(location.pathname);
@@ -21474,6 +21913,7 @@
     crpStep('calendar', crpCalendar, 'Prochaines sorties');
     crpStep('calauto', crpCalAutoRefresh, 'Actualisation des prochaines sorties');
     crpStep('plan', crpPlanning, 'Planning');
+    crpStep('archive', crpSeriesArchiveCheck, 'Historique (fiche série)');
     crpStep('eplist', crpEpisodeList, 'Liste d’épisodes');
     crpStep('menus', () => {
       if (!CFG.crHistoryDelete) document.querySelectorAll('[data-crrav-del], [data-crrav-scope]').forEach((n) => n.remove());
