@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      4.12.0
+// @version      4.12.1
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -35,7 +35,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '4.12.0';
+  const SCRIPT_VERSION = '4.12.1';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -3626,7 +3626,7 @@
       0, ph, getMyRatingCached(panel.id));
     const finished = entry.total > 0 && entry.remaining === 0;
     const O = STATE.orphan;
-    if (entry.total > 0 && !O.series.some((s) => s.id === entry.id)) {   // (v4.12.0) toutes, rangées par section
+    if (entry.total > 0 && !O.series.some((s) => s.id === entry.id) && !listSeriesIdSet().has(entry.id)) {   // (v4.12.0) toutes, rangées par section ; (v4.12.1) jamais une série de tes listes
       entry.order = O.series.length;
       O.series = [...O.series, entry];
       if (O.stats) O.stats.kept = O.series.length;
@@ -9035,11 +9035,27 @@
     }).join('');
   }
 
+  // (v4.12.1) Séries actuellement dans tes listes (watchlist + Crunchylists, telles que
+  // chargées par Reste à voir). Hors listes les exclut AU RENDU : la liste calculée par
+  // loadOrphelines peut être périmée (série ajoutée à une liste depuis la carte « + »,
+  // instantané plus ancien, série retrouvée par la complétion, listes rechargées après coup)
+  // — sans ce filtre, une même série apparaissait à la fois dans Reste à voir et Hors listes.
+  function listSeriesIdSet() {
+    const ids = new Set(STATE.series.map((s) => s.id));
+    for (const it of STATE.raw || []) { const r = extractSeriesRef(it); if (r && r.id) ids.add(r.id); }
+    return ids;
+  }
+  function orphanSeriesOutsideLists() {
+    const inLists = listSeriesIdSet();
+    return STATE.orphan.series.filter((s) => !inLists.has(s.id));
+  }
+
   function visibleOrphelines() {
     const { orphanQ, orphanSort, showIgnored } = STATE.filters;
+    const pool = orphanSeriesOutsideLists();
     let list = showIgnored
-      ? STATE.orphan.series.filter((s) => IGNORED.has(s.id))
-      : STATE.orphan.series.filter((s) => !IGNORED.has(s.id));
+      ? pool.filter((s) => IGNORED.has(s.id))
+      : pool.filter((s) => !IGNORED.has(s.id));
 
     list = applyCommonFilters(list, STATE.filters, STATE.filters.orphanCatsIn, STATE.filters.orphanCatsEx);
 
@@ -10792,7 +10808,7 @@
     const matches = (s) => s.title.toLowerCase().includes(needle);
 
     const mSuivi = STATE.series.filter((s) => s.total > 0 && !IGNORED.has(s.id) && matches(s));
-    const mOrphan = STATE.orphan.series.filter((s) => !IGNORED.has(s.id) && matches(s));
+    const mOrphan = orphanSeriesOutsideLists().filter((s) => !IGNORED.has(s.id) && matches(s));
     const mDiscover = STATE.discover.series.filter((s) => !IGNORED.has(s.id) && !STATE.addedToList.has(s.id) && matches(s));
 
     // (50) card() bascule déjà tout seul sur listRow() en mode liste compacte, mais le
@@ -15089,7 +15105,7 @@
         </div>
         <div class="crrav-controls">
           <div class="crrav-chips crrav-chips-quick">${quickChips(f)}</div>
-          ${catChips(categoriesOf(STATE.orphan.series), f.orphanCatsIn, f.orphanCatsEx, 'orphan')}
+          ${catChips(categoriesOf(orphanSeriesOutsideLists()), f.orphanCatsIn, f.orphanCatsEx, 'orphan')}
         </div>
       </div>
       ${body}
