@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      4.16.0
+// @version      4.17.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -35,7 +35,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '4.16.0';
+  const SCRIPT_VERSION = '4.17.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -2823,10 +2823,96 @@
   //  3. Données Crunchyroll
   // ─────────────────────────────────────────────────────────────
   let ACCOUNT_ID = null;
+  // ── (v4.17.0) PROFIL Crunchyroll ─────────────────────────────────────────────────────────────
+  // Un compte Crunchyroll porte plusieurs profils, chacun avec SON historique. L'identifiant de
+  // compte seul ne les distingue pas : l'archive d'historique (et le scan d'historique mis en
+  // cache) sont donc rangés par « compte~profil ». Sans profil identifiable, on retombe sur la clé
+  // « compte » d'avant (comportement 4.16). Une archive ancienne (sans profil) est ADOPTÉE par le
+  // premier profil identifié, une seule fois (marque `adoptedBy`).
+  let PROFILE_ID = null, PROFILE_NAME = '', PROFILE_TRIED = false, PROFILE_CHANGED = false, PROFILE_CHECKED_AT = 0;
+  const PROFILE_LAST_PREFIX = 'crrav-last-profile:';
+  const PROFILE_RECHECK_MS = 60e3;
+  function scopeOf(accountId) { return (accountId && PROFILE_ID) ? accountId + '~' + PROFILE_ID : accountId; }
+  function profileLastKnown(accountId) {
+    try { return localStorage.getItem(PROFILE_LAST_PREFIX + accountId) || null; } catch (_) { return null; }
+  }
+  // Les écritures dans l'archive sont suspendues quand on ne peut pas affirmer À QUEL profil elles
+  // appartiennent : profil changé en cours de session, ou profil introuvable alors qu'un profil
+  // était connu sur ce compte (sinon on mélangerait deux historiques).
+  function histWritable() {
+    if (PROFILE_CHANGED) return false;
+    if (PROFILE_TRIED && !PROFILE_ID && ACCOUNT_ID && profileLastKnown(ACCOUNT_ID)) return false;
+    return true;
+  }
+  function profileFromToken() {
+    try {
+      const t = String(token || '').replace(/^Bearer\s+/i, '');
+      const p = t.split('.')[1];
+      if (!p) return null;
+      const j = JSON.parse(atob(p.replace(/-/g, '+').replace(/_/g, '/')));
+      return j.profile_id || j.profileId || null;
+    } catch (_) { return null; }
+  }
+  async function detectProfile() {
+    let id = profileFromToken(), name = '';
+    for (let i = 0; i < 2 && !id; i++) {
+      try {
+        const p = await api('/accounts/v1/me/profile');
+        id = (p && (p.profile_id || p.id)) || null;
+        name = (p && (p.profile_name || p.username)) || '';
+      } catch (_) { /* on retente une fois, puis profil « inconnu » */ }
+    }
+    return { id: id ? String(id) : null, name };
+  }
+  // Adopte l'archive d'avant la 4.17.0 (clé `histarchive:<compte>`) pour le profil `id`.
+  function profileAdoptLegacy(accountId, id) {
+    const legacyKey = HIST_ARCHIVE_PREFIX + accountId;
+    const legacy = cacheGetStale(legacyKey);
+    const scopedKey = HIST_ARCHIVE_PREFIX + accountId + '~' + id;
+    if (!legacy || !legacy.series || legacy.adoptedBy || cacheGetStale(scopedKey)) return false;
+    cacheSet(scopedKey, { v: 1, series: legacy.series, adoptedFrom: 'legacy' });
+    cacheSet(legacyKey, Object.assign({}, legacy, { adoptedBy: id }));
+    return true;
+  }
+  function setProfile(id, name) {
+    PROFILE_TRIED = true; PROFILE_CHECKED_AT = Date.now();
+    if (!id) { PROFILE_ID = null; PROFILE_NAME = ''; return; }
+    if (PROFILE_ID && PROFILE_ID !== String(id)) { PROFILE_CHANGED = true; return; }
+    PROFILE_ID = String(id); PROFILE_NAME = name || PROFILE_NAME || '';
+    if (ACCOUNT_ID) {
+      safeCall(() => profileAdoptLegacy(ACCOUNT_ID, PROFILE_ID), undefined, 'profile:adopt');
+      try { localStorage.setItem(PROFILE_LAST_PREFIX + ACCOUNT_ID, PROFILE_ID); } catch (_) { /* best-effort */ }
+    }
+  }
+  async function resolveProfile() {
+    const p = await detectProfile();
+    setProfile(p.id, p.name);
+  }
+  // Revérifie (au plus une fois par minute) que le profil actif n'a pas changé depuis le début de
+  // la session — avant toute action qui écrit dans l'historique (export, import).
+  async function profileRecheck(force) {
+    if (!PROFILE_TRIED) { await resolveProfile(); return; }
+    if (!PROFILE_ID && !force) return;
+    if (!force && Date.now() - PROFILE_CHECKED_AT < PROFILE_RECHECK_MS) return;
+    const p = await detectProfile();
+    PROFILE_CHECKED_AT = Date.now();
+    if (p.id && PROFILE_ID && p.id !== PROFILE_ID) {
+      PROFILE_CHANGED = true;
+      safeCall(() => showToast('⚠ Le profil Crunchyroll a changé : recharge la page avant d\'importer ou d\'exporter.'), undefined, 'profile:toast');
+    } else if (p.id && !PROFILE_ID) setProfile(p.id, p.name);
+  }
+  function profileInfo() {
+    return { accountId: ACCOUNT_ID, profileId: PROFILE_ID, profileName: PROFILE_NAME, scope: scopeOf(ACCOUNT_ID),
+      changed: PROFILE_CHANGED, writable: histWritable() };
+  }
   async function getAccountId() {
-    if (ACCOUNT_ID) return ACCOUNT_ID;
+    if (ACCOUNT_ID) {
+      if (!PROFILE_TRIED) await resolveProfile().catch(() => {});
+      return ACCOUNT_ID;
+    }
     const me = await api('/accounts/v1/me');
     ACCOUNT_ID = me.account_id || me.external_id;
+    if (!PROFILE_TRIED) await resolveProfile().catch(() => {});
     return ACCOUNT_ID;
   }
 
@@ -3046,7 +3132,7 @@
     try {
       const accountId = ACCOUNT_ID;
       if (!accountId) return null;
-      const cached = cacheGet('watchedids:' + accountId, CFG.discoverHistoryCacheHours * 3600e3);
+      const cached = cacheGet('watchedids:' + scopeOf(accountId), CFG.discoverHistoryCacheHours * 3600e3);
       if (!cached) return null;
       const ids = Array.isArray(cached) ? cached : (cached.ids || []);
       const merged = withHistoryArchive(accountId, ids, (!Array.isArray(cached) && cached.detail) ? cached.detail : null);
@@ -3154,7 +3240,7 @@
     // `force` : on IGNORE le cache frais et on relance un scan (incrémental, donc 1-2
     // requêtes : il s'arrête au repère du dernier scan). Utilisé quand tu relances /
     // demandes « 30 autres » : de quoi capter ce que tu viens de regarder à l'instant.
-    const cacheKey = 'watchedids:' + accountId;
+    const cacheKey = 'watchedids:' + scopeOf(accountId);
     // (v4.5.4) Le scan étant incrémental (1-2 requêtes quand une base v2 existe), inutile de
     // se fier à un cache d'une heure : un épisode vu il y a 10 min doit exclure la série de
     // Découverte. Plafond de fraîcheur = 2 min, SAUF si aucune base incrémentale n'existe
@@ -3488,16 +3574,19 @@
   const HIST_RECOVER_PAGE = 50;
 
   function historyArchiveLoad(accountId) {
-    const a = accountId ? cacheGetStale(HIST_ARCHIVE_PREFIX + accountId) : null;
+    const a = accountId ? cacheGetStale(HIST_ARCHIVE_PREFIX + scopeOf(accountId)) : null;
     return (a && a.series && typeof a.series === 'object') ? a : { v: 1, series: {} };
   }
   function historyArchiveSave(accountId, a) {
-    if (accountId) cacheSet(HIST_ARCHIVE_PREFIX + accountId, a);
+    if (accountId && histWritable()) cacheSet(HIST_ARCHIVE_PREFIX + scopeOf(accountId), a);
   }
   // Fusionne des entrées au format détail ({id,title,eps,seconds,genres}) dans l'archive.
   // Union des épisodes ; la durée par épisode la plus récente prime. Renvoie le nb d'ajouts.
   function historyArchiveMerge(accountId, detailArr, src) {
     if (!accountId || !Array.isArray(detailArr) || !detailArr.length) return 0;
+    // (v4.17.0) L'objet chargé est celui du cache (même référence) : sans ce garde-fou, la fusion
+    // l'abîmerait en mémoire même si la sauvegarde est refusée.
+    if (!histWritable()) return 0;
     const a = historyArchiveLoad(accountId);
     let added = 0, changed = false;
     for (const d of detailArr) {
@@ -3675,7 +3764,11 @@
   // Tout l'historique connu sur cet appareil, TOUS comptes confondus : si le compte a déjà
   // changé avant l'export, l'archive de l'ancien compte (clé `histarchive:<ancien id>`) est
   // toujours là et doit partir dans le fichier. Union dédoublonnée par série.
-  function historyExportCollect() {
+  function historyExportCollect(opts) {
+    // (v4.17.0) Par défaut : le profil ACTIF uniquement. `opts.all` = tous les profils/comptes de
+    // cet appareil (export « complet »). Sans compte identifié, on ne peut pas filtrer : tout part.
+    const wantAll = !!(opts && opts.all) || !ACCOUNT_ID;
+    const mine = scopeOf(ACCOUNT_ID);
     const out = new Map();
     const add = (raw) => {
       const d = historyEntryClean(raw);
@@ -3687,12 +3780,14 @@
       const v = BIGCACHE[k] && BIGCACHE[k].v;
       if (!v || typeof v !== 'object') continue;
       if (k.startsWith(HIST_ARCHIVE_PREFIX)) {
+        if (!wantAll && k !== HIST_ARCHIVE_PREFIX + mine) continue;
         if (v.series && typeof v.series === 'object') Object.values(v.series).forEach(add);
       } else if (k.startsWith('watchedids:')) {
+        if (!wantAll && k !== 'watchedids:' + mine) continue;
         if (!Array.isArray(v) && Array.isArray(v.detail)) v.detail.forEach(add);
       }
     }
-    if (Array.isArray(HISTORY_DETAIL)) HISTORY_DETAIL.forEach(add);
+    if (Array.isArray(HISTORY_DETAIL) && (wantAll || histWritable())) HISTORY_DETAIL.forEach(add);
     return [...out.values()].sort((a, b) => b.seconds - a.seconds || b.eps.length - a.eps.length
       || a.title.localeCompare(b.title, 'fr'));
   }
@@ -3715,10 +3810,10 @@
 
   // ── Complétion par l'avancement réel ──────────────────────────────────────────
   function historyRecoverLoad(accountId) {
-    const s = accountId ? cacheGetStale(HIST_RECOVER_PREFIX + accountId) : null;
+    const s = accountId ? cacheGetStale(HIST_RECOVER_PREFIX + scopeOf(accountId)) : null;
     return (s && Array.isArray(s.checked)) ? s : { start: 0, checked: [], found: [], done: false };
   }
-  function historyRecoverSave(accountId, s) { if (accountId) cacheSet(HIST_RECOVER_PREFIX + accountId, s); }
+  function historyRecoverSave(accountId, s) { if (accountId && histWritable()) cacheSet(HIST_RECOVER_PREFIX + scopeOf(accountId), s); }
   // Autre traitement lourd en cours : la complétion s'efface (jamais de concurrence avec l'IHM).
   function historyRecoverBusy() {
     return !!(STATE.loading || (STATE.discover && STATE.discover.loading) || (STATE.orphan && STATE.orphan.loading)
@@ -4020,7 +4115,7 @@
         // rattrapage incrémental suivant reconstruisait l'historique à partir de ce détail
         // tronqué : Hors listes vide, séries vues reproposées. On ne fusionne désormais que
         // les GENRES trouvés, série par série, dans le détail ACTUEL du cache.
-        const cacheKey = 'watchedids:' + accountId;
+        const cacheKey = 'watchedids:' + scopeOf(accountId);
         const prev = cacheGetStale(cacheKey);
         if (prev && !Array.isArray(prev) && Array.isArray(prev.detail)) {
           const found = new Map(detail.filter((d) => d && d.id && d.genres && d.genres.length).map((d) => [d.id, d.genres]));
@@ -12115,7 +12210,9 @@
   .crrav-imp-steps li.error .crrav-imp-ico{background:rgba(224,72,61,.2);color:#ee6a5f}
   .crrav-imp-steps li.error small{color:#e6a9a2}
   .crrav-imp-steps li.skipped{opacity:.55}
-  .crrav-imp-actions{display:flex;margin-top:2px}
+  .crrav-imp-actions{display:flex;gap:8px;margin-top:2px}
+  .crrav-imp-ask p{margin:0 0 10px;font-size:13px;line-height:1.45;color:#e8e8ee}
+  .crrav-imp-ask[hidden],.crrav-imp-main[hidden]{display:none}
   .crrav-imp-actions .crrav-confirm-ok{flex:1}
   .crrav-imp-actions .crrav-confirm-ok.ghost{background:transparent;color:#c9c9d2;border-color:rgba(255,255,255,.18)}
   @keyframes crrav-imp-spin{to{transform:rotate(360deg)}}
@@ -16389,9 +16486,11 @@
               connecté au nouveau compte, « Importer » fusionne le fichier avec l'historique du compte
               actuel (rien n'est écrasé, tu peux réimporter sans risque). Les épisodes importés comptent
               comme vus dans Reste à voir et Hors listes.</p>
+            <p class="crrav-setcard-note">${backupProfileLine()}</p>
             <p class="crrav-setcard-note">${backupHistoryLine()}</p>
             <div class="crrav-setcard-btns">
               <button class="crrav-btn ghost" data-act="export-settings">⬇ Exporter</button>
+              <button class="crrav-btn ghost" data-act="export-settings-all" title="Historique de tous les profils/comptes connus sur cet appareil">⬇ Tout exporter</button>
               <button class="crrav-btn ghost" data-act="import-settings">⬆ Importer</button>
             </div>
             <input type="file" accept="application/json,.json" data-import-file hidden>
@@ -17304,7 +17403,7 @@
   // requête). Le test ci-dessous ne lit que 2 pages et l'API annonce un `total` qui n'est que
   // la taille d'une page (100) : sans ce bloc, le diagnostic laissait croire à 100 entrées.
   function historyScanState() {
-    const c = ACCOUNT_ID ? cacheGetStale('watchedids:' + ACCOUNT_ID) : null;
+    const c = ACCOUNT_ID ? cacheGetStale('watchedids:' + scopeOf(ACCOUNT_ID)) : null;
     if (!c || Array.isArray(c)) return null;
     return {
       series: Array.isArray(c.ids) ? c.ids.length : 0,
@@ -17904,6 +18003,11 @@
   }
 
   // Ligne d'info de la carte Sauvegarde : ce qu'un export emporterait MAINTENANT.
+  function backupProfileLine() {
+    if (PROFILE_CHANGED) return '⚠ Le profil Crunchyroll a changé depuis l\'ouverture : recharge la page.';
+    if (PROFILE_ID) return `Profil Crunchyroll détecté : <b>${escapeHtml(PROFILE_NAME || PROFILE_ID)}</b>. L'export et l'import ne concernent que lui ; « Tout exporter » emporte tous les profils de cet appareil.`;
+    return PROFILE_TRIED ? 'Profil Crunchyroll non identifié : l\'historique est rangé par compte.' : 'Profil Crunchyroll : détecté à la prochaine ouverture de la liste.';
+  }
   function backupHistoryLine() {
     const list = safeCall(historyExportCollect, [], 'backup:line');
     if (!list.length) return 'Historique mémorisé sur cet appareil : aucun pour l\'instant.';
@@ -17919,7 +18023,7 @@
   // cache, qui est volumineux et se reconstruit tout seul. Un fichier d'avant la 4.13.0 (sans
   // `history`) reste importable ; un fichier récent importé par une vieille version ignore
   // simplement la section qu'elle ne connaît pas.
-  function buildBackupPayload() {
+  function buildBackupPayload(opts) {
     archiveAllLoaded();   // (v4.15.0) ce qui est vu dans les listes entre dans l'archive avant de partir
     return {
       kind: 'mon-crunchy-config',
@@ -17935,27 +18039,35 @@
         v: HISTORY_EXPORT_VERSION,
         // Mémo pour l'humain qui ouvre le fichier ; jamais relu à l'import.
         note: "eps = épisodes vus ou commencés (s1e3 = saison 1, épisode 3), seconds = temps cumulé, genres = genres Crunchyroll.",
-        series: safeCall(historyExportCollect, [], 'export:history'),
+        // (v4.17.0) D'où vient cet historique : profil Crunchyroll d'origine (ou « tous »).
+        scope: { all: !!(opts && opts.all), accountId: ACCOUNT_ID || null, profileId: PROFILE_ID || null, profileName: PROFILE_NAME || '' },
+        series: safeCall(() => historyExportCollect(opts), [], 'export:history'),
       },
     };
   }
 
-  function exportSettings() {
-    const payload = buildBackupPayload();
+  async function exportSettings(opts) {
+    if (!ACCOUNT_ID) await getAccountId().catch(() => {});
+    await safeCall(() => profileRecheck(), undefined, 'export:profile');
+    if (PROFILE_CHANGED && !(opts && opts.all)) {
+      showToast('⚠ Le profil Crunchyroll a changé depuis l\'ouverture : recharge la page, sinon l\'export mélangerait deux historiques.');
+      return;
+    }
+    const payload = buildBackupPayload(opts);
     const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     const d = new Date();
     const stamp = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
     a.href = url;
-    a.download = `mon-crunchy-sauvegarde-${stamp}.json`;
+    a.download = `mon-crunchy-sauvegarde-${(opts && opts.all) ? 'tous-profils-' : ''}${stamp}.json`;
     document.body.appendChild(a);
     a.click();
     a.remove();
     // Libération différée : révoquer trop tôt annule le téléchargement sur certains mobiles.
     setTimeout(() => safeCall(() => URL.revokeObjectURL(url), undefined, 'export:revoke'), 10000);
     const n = payload.history.series.length;
-    showToast(n ? `✓ Sauvegarde exportée — ${n} série${n > 1 ? 's' : ''} d'historique`
+    showToast(n ? `✓ Sauvegarde exportée${PROFILE_NAME && !(opts && opts.all) ? ' (profil « ' + PROFILE_NAME + ' »)' : ''} — ${n} série${n > 1 ? 's' : ''} d'historique`
       : '✓ Sauvegarde exportée (aucun historique mémorisé pour l\'instant)');
   }
 
@@ -17963,12 +18075,17 @@
   // modale d'import (étape par étape) ─────────────────────────────────────────────────────────
   // Contrôle un fichier déjà parsé sans RIEN modifier : quelles sections, combien de séries/épisodes.
   function backupInspect(parsed) {
-    const info = { ok: false, st: null, hist: null, nSeries: 0, nEps: 0, version: null };
+    const info = { ok: false, st: null, hist: null, nSeries: 0, nEps: 0, version: null, from: null };
     if (!parsed || typeof parsed !== 'object' || parsed.kind !== 'mon-crunchy-config') return info;
     info.st = (parsed.state && typeof parsed.state === 'object') ? parsed.state : null;
     info.hist = (parsed.history && Array.isArray(parsed.history.series)) ? parsed.history.series : null;
     if (!info.st && !info.hist) return info;
     info.version = typeof parsed.version === 'string' ? parsed.version : null;
+    const sc = parsed.history && parsed.history.scope;
+    if (sc && typeof sc === 'object') {
+      info.from = { all: !!sc.all, profileId: sc.profileId ? String(sc.profileId) : null,
+        profileName: typeof sc.profileName === 'string' ? sc.profileName.slice(0, 60) : '' };
+    }
     if (info.hist) {
       const clean = info.hist.slice(0, HIST_IMPORT_MAX_SERIES).map(historyEntryClean).filter(Boolean);
       info.nSeries = clean.length;
@@ -17996,7 +18113,22 @@
   async function backupApplyHistory(hist) {
     const accountId = await getAccountId();
     if (!accountId) throw new Error('compte introuvable');
+    await profileRecheck(true);
+    if (!histWritable()) throw new Error('profil');
     return historyImportInto(accountId, hist);
+  }
+  // Question posée AVANT d'écrire : l'historique du fichier va dans le profil actif, et seulement lui.
+  // null = pas besoin de demander (même profil que l'export). Sinon le texte de la question.
+  function importTargetQuestion(info) {
+    if (!info.hist) return null;
+    const dest = PROFILE_ID ? (PROFILE_NAME ? `« ${PROFILE_NAME} »` : 'le profil actif') : 'le compte connecté (profil non identifié)';
+    const from = info.from;
+    if (from && !from.all && from.profileId && PROFILE_ID && from.profileId === PROFILE_ID) return null;
+    let why;
+    if (from && from.all) why = 'Ce fichier contient l\'historique de PLUSIEURS profils/comptes.';
+    else if (from && (from.profileName || from.profileId)) why = `Ce fichier vient du profil « ${from.profileName || from.profileId} ».`;
+    else why = 'Ce fichier ne dit pas de quel profil il vient.';
+    return `${why} Il sera fusionné dans ${dest}, et dans celui-là seulement.`;
   }
 
   // Applique un fichier de sauvegarde déjà lu. Sépare la LOGIQUE (testable) de l'interface :
@@ -18030,6 +18162,7 @@
   const IMPORT_STEPS = [
     ['read', 'Lecture du fichier'],
     ['check', 'Vérification du contenu'],
+    ['target', 'Profil de destination'],
     ['settings', 'Réglages, filtres et séries ignorées'],
     ['history', 'Fusion de l\'historique de visionnage'],
     ['lists', 'Reste à voir — relecture de tes listes'],
@@ -18066,7 +18199,10 @@
         <div class="crrav-imp-bar"><i></i></div>
         <ol class="crrav-imp-steps" aria-live="polite">${M.steps.map((s) =>
           `<li data-k="${s.key}"><span class="crrav-imp-ico"></span><div><b></b><small></small></div></li>`).join('')}</ol>
-        <div class="crrav-imp-actions"><button type="button" class="crrav-confirm-ok" data-imp-close></button></div>
+        <div class="crrav-imp-ask" hidden><p></p><div class="crrav-imp-actions">
+          <button type="button" class="crrav-confirm-ok" data-imp-yes>Importer dans ce profil</button>
+          <button type="button" class="crrav-confirm-ok ghost" data-imp-no>Annuler</button></div></div>
+        <div class="crrav-imp-actions crrav-imp-main"><button type="button" class="crrav-confirm-ok" data-imp-close></button></div>
       </div>`;
       root.appendChild(el);
     }
@@ -18089,12 +18225,19 @@
       setText(li.querySelector('b'), s.label);
       setText(li.querySelector('small'), s.detail || '');
     }
+    const ask = el.querySelector('.crrav-imp-ask');
+    if (ask) {
+      ask.hidden = !M.ask;
+      if (M.ask) setText(ask.querySelector('p'), M.ask.text);
+      const main = el.querySelector('.crrav-imp-main');
+      if (main) main.hidden = !!M.ask;
+    }
     const btn = el.querySelector('[data-imp-close]');
     setText(btn, M.failed ? 'Fermer' : M.done ? 'Terminé' : 'Continuer en arrière-plan');
     if (btn) btn.classList.toggle('ghost', !finished);
   }
 
-  async function runImportFlow(file) {
+  async function runImportFlow(file, opts) {
     const M = STATE.importModal = {
       fileName: (file && file.name) || 'sauvegarde.json', done: false, failed: false, warn: false,
       steps: IMPORT_STEPS.map(([key, label]) => ({ key, label, status: 'pending', detail: '' })),
@@ -18132,6 +18275,28 @@
       if (info.st) bits.push('réglages');
       set('check', 'done', bits.join(' + ') + (info.version ? ` · créée avec la v${info.version}` : ''));
       await nextPaint();
+
+      // Profil de destination : identifié, re-vérifié, et confirmé par l'utilisateur si le fichier
+      // ne vient pas du même profil — AVANT toute écriture (réglages compris).
+      set('target', 'running', 'Identification du profil Crunchyroll…');
+      await nextPaint();
+      try { await getAccountId(); await profileRecheck(true); } catch (e) { safeCall.log(e, 'import:profile'); }
+      if (!ACCOUNT_ID) return fail('target', 'Compte Crunchyroll introuvable — connecte-toi puis réimporte le fichier.');
+      if (info.hist && !histWritable()) return fail('target', PROFILE_CHANGED
+        ? 'Le profil a changé depuis l\'ouverture de la page : recharge la page puis réimporte.'
+        : 'Profil Crunchyroll non identifié alors qu\'il l\'était avant : recharge la page puis réimporte.');
+      const dest = PROFILE_ID ? (PROFILE_NAME ? `profil « ${PROFILE_NAME} »` : 'profil actif') : 'compte connecté (profil non identifié)';
+      const q = (opts && opts.assumeYes) ? null : importTargetQuestion(info);
+      if (q) {
+        const yes = await new Promise((resolve) => {
+          M.ask = { text: q, resolve };
+          set('target', 'running', 'En attente de ta confirmation…');
+          if (STATE.importModal === M) renderImportModal();
+        });
+        M.ask = null;
+        if (!yes) return fail('target', 'Import annulé — rien n\'a été modifié.');
+      }
+      set('target', 'done', info.hist ? dest : `${dest} (réglages seulement)`);
 
       if (info.st) {
         set('settings', 'running');
@@ -18175,7 +18340,7 @@
     }
   }
 
-  function importSettings(file) { return runImportFlow(file); }
+  function importSettings(file, opts) { return runImportFlow(file, opts); }
 
   function collectSettings() {
     const patch = {};
@@ -19935,8 +20100,15 @@
           forceRender(); return;
         }
         // ── Modale d'import (voir runImportFlow) : fermer = continuer en arrière-plan, rien n'est annulé ──
+        if (e.target.closest('[data-imp-yes], [data-imp-no]')) {
+          e.preventDefault();
+          const M = STATE.importModal;
+          if (M && M.ask) M.ask.resolve(!!e.target.closest('[data-imp-yes]'));
+          return;
+        }
         if (e.target.closest('[data-imp-close]')) {
           e.preventDefault();
+          if (STATE.importModal && STATE.importModal.ask) STATE.importModal.ask.resolve(false);
           STATE.importModal = null;
           renderImportModal();
           return;
@@ -20623,6 +20795,7 @@
           return;
         }
         if (act.dataset.act === 'export-settings') { exportSettings(); return; }
+        if (act.dataset.act === 'export-settings-all') { exportSettings({ all: true }); return; }
         if (act.dataset.act === 'import-settings') {
           const inp = root.querySelector('[data-import-file]');
           if (inp) inp.click();
@@ -23891,6 +24064,7 @@
   safeCall(() => {
     window.resteAVoir = Object.assign(open, {
       open, refresh, refreshDiscover, refreshOrphelines, refreshNewPremieres, state: STATE,
+      profile: profileInfo,   // (v4.17.0) profil Crunchyroll détecté et clé de rangement de l'historique
       crpCheck,   // (v3.104.0) état des repères Crunchyroll utilisés sur les pages du site
       // Même comportement que le bouton « Vider le cache » : préserve réglages,
       // filtres, séries ignorées et pastilles « nouveau ».
