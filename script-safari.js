@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      4.17.0
+// @version      4.18.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -35,7 +35,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '4.17.0';
+  const SCRIPT_VERSION = '4.18.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -2529,7 +2529,7 @@
       }
       // (v4.15.0) L'archive d'historique n'est pas re-téléchargeable : elle traverse tout changement
       // de palier (le format de ses entrées n'a jamais dépendu du palier du cache).
-      const keptArch = (await idbLoadAll()).filter(([k]) => typeof k === 'string' && k.startsWith(HIST_ARCHIVE_PREFIX));
+      const keptArch = (await idbLoadAll()).filter(([k]) => isPermanentKey(k));
       await idbClear();
       for (const [k, v] of keptArch) {
         const cur = BIGCACHE[k];
@@ -3699,6 +3699,105 @@
     if (!ACCOUNT_ID) return;
     safeCall(() => archiveLoadedSeries(ACCOUNT_ID, STATE.series, 'lists'), undefined, 'archive:suivi');
     safeCall(() => archiveLoadedSeries(ACCOUNT_ID, STATE.orphan && STATE.orphan.series, 'lists'), undefined, 'archive:orphan');
+    safeCall(notesArchiveFromLoaded, undefined, 'archive:notes');
+  }
+
+  // ── (v4.18.0) Notes personnelles (★) : archive permanente, exportée avec l'historique ──────────
+  // `myrating:` est un cache re-téléchargeable DU COMPTE : sur un nouveau compte, tes notes
+  // n'existent plus côté Crunchyroll. L'archive `histnotes:<compte~profil>` les garde (jamais
+  // évincée, épargnée par « Vider le cache »), part dans la sauvegarde, et sert de repli à
+  // l'affichage quand Crunchyroll n'a pas (ou plus) de note. Une note renvoyée par Crunchyroll
+  // reste prioritaire et met l'archive à jour.
+  const HIST_NOTES_PREFIX = 'histnotes:';
+  const isPermanentKey = (k) => typeof k === 'string' && (k.startsWith(HIST_ARCHIVE_PREFIX) || k.startsWith(HIST_NOTES_PREFIX));
+  function noteClean(v) {
+    const n = typeof v === 'number' ? v : parseFloat(String(v).replace(',', '.'));
+    return (Number.isFinite(n) && n > 0 && n <= 10) ? Math.round(n * 10) / 10 : null;
+  }
+  function notesLoad(accountId) {
+    const a = accountId ? cacheGetStale(HIST_NOTES_PREFIX + scopeOf(accountId)) : null;
+    return (a && a.series && typeof a.series === 'object') ? a : { v: 1, series: {} };
+  }
+  // Mémorise une note. Renvoie true si l'archive a changé.
+  function notesRemember(accountId, sid, rating, title) {
+    if (!accountId || !sid || !histWritable()) return false;
+    const r = noteClean(rating);
+    if (r == null) return false;
+    const a = notesLoad(accountId);
+    const cur = a.series[sid];
+    if (cur && cur.r === r) {
+      if (title && !cur.t) { cur.t = String(title).slice(0, 300); cacheSet(HIST_NOTES_PREFIX + scopeOf(accountId), a); return true; }
+      return false;
+    }
+    a.series[sid] = { id: sid, r, t: String(title || (cur && cur.t) || '').slice(0, 300), at: Date.now() };
+    cacheSet(HIST_NOTES_PREFIX + scopeOf(accountId), a);
+    return true;
+  }
+  function noteArchived(sid) {
+    if (!ACCOUNT_ID || !sid) return null;
+    const d = notesLoad(ACCOUNT_ID).series[sid];
+    return d ? noteClean(d.r) : null;
+  }
+  // Verse dans l'archive toutes les notes actuellement connues (séries chargées + cache `myrating:`).
+  function notesArchiveFromLoaded() {
+    if (!ACCOUNT_ID) return;
+    const titles = new Map();
+    for (const list of [STATE.series, STATE.orphan && STATE.orphan.series]) {
+      for (const s of (Array.isArray(list) ? list : [])) {
+        if (!s || !s.id) continue;
+        titles.set(s.id, s.title || '');
+        if (s.myRating != null) notesRemember(ACCOUNT_ID, s.id, s.myRating, s.title);
+      }
+    }
+    for (const k of Object.keys(BIGCACHE)) {
+      if (!k.startsWith('myrating:')) continue;
+      const v = BIGCACHE[k] && BIGCACHE[k].v;
+      if (v && v.r != null) notesRemember(ACCOUNT_ID, k.slice(9), v.r, titles.get(k.slice(9)));
+    }
+  }
+  function notesEntryClean(d) {
+    if (!d || typeof d !== 'object') return null;
+    const id = typeof d.id === 'string' ? d.id.trim() : '';
+    const r = noteClean(d.r);
+    if (!id || id.length > 100 || r == null) return null;
+    return { id, r, t: typeof d.t === 'string' ? d.t.slice(0, 300) : '' };
+  }
+  function notesExportCollect(opts) {
+    const wantAll = !!(opts && opts.all) || !ACCOUNT_ID;
+    const mine = HIST_NOTES_PREFIX + scopeOf(ACCOUNT_ID);
+    const out = new Map();
+    for (const k of Object.keys(BIGCACHE)) {
+      if (!k.startsWith(HIST_NOTES_PREFIX) || (!wantAll && k !== mine)) continue;
+      const v = BIGCACHE[k] && BIGCACHE[k].v;
+      if (!v || typeof v.series !== 'object' || !v.series) continue;
+      for (const raw of Object.values(v.series)) {
+        const d = notesEntryClean(raw);
+        if (!d) continue;
+        const at = Number(raw.at) || 0;
+        const cur = out.get(d.id);
+        if (!cur || at >= cur.at) out.set(d.id, { ...d, at });
+      }
+    }
+    return [...out.values()].map(({ at, ...d }) => d).sort((a, b) => a.t.localeCompare(b.t, 'fr') || a.id.localeCompare(b.id));
+  }
+  // Fusion d'un fichier dans l'archive du profil actif : une note déjà connue ici n'est jamais écrasée.
+  function notesImportInto(accountId, list) {
+    const clean = (Array.isArray(list) ? list.slice(0, HIST_IMPORT_MAX_SERIES) : []).map(notesEntryClean).filter(Boolean);
+    let added = 0, kept = 0;
+    const a = notesLoad(accountId);
+    for (const d of clean) {
+      const cur = a.series[d.id];
+      if (cur && noteClean(cur.r) != null) { if (cur.r !== d.r) kept++; continue; }
+      if (notesRemember(accountId, d.id, d.r, d.t)) added++;
+    }
+    return { read: clean.length, added, kept };
+  }
+  // Photo INFORMATIVE de tes listes au moment de l'export (jamais réimportée) : de quoi retrouver
+  // ce que tu suivais si le compte disparaît.
+  function listsSnapshotCollect() {
+    return (Array.isArray(STATE.series) ? STATE.series : []).filter((s) => s && s.id).slice(0, 5000)
+      .map((s) => ({ id: s.id, title: s.title || '', seen: s.seen || 0, total: s.total || 0,
+        rating: s.myRating != null ? s.myRating : null }));
   }
 
   function historyArchiveCount(accountId) {
@@ -4407,7 +4506,8 @@
   // fillMissingMyRatings() et getMyRating().
   function getMyRatingCached(seriesId) {
     const c = cacheGetStale('myrating:' + seriesId);
-    return (c && 'r' in c) ? c.r : null;
+    const live = (c && 'r' in c) ? c.r : null;
+    return live != null ? live : noteArchived(seriesId);   // (v4.18.0) repli : note archivée
   }
   function parseMyRatingResponse(r) {
     const src = (r && (r.data || r)) || {};
@@ -4422,16 +4522,17 @@
   }
   async function getMyRating(accountId, seriesId) {
     const c = cacheGet('myrating:' + seriesId, MYRATING_TTL);
-    if (c && 'r' in c) return c.r;
-    if (!accountId) return null;
+    if (c && 'r' in c) return c.r != null ? c.r : noteArchived(seriesId);
+    if (!accountId) return noteArchived(seriesId);
     try {
       const r = await api(`/content-reviews/v3/user/${accountId}/rating/series/${seriesId}`);
       const val = parseMyRatingResponse(r);
       cacheSet('myrating:' + seriesId, { r: val });
-      return val;
+      if (val != null) notesRemember(accountId, seriesId, val);
+      return val != null ? val : noteArchived(seriesId);
     } catch (_) {
       cacheSet('myrating:' + seriesId, { r: null });
-      return null;
+      return noteArchived(seriesId);
     }
   }
 
@@ -9699,7 +9800,7 @@
       // un épisode ordinaire — cf. .crrav-tick.movie-pending.
       return `<div class="crrav-season" style="flex:${eps.length + extra}">${eps.map((e) =>
         `<span class="crrav-tick${e.seen ? ' on' : e.started ? ' half' : ''}${isMovie ? ' movie-pending' : ''}" title="${
-          isMovie ? 'Film' : `S${num} E${e.n}`}${
+          isMovie ? 'Film' : `S${num} E${epRelN(s, e)}`}${
           e.title ? ' — ' + escapeHtml(e.title) : ''}${e.seen ? ' · vu' : e.started ? ' · commencé' : ''}"></span>`
         ).join('') + notYetOut}</div>`;
     }).join('');
@@ -10049,7 +10150,7 @@
       const isFilm = !sp.epNext;
       const verb = isFilm ? (tgt.started ? 'Reprendre' : 'Film')
         : sp.epSeen === 0 && !tgt.started ? 'Commencer' : tgt.started ? 'Reprendre' : 'Suivant';
-      const what = isFilm ? filmTitle(tgt) : `S${tgt.season} E${tgt.n}`;
+      const what = isFilm ? filmTitle(tgt) : `S${tgt.season} E${epRelN(s, tgt)}`;
       const full = `▶ ${verb} · ${what}`;
       // Verbe dans son propre span : masqué sur carte téléphone quand le clap prend de la
       // place dans la rangée (voir .crrav-rverb) — il reste « ▶ S1 E9 », le détail complet
@@ -10063,7 +10164,7 @@
     // majorité des cas ; nowrap+ellipsis (CSS, voir .crrav-resume) sert de filet de
     // sécurité pour les rares titres de série qui ne laisseraient toujours pas la place.
     const label = s.seen === 0 ? 'Commencer' : s.resuming ? '▶ Reprendre' : '▶ Suivant';
-    const target = nextIsMovie(s) ? 'Film' : `S${s.next.season} E${s.next.n}`;
+    const target = nextIsMovie(s) ? 'Film' : `S${s.next.season} E${epRelN(s, s.next)}`;
     const full = `${label} · ${target}`;
     // title/aria-label : indispensable maintenant que la variante vue-liste (crrav-lresume)
     // masque tout texte visible (icône seule) — sans ça, plus aucun moyen de connaître
@@ -14196,6 +14297,57 @@
     };
   }
 
+  // ── (v4.18.0) Numéro d'épisode RELATIF à sa saison ───────────────────────────────────────
+  // Crunchyroll numérote parfois en continu d'une saison à l'autre (S3 = épisodes 49, 50, 51…)
+  // alors qu'AniList et le bon sens comptent par saison (le 3e de la S3). Les deux numéros
+  // coexistaient à l'écran (« S3 E4 » à côté de « S3 E51 »). Tout affichage passe maintenant par
+  // epRelN : une saison qui démarre EXACTEMENT après le dernier numéro de la précédente est en
+  // numérotation continue, et on retranche ce décalage. Rien n'est modifié dans les données ni
+  // dans les clés de l'archive (`s3e51` reste `s3e51`) : c'est purement l'affichage.
+  const REL_OFFSETS = new WeakMap();
+  function seasonOffsets(episodes) {
+    if (!Array.isArray(episodes)) return new Map();
+    let m = REL_OFFSETS.get(episodes);
+    if (m) return m;
+    m = new Map();
+    const by = new Map();
+    for (const e of episodes) {
+      if (!e || !Number.isInteger(e.n) || e.n < 1 || e.season == null) continue;
+      const r = by.get(e.season);
+      if (r) { if (e.n < r.min) r.min = e.n; if (e.n > r.max) r.max = e.n; } else by.set(e.season, { min: e.n, max: e.n });
+    }
+    let prevMax = null;
+    for (const season of [...by.keys()].sort((a, b) => a - b)) {
+      const r = by.get(season);
+      m.set(season, (prevMax != null && r.min > 1 && r.min === prevMax + 1) ? r.min - 1 : 0);
+      prevMax = r.max;
+    }
+    REL_OFFSETS.set(episodes, m);
+    return m;
+  }
+  function epRelN(s, e) {
+    if (!e || !Number.isInteger(e.n)) return e ? e.n : null;
+    const off = seasonOffsets(s && s.episodes).get(e.season) || 0;
+    return e.n - off;
+  }
+  // Prochain épisode annoncé par AniList, ramené à la numérotation par saison. AniList compte
+  // presque toujours par saison ; s'il compte en continu comme Crunchyroll, on le détecte en
+  // comparant au dernier épisode sorti (la valeur la plus proche de l'attendu l'emporte).
+  function aniNextRel(s, n) {
+    const N = n != null ? n : (s && s.aniNextNum);
+    const la = s && s.lastAired;
+    if (!Number.isFinite(N) || !la || !Number.isInteger(la.n)) return N;
+    const off = seasonOffsets(s.episodes).get(la.season) || 0;
+    if (!off) return N;
+    const expAbs = la.n + 1, expRel = la.n - off + 1;
+    return Math.abs(N - expAbs) < Math.abs(N - expRel) ? N - off : N;
+  }
+  // Retrouve la série (listes ou Hors listes) pour les endroits qui n'ont que son id.
+  function epRelById(sid, e) {
+    const s = (STATE.series || []).find((x) => x.id === sid) || ((STATE.orphan && STATE.orphan.series) || []).find((x) => x.id === sid);
+    return s ? epRelN(s, e) : (e ? e.n : null);
+  }
+
   // (v4.2.1) Prochaine sortie CERTAINE : uniquement une date + un numéro annoncés par AniList,
   // strictement dans le futur, et jamais au-delà du total prévu. Aucune projection : si le
   // cache AniList est périmé, anilistNeedsFetch() relance la requête (voir plus bas) au lieu
@@ -14721,7 +14873,7 @@
       const nx = sureNextRelease(r, now);
       if (!nx) return null;
       return {
-        r, whenTs: nx.ts, source: nx.exact ? 'anilist' : 'est', nextN: nx.n, nextRank: r.seasonRank,
+        r, whenTs: nx.ts, source: nx.exact ? 'anilist' : 'est', nextN: aniNextRel(r.s, nx.n), nextRank: r.seasonRank,
         seasonMayEnd: false, hasTime: nx.hasTime,
       };
     })
@@ -14755,7 +14907,7 @@
           <div class="crrav-calmain">
             <span class="crrav-caltitle">${escapeHtml(s.title)}</span>
             <div class="crrav-calmeta">
-              <span class="crrav-calnext">E${la.n}</span>
+              <span class="crrav-calnext">E${epRelN(s, la)}</span>
               ${vu ? '<span class="crrav-uptodate">déjà vu ✓</span>'
                    : '<span class="crrav-late">à regarder</span>'}
             </div>
@@ -14817,7 +14969,7 @@
         : '<span class="crrav-estbadge">estimé</span>';
       const behind = s.remaining > 0 ? `<span class="crrav-late">${s.remaining} ép. de retard</span>`
         : '<span class="crrav-uptodate">à jour ✓</span>';
-      const cur = e.r.current ? `tu en es à ${seasonTag(e.r.curRank, e.r.totalSeasons)}E${e.r.current.n}` : 'pas commencée';
+      const cur = e.r.current ? `tu en es à ${seasonTag(e.r.curRank, e.r.totalSeasons)}E${epRelN(s, e.r.current)}` : 'pas commencée';
       // Reste à voir dans la saison en cours (AniList) + date du dernier épisode, si connus.
       const endBits = [];
       const aniLeft = plannedRemaining(s);
@@ -16480,7 +16632,7 @@
               <span class="crrav-setcard-t">💾 Sauvegarde (réglages + historique)</span>
             </div>
             <p class="crrav-setcard-note">L'export contient tes réglages, filtres, séries ignorées
-              <b>et ton historique de visionnage</b> (séries et épisodes déjà vus, temps, genres) — pas le
+              <b>ton historique de visionnage</b> (séries et épisodes déjà vus, temps, genres) <b>et tes notes ★</b> — pas le
               reste du cache. À faire avant de changer de compte Crunchyroll ou d'appareil : le stockage du
               navigateur est propre à chaque appareil et l'historique est rangé par compte. Une fois
               connecté au nouveau compte, « Importer » fusionne le fichier avec l'historique du compte
@@ -18012,7 +18164,8 @@
     const list = safeCall(historyExportCollect, [], 'backup:line');
     if (!list.length) return 'Historique mémorisé sur cet appareil : aucun pour l\'instant.';
     const eps = list.reduce((s, d) => s + d.eps.length, 0);
-    return `Historique mémorisé sur cet appareil : <b>${list.length}</b> série${list.length > 1 ? 's' : ''} · <b>${eps}</b> épisode${eps > 1 ? 's' : ''}.`;
+    const nn = safeCall(() => notesExportCollect(), [], 'backup:notes').length;
+    return `Historique mémorisé sur cet appareil : <b>${list.length}</b> série${list.length > 1 ? 's' : ''} · <b>${eps}</b> épisode${eps > 1 ? 's' : ''}${nn ? ` · <b>${nn}</b> note${nn > 1 ? 's' : ''}` : ''}.`;
   }
 
   // ─── Portabilité : sauvegarde / restauration (réglages + historique) ────────
@@ -18024,7 +18177,7 @@
   // `history`) reste importable ; un fichier récent importé par une vieille version ignore
   // simplement la section qu'elle ne connaît pas.
   function buildBackupPayload(opts) {
-    archiveAllLoaded();   // (v4.15.0) ce qui est vu dans les listes entre dans l'archive avant de partir
+    archiveAllLoaded();   // inclut les notes perso (notesArchiveFromLoaded)   // (v4.15.0) ce qui est vu dans les listes entre dans l'archive avant de partir
     return {
       kind: 'mon-crunchy-config',
       version: SCRIPT_VERSION,
@@ -18043,6 +18196,11 @@
         scope: { all: !!(opts && opts.all), accountId: ACCOUNT_ID || null, profileId: PROFILE_ID || null, profileName: PROFILE_NAME || '' },
         series: safeCall(() => historyExportCollect(opts), [], 'export:history'),
       },
+      // (v4.18.0) Notes perso (★ 1-5) et photo informative de tes listes.
+      scope: { all: !!(opts && opts.all), accountId: ACCOUNT_ID || null, profileId: PROFILE_ID || null, profileName: PROFILE_NAME || '' },
+      notes: { v: 1, note: "r = ta note sur 5 pour la série (id Crunchyroll), t = titre au moment de l'export.",
+        items: safeCall(() => notesExportCollect(opts), [], 'export:notes') },
+      lists: { note: 'Informatif : tes séries suivies au moment de l\'export (non réimporté).', series: safeCall(listsSnapshotCollect, [], 'export:lists') },
     };
   }
 
@@ -18067,7 +18225,8 @@
     // Libération différée : révoquer trop tôt annule le téléchargement sur certains mobiles.
     setTimeout(() => safeCall(() => URL.revokeObjectURL(url), undefined, 'export:revoke'), 10000);
     const n = payload.history.series.length;
-    showToast(n ? `✓ Sauvegarde exportée${PROFILE_NAME && !(opts && opts.all) ? ' (profil « ' + PROFILE_NAME + ' »)' : ''} — ${n} série${n > 1 ? 's' : ''} d'historique`
+    const nn = payload.notes.items.length;
+    showToast(n ? `✓ Sauvegarde exportée${PROFILE_NAME && !(opts && opts.all) ? ' (profil « ' + PROFILE_NAME + ' »)' : ''} — ${n} série${n > 1 ? 's' : ''} d'historique${nn ? ` · ${nn} note${nn > 1 ? 's' : ''}` : ''}`
       : '✓ Sauvegarde exportée (aucun historique mémorisé pour l\'instant)');
   }
 
@@ -18075,13 +18234,18 @@
   // modale d'import (étape par étape) ─────────────────────────────────────────────────────────
   // Contrôle un fichier déjà parsé sans RIEN modifier : quelles sections, combien de séries/épisodes.
   function backupInspect(parsed) {
-    const info = { ok: false, st: null, hist: null, nSeries: 0, nEps: 0, version: null, from: null };
+    const info = { ok: false, st: null, hist: null, nSeries: 0, nEps: 0, version: null, from: null, notes: null, nNotes: 0 };
     if (!parsed || typeof parsed !== 'object' || parsed.kind !== 'mon-crunchy-config') return info;
     info.st = (parsed.state && typeof parsed.state === 'object') ? parsed.state : null;
     info.hist = (parsed.history && Array.isArray(parsed.history.series)) ? parsed.history.series : null;
-    if (!info.st && !info.hist) return info;
+    if (parsed.notes && Array.isArray(parsed.notes.items)) {
+      info.notes = parsed.notes.items.slice(0, HIST_IMPORT_MAX_SERIES).map(notesEntryClean).filter(Boolean);
+      info.nNotes = info.notes.length;
+      if (!info.nNotes) info.notes = null;
+    }
+    if (!info.st && !info.hist && !info.notes) return info;
     info.version = typeof parsed.version === 'string' ? parsed.version : null;
-    const sc = parsed.history && parsed.history.scope;
+    const sc = parsed.scope || (parsed.history && parsed.history.scope);
     if (sc && typeof sc === 'object') {
       info.from = { all: !!sc.all, profileId: sc.profileId ? String(sc.profileId) : null,
         profileName: typeof sc.profileName === 'string' ? sc.profileName.slice(0, 60) : '' };
@@ -18110,17 +18274,19 @@
     return true;
   }
   // Fusionne l'historique dans l'archive du compte connecté. Lève si le compte est introuvable.
-  async function backupApplyHistory(hist) {
+  async function backupApplyHistory(hist, notes) {
     const accountId = await getAccountId();
     if (!accountId) throw new Error('compte introuvable');
     await profileRecheck(true);
     if (!histWritable()) throw new Error('profil');
-    return historyImportInto(accountId, hist);
+    const res = hist ? historyImportInto(accountId, hist) : { read: 0, newSeries: 0, newEps: 0 };
+    res.notes = notes ? notesImportInto(accountId, notes) : { read: 0, added: 0, kept: 0 };
+    return res;
   }
   // Question posée AVANT d'écrire : l'historique du fichier va dans le profil actif, et seulement lui.
   // null = pas besoin de demander (même profil que l'export). Sinon le texte de la question.
   function importTargetQuestion(info) {
-    if (!info.hist) return null;
+    if (!info.hist && !info.notes) return null;
     const dest = PROFILE_ID ? (PROFILE_NAME ? `« ${PROFILE_NAME} »` : 'le profil actif') : 'le compte connecté (profil non identifié)';
     const from = info.from;
     if (from && !from.all && from.profileId && PROFILE_ID && from.profileId === PROFILE_ID) return null;
@@ -18142,9 +18308,9 @@
       if (!backupApplySettings(info.st)) { res.error = 'storage'; return res; }
       res.settings = true;
     }
-    if (info.hist) {
+    if (info.hist || info.notes) {
       try {
-        res.history = await backupApplyHistory(info.hist);
+        res.history = await backupApplyHistory(info.hist, info.notes);
       } catch (e) {
         safeCall.log(e, 'import:history');
         res.historyError = e.message || String(e);
@@ -18164,7 +18330,7 @@
     ['check', 'Vérification du contenu'],
     ['target', 'Profil de destination'],
     ['settings', 'Réglages, filtres et séries ignorées'],
-    ['history', 'Fusion de l\'historique de visionnage'],
+    ['history', 'Fusion de l\'historique et des notes'],
     ['lists', 'Reste à voir — relecture de tes listes'],
     ['orphans', 'Hors listes — analyse des séries de l\'historique'],
   ];
@@ -18272,6 +18438,7 @@
       if (!info.ok) return fail('check', "Ce fichier n'est pas une sauvegarde de Mon Crunchy.");
       const bits = [];
       if (info.hist) bits.push(`${plural(info.nSeries, 'série')} · ${plural(info.nEps, 'épisode')} d'historique`);
+      if (info.notes) bits.push(plural(info.nNotes, 'note'));
       if (info.st) bits.push('réglages');
       set('check', 'done', bits.join(' + ') + (info.version ? ` · créée avec la v${info.version}` : ''));
       await nextPaint();
@@ -18282,7 +18449,7 @@
       await nextPaint();
       try { await getAccountId(); await profileRecheck(true); } catch (e) { safeCall.log(e, 'import:profile'); }
       if (!ACCOUNT_ID) return fail('target', 'Compte Crunchyroll introuvable — connecte-toi puis réimporte le fichier.');
-      if (info.hist && !histWritable()) return fail('target', PROFILE_CHANGED
+      if ((info.hist || info.notes) && !histWritable()) return fail('target', PROFILE_CHANGED
         ? 'Le profil a changé depuis l\'ouverture de la page : recharge la page puis réimporte.'
         : 'Profil Crunchyroll non identifié alors qu\'il l\'était avant : recharge la page puis réimporte.');
       const dest = PROFILE_ID ? (PROFILE_NAME ? `profil « ${PROFILE_NAME} »` : 'profil actif') : 'compte connecté (profil non identifié)';
@@ -18296,7 +18463,7 @@
         M.ask = null;
         if (!yes) return fail('target', 'Import annulé — rien n\'a été modifié.');
       }
-      set('target', 'done', info.hist ? dest : `${dest} (réglages seulement)`);
+      set('target', 'done', (info.hist || info.notes) ? dest : `${dest} (réglages seulement)`);
 
       if (info.st) {
         set('settings', 'running');
@@ -18304,15 +18471,16 @@
         set('settings', 'done', 'restaurés');
       } else set('settings', 'skipped', 'absents du fichier');
 
-      if (info.hist) {
-        set('history', 'running', 'Fusion avec l\'historique du compte connecté…');
+      if (info.hist || info.notes) {
+        set('history', 'running', 'Fusion avec l\'historique du profil connecté…');
         await nextPaint();
         let h;
-        try { h = await backupApplyHistory(info.hist); }
+        try { h = await backupApplyHistory(info.hist, info.notes); }
         catch (e) { safeCall.log(e, 'import:history'); return fail('history', 'Compte Crunchyroll introuvable — connecte-toi puis réimporte le fichier.'); }
-        set('history', 'done', (h.newSeries || h.newEps)
+        const noteBit = h.notes && h.notes.added ? ` · +${plural(h.notes.added, 'note')}` : '';
+        set('history', 'done', ((h.newSeries || h.newEps)
           ? `+${plural(h.newSeries, 'série')} · +${plural(h.newEps, 'épisode')} ajoutés`
-          : 'déjà à jour, rien à ajouter');
+          : 'déjà à jour, rien à ajouter') + noteBit);
       } else set('history', 'skipped', 'absent du fichier');
 
       // Ces deux relectures sont les vraies étapes longues (réseau). Leur progression arrive en direct.
@@ -18322,7 +18490,7 @@
       if (STATE.error) { M.warn = true; set('lists', 'error', String(STATE.error)); }
       else set('lists', 'done', `${plural(STATE.series.length, 'série')} dans tes listes`);
 
-      if (info.hist) {
+      if (info.hist || info.notes) {
         set('orphans', 'running', 'Démarrage…');
         await loadOrphelines((m) => { progressMsgOrphan = m; set('orphans', 'running', m); render(); });
         const O = STATE.orphan;
@@ -18385,7 +18553,7 @@
   function clearCache() {
     // (v4.15.0) L'archive d'historique n'est PAS re-téléchargeable (Crunchyroll ne rend que ses
     // ~1000 dernières entrées) : elle survit au vidage, en mémoire comme sur disque.
-    const keptArch = Object.keys(BIGCACHE).filter((k) => k.startsWith(HIST_ARCHIVE_PREFIX)).map((k) => [k, BIGCACHE[k]]);
+    const keptArch = Object.keys(BIGCACHE).filter(isPermanentKey).map((k) => [k, BIGCACHE[k]]);
     const n = Object.keys(BIGCACHE).length - keptArch.length;
     for (const k of Object.keys(BIGCACHE)) delete BIGCACHE[k];
     for (const [k, v] of keptArch) BIGCACHE[k] = v;
@@ -21322,7 +21490,7 @@
         return { endTs: aniOk && end.ts && end.ts > now - DAY ? end.ts : null, endApprox: end.approx };
       })(),
       nextTs: aniOk && s.aniNextTs && s.aniNextTs > now ? s.aniNextTs : null,
-      nextNum: aniOk ? s.aniNextNum : null,
+      nextNum: aniOk ? aniNextRel(s) : null,
       // (v3.109.0) Bloc Planning de la fiche série : décrit la DERNIÈRE saison (celle en
       // diffusion), indépendamment de là où tu en es.
       // (v3.112.0) Tableau de bord de la fiche série.
@@ -21348,7 +21516,7 @@
         const pos = seasons.indexOf(nx.season) + 1;
         return {
           id: nx.id, ids: (nx.ids || [nx.id]).slice(0, 16), n: nx.n, title: nx.title || '', film, started: !!nx.started,
-          label: film ? 'Film' : (seasons.length > 1 && pos > 0 ? `S${pos} E${nx.n}` : `E${nx.n}`),
+          label: film ? 'Film' : (seasons.length > 1 && pos > 0 ? `S${pos} E${epRelN(s, nx)}` : `E${epRelN(s, nx)}`),
         };
       })(),
       plan: {
@@ -21361,7 +21529,7 @@
         seasonPos: seasons.length,
         planned: s.plannedTotal || null,
         nextTs: s.aniNextTs || null,
-        nextNum: s.aniNextNum || null,
+        nextNum: s.aniNextNum ? aniNextRel(s) : null,
       },
     };
   }
@@ -22103,7 +22271,7 @@
       crpCloseMenuOf(item);
       reset();
       const t = plan.target;
-      crpToast(`${done} épisode${done > 1 ? 's' : ''} marqué${done > 1 ? 's' : ''} vu${done > 1 ? 's' : ''} jusqu\u2019à S${t.season} E${t.n}`, 'ok', { label: 'Actualiser', run: () => location.reload() });
+      crpToast(`${done} épisode${done > 1 ? 's' : ''} marqué${done > 1 ? 's' : ''} vu${done > 1 ? 's' : ''} jusqu\u2019à S${t.season} E${epRelById(plan.sid, t)}`, 'ok', { label: 'Actualiser', run: () => location.reload() });
     } catch (e) {
       safeCall.log(e, 'crpOnUpTo');
       reset();
@@ -23404,7 +23572,7 @@
           card.appendChild(r);
         }
       }
-      const label = ep ? `S${ep.season} E${ep.n}` : 'L\u2019épisode';
+      const label = ep ? `S${ep.season} E${seriesId ? epRelById(seriesId, ep) : ep.n}` : 'L\u2019épisode';
       crpToast(`${label} supprimé de l\u2019historique`, 'ok', { label: 'Actualiser', run: () => location.reload() });
     } catch (e) {
       safeCall.log(e, 'crpDeleteFromHistory');
