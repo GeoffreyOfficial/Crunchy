@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      4.12.2
+// @version      4.14.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '4.12.2';
+  const SCRIPT_VERSION = '4.14.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -3582,6 +3582,103 @@
     return Object.keys(historyArchiveLoad(accountId).series).length;
   }
 
+  // ─────────────────────────────────────────────────────────────
+  //  (v4.13.0) Sauvegarde / restauration de l'historique de visionnage
+  // ─────────────────────────────────────────────────────────────
+  // Pourquoi : l'archive ci-dessus est rangée PAR COMPTE Crunchyroll, dans le stockage de CE
+  // navigateur. Changer de compte (ou d'appareil) repart donc d'une archive vide — et Crunchyroll
+  // ne rend que les ~1000 dernières entrées, le reste de l'historique serait perdu pour de bon.
+  // Le fichier de sauvegarde contient, pour chaque série : id, titre, clés d'épisodes vus ou
+  // commencés (« s1e3 »), secondes cumulées et genres. À la restauration, tout est FUSIONNÉ dans
+  // l'archive du compte actuellement connecté (union des épisodes) : ré-importer le même fichier,
+  // ou un fichier plus ancien, ne fait jamais rien perdre ni doubler.
+  const HISTORY_EXPORT_VERSION = 1;
+  const HIST_IMPORT_MAX_EPS = 5000;      // garde-fou par série (fichier corrompu / hostile)
+  const HIST_IMPORT_MAX_SERIES = 20000;
+
+  // Remet une entrée (venant du cache OU d'un fichier) à la forme {id,title,eps,seconds,genres}.
+  // null si inexploitable. Une série sans aucun épisode n'est pas « vue » : écartée.
+  function historyEntryClean(d) {
+    if (!d || typeof d !== 'object') return null;
+    const id = typeof d.id === 'string' ? d.id.trim() : '';
+    if (!id || id.length > 100) return null;
+    const eps = [];
+    const seen = new Set();
+    for (const k of Array.isArray(d.eps) ? d.eps : []) {
+      if (typeof k !== 'string' || !k || k.length > 100 || seen.has(k)) continue;
+      seen.add(k);
+      eps.push(k);
+      if (eps.length >= HIST_IMPORT_MAX_EPS) break;
+    }
+    if (!eps.length) return null;
+    const sec = Number(d.seconds);
+    const genres = [];
+    for (const g of Array.isArray(d.genres) ? d.genres : []) {
+      if (typeof g === 'string' && g && g.length <= 60 && !genres.includes(g)) genres.push(g);
+      if (genres.length >= 40) break;
+    }
+    return {
+      id, title: typeof d.title === 'string' ? d.title.slice(0, 300) : '',
+      eps, seconds: Number.isFinite(sec) && sec > 0 ? Math.round(sec) : 0, genres,
+    };
+  }
+
+  // Union de deux entrées nettoyées : épisodes réunis, durée par épisode la plus récente prime
+  // (même règle que historyArchiveMerge).
+  function historyEntryUnion(cur, d) {
+    const perCur = cur.eps.length ? cur.seconds / cur.eps.length : 0;
+    const perNew = d.eps.length ? d.seconds / d.eps.length : 0;
+    const inNew = new Set(d.eps);
+    const union = [...new Set([...cur.eps, ...d.eps])];
+    return {
+      id: cur.id, title: cur.title || d.title,
+      eps: union,
+      seconds: Math.round(union.reduce((s, k) => s + (inNew.has(k) ? perNew : perCur), 0)),
+      genres: mergeGenreLists(cur.genres, d.genres),
+    };
+  }
+
+  // Tout l'historique connu sur cet appareil, TOUS comptes confondus : si le compte a déjà
+  // changé avant l'export, l'archive de l'ancien compte (clé `histarchive:<ancien id>`) est
+  // toujours là et doit partir dans le fichier. Union dédoublonnée par série.
+  function historyExportCollect() {
+    const out = new Map();
+    const add = (raw) => {
+      const d = historyEntryClean(raw);
+      if (!d) return;
+      const cur = out.get(d.id);
+      out.set(d.id, cur ? historyEntryUnion(cur, d) : d);
+    };
+    for (const k of Object.keys(BIGCACHE)) {
+      const v = BIGCACHE[k] && BIGCACHE[k].v;
+      if (!v || typeof v !== 'object') continue;
+      if (k.startsWith(HIST_ARCHIVE_PREFIX)) {
+        if (v.series && typeof v.series === 'object') Object.values(v.series).forEach(add);
+      } else if (k.startsWith('watchedids:')) {
+        if (!Array.isArray(v) && Array.isArray(v.detail)) v.detail.forEach(add);
+      }
+    }
+    if (Array.isArray(HISTORY_DETAIL)) HISTORY_DETAIL.forEach(add);
+    return [...out.values()].sort((a, b) => b.seconds - a.seconds || b.eps.length - a.eps.length
+      || a.title.localeCompare(b.title, 'fr'));
+  }
+
+  // Fusionne une liste d'entrées (fichier) dans l'archive de `accountId`. Renvoie le bilan.
+  function historyImportInto(accountId, list) {
+    const clean = (Array.isArray(list) ? list.slice(0, HIST_IMPORT_MAX_SERIES) : [])
+      .map(historyEntryClean).filter(Boolean);
+    const arch = historyArchiveLoad(accountId);
+    let newSeries = 0, newEps = 0;
+    for (const d of clean) {
+      const cur = arch.series[d.id];
+      if (!cur) { newSeries++; newEps += d.eps.length; continue; }
+      const have = new Set(cur.eps || []);
+      newEps += d.eps.filter((k) => !have.has(k)).length;
+    }
+    historyArchiveMerge(accountId, clean, 'import');
+    return { read: clean.length, newSeries, newEps };
+  }
+
   // ── Complétion par l'avancement réel ──────────────────────────────────────────
   function historyRecoverLoad(accountId) {
     const s = accountId ? cacheGetStale(HIST_RECOVER_PREFIX + accountId) : null;
@@ -6064,6 +6161,14 @@
   };
   })();
 
+  // (v4.14.0) Clés d'épisodes (« s1e3 ») que l'archive d'historique du compte connaît pour une série,
+  // ou null. Sans requête : l'archive est en mémoire.
+  function archiveEpisodeKeys(seriesId) {
+    if (!ACCOUNT_ID || !seriesId) return null;
+    const a = historyArchiveLoad(ACCOUNT_ID).series[seriesId];
+    return (a && Array.isArray(a.eps) && a.eps.length) ? new Set(a.eps) : null;
+  }
+
   // (1) vu = flag Crunchyroll OU plus de 90 % de l'épisode écoulé
   function seenState(e, ph) {
     let started = false;
@@ -6102,8 +6207,16 @@
   function buildSeriesEntry(panel, episodes, maxAir, rating, order, ph, myRating) {
     // Date de visionnage la plus récente, tous épisodes confondus → tri « Dernier vu ».
     let lastWatchedTs = 0;
+    // (v4.14.0) Un épisode présent dans l'ARCHIVE d'historique est « vu », même si Crunchyroll n'a
+    // (plus) de progression pour lui — cas d'un historique restauré sur un autre compte. Ne fait
+    // que COMBLER : un épisode que Crunchyroll connaît (commencé / vu) garde son état réel.
+    const archKeys = archiveEpisodeKeys(panel.id);
     const marked = episodes.map((e) => {
-      const st = seenState(e, ph);
+      let st = seenState(e, ph);
+      if (st === 'none' && archKeys) {
+        const k = (e.season != null && e.n != null) ? `s${e.season}e${e.n}` : (e.id || null);
+        if (k && archKeys.has(k)) st = 'seen';
+      }
       for (const id of e.ids) {
         const x = ph.get(id);
         if (x && x.t && x.t > lastWatchedTs) lastWatchedTs = x.t;
@@ -16200,11 +16313,16 @@
         <div class="crrav-accordion-body">
           <section class="crrav-setcard">
             <div class="crrav-setcard-h">
-              <span class="crrav-setcard-t">💾 Sauvegarde des réglages</span>
+              <span class="crrav-setcard-t">💾 Sauvegarde (réglages + historique)</span>
             </div>
-            <p class="crrav-setcard-note">L'export contient tes réglages, filtres et séries ignorées
-              (pas le cache). Sert à retrouver ta configuration sur un autre appareil : le stockage du
-              navigateur est propre à chaque appareil et n'est jamais synchronisé.</p>
+            <p class="crrav-setcard-note">L'export contient tes réglages, filtres, séries ignorées
+              <b>et ton historique de visionnage</b> (séries et épisodes déjà vus, temps, genres) — pas le
+              reste du cache. À faire avant de changer de compte Crunchyroll ou d'appareil : le stockage du
+              navigateur est propre à chaque appareil et l'historique est rangé par compte. Une fois
+              connecté au nouveau compte, « Importer » fusionne le fichier avec l'historique du compte
+              actuel (rien n'est écrasé, tu peux réimporter sans risque). Les épisodes importés comptent
+              comme vus dans Reste à voir et Hors listes.</p>
+            <p class="crrav-setcard-note">${backupHistoryLine()}</p>
             <div class="crrav-setcard-btns">
               <button class="crrav-btn ghost" data-act="export-settings">⬇ Exporter</button>
               <button class="crrav-btn ghost" data-act="import-settings">⬆ Importer</button>
@@ -17718,12 +17836,24 @@
       ${entries.length ? '' : 'disabled'}>${label}</button>`;
   }
 
-  // ─── Portabilité : export / import de la configuration ──────────────────────
-  // Le stockage navigateur est cloisonné par appareil : rien ne passe du PC au téléphone.
-  // On exporte donc l'état UTILISATEUR (réglages, filtres, ignorées, empreinte diffusion)
-  // — jamais le cache, qui est volumineux et se reconstruit tout seul.
-  function exportSettings() {
-    const payload = {
+  // Ligne d'info de la carte Sauvegarde : ce qu'un export emporterait MAINTENANT.
+  function backupHistoryLine() {
+    const list = safeCall(historyExportCollect, [], 'backup:line');
+    if (!list.length) return 'Historique mémorisé sur cet appareil : aucun pour l\'instant.';
+    const eps = list.reduce((s, d) => s + d.eps.length, 0);
+    return `Historique mémorisé sur cet appareil : <b>${list.length}</b> série${list.length > 1 ? 's' : ''} · <b>${eps}</b> épisode${eps > 1 ? 's' : ''}.`;
+  }
+
+  // ─── Portabilité : sauvegarde / restauration (réglages + historique) ────────
+  // Le stockage navigateur est cloisonné par appareil ET l'archive d'historique est rangée par
+  // compte Crunchyroll : rien ne passe d'un appareil ou d'un compte à l'autre tout seul.
+  // On sauvegarde donc l'état UTILISATEUR (réglages, filtres, ignorées, empreinte diffusion) et,
+  // depuis la 4.13.0, l'HISTORIQUE de visionnage (voir historyExportCollect) — jamais le reste du
+  // cache, qui est volumineux et se reconstruit tout seul. Un fichier d'avant la 4.13.0 (sans
+  // `history`) reste importable ; un fichier récent importé par une vieille version ignore
+  // simplement la section qu'elle ne connaît pas.
+  function buildBackupPayload() {
+    return {
       kind: 'mon-crunchy-config',
       version: SCRIPT_VERSION,
       exportedAt: new Date().toISOString(),
@@ -17733,32 +17863,44 @@
         ignored: APP_STATE.ignored || {},
         airsnap: APP_STATE.airsnap || {},
       },
+      history: {
+        v: HISTORY_EXPORT_VERSION,
+        // Mémo pour l'humain qui ouvre le fichier ; jamais relu à l'import.
+        note: "eps = épisodes vus ou commencés (s1e3 = saison 1, épisode 3), seconds = temps cumulé, genres = genres Crunchyroll.",
+        series: safeCall(historyExportCollect, [], 'export:history'),
+      },
     };
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  }
+
+  function exportSettings() {
+    const payload = buildBackupPayload();
+    const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     const d = new Date();
     const stamp = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
     a.href = url;
-    a.download = `mon-crunchy-config-${stamp}.json`;
+    a.download = `mon-crunchy-sauvegarde-${stamp}.json`;
     document.body.appendChild(a);
     a.click();
     a.remove();
     // Libération différée : révoquer trop tôt annule le téléchargement sur certains mobiles.
     setTimeout(() => safeCall(() => URL.revokeObjectURL(url), undefined, 'export:revoke'), 10000);
-    showToast('✓ Configuration exportée');
+    const n = payload.history.series.length;
+    showToast(n ? `✓ Sauvegarde exportée — ${n} série${n > 1 ? 's' : ''} d'historique`
+      : '✓ Sauvegarde exportée (aucun historique mémorisé pour l\'instant)');
   }
 
-  function importSettings(file) {
-    const reader = new FileReader();
-    reader.onerror = () => showToast('✗ Fichier illisible');
-    reader.onload = () => {
-      const parsed = safeCall(() => JSON.parse(String(reader.result)), null, 'import:parse');
-      if (!parsed || parsed.kind !== 'mon-crunchy-config' || !parsed.state) {
-        showToast("✗ Ce fichier n'est pas un export de Mon Crunchy");
-        return;
-      }
-      const st = parsed.state;
+  // Applique un fichier de sauvegarde déjà lu. Sépare la LOGIQUE (testable) de l'interface :
+  // renvoie un bilan, ne touche ni toast ni rendu. Les deux sections sont indépendantes — une
+  // sauvegarde d'avant la 4.13.0 n'a que `state`, un fichier ne contenant que `history` marche aussi.
+  async function applyBackup(parsed) {
+    const res = { ok: false, error: null, settings: false, history: null, historyError: null };
+    if (!parsed || parsed.kind !== 'mon-crunchy-config') { res.error = 'format'; return res; }
+    const st = (parsed.state && typeof parsed.state === 'object') ? parsed.state : null;
+    const hist = (parsed.history && Array.isArray(parsed.history.series)) ? parsed.history.series : null;
+    if (!st && !hist) { res.error = 'format'; return res; }
+    if (st) {
       // Fusion prudente : on ne garde que les 4 sections attendues, et seulement si
       // elles ont le bon type. Un fichier tronqué ne doit pas casser la configuration.
       const next = { v: STATE_SCHEMA_VERSION };
@@ -17766,12 +17908,45 @@
         next[k] = (st[k] && typeof st[k] === 'object' && !Array.isArray(st[k])) ? st[k] : {};
       }
       APP_STATE = next;
-      if (!persistState(APP_STATE)) { showToast('✗ Import impossible (stockage plein)'); return; }
+      if (!persistState(APP_STATE)) { res.error = 'storage'; return res; }
       Object.assign(CFG, CFG_DEFAULTS);   // repart des défauts…
       applySettings();                     // …puis applique les réglages importés
       STATE.filters = loadFilters();
+      res.settings = true;
+    }
+    if (hist) {
+      try {
+        const accountId = await getAccountId();
+        if (!accountId) throw new Error('compte introuvable');
+        res.history = historyImportInto(accountId, hist);
+      } catch (e) {
+        safeCall.log(e, 'import:history');
+        res.historyError = e.message || String(e);
+      }
+    }
+    res.ok = res.settings || !!res.history;
+    return res;
+  }
+
+  function importSettings(file) {
+    const reader = new FileReader();
+    reader.onerror = () => showToast('✗ Fichier illisible');
+    reader.onload = async () => {
+      const parsed = safeCall(() => JSON.parse(String(reader.result)), null, 'import:parse');
+      const res = await applyBackup(parsed);
+      if (res.error === 'format') { showToast("✗ Ce fichier n'est pas un export de Mon Crunchy"); return; }
+      if (res.error === 'storage') { showToast('✗ Import impossible (stockage plein)'); return; }
       STATE.settingsOpen = false;
-      showToast('✓ Configuration importée — actualisation…');
+      if (res.historyError) {
+        showToast("✗ Historique non importé : compte Crunchyroll introuvable — connecte-toi puis réimporte le fichier");
+      } else if (res.history) {
+        const h = res.history;
+        showToast(h.newSeries || h.newEps
+          ? `✓ Sauvegarde importée — ${h.newSeries} série${h.newSeries > 1 ? 's' : ''} et ${h.newEps} épisode${h.newEps > 1 ? 's' : ''} ajoutés à l'historique — actualisation…`
+          : '✓ Sauvegarde importée — l\'historique était déjà à jour — actualisation…');
+      } else {
+        showToast('✓ Configuration importée — actualisation…');
+      }
       forceRender();
       refreshActive();
     };
