@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      4.14.0
+// @version      4.16.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '4.14.0';
+  const SCRIPT_VERSION = '4.16.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -2533,8 +2533,19 @@
       if (storedTier !== null) {
         LOG(`cache IndexedDB au format T${storedTier}, script en T${CACHE_TIER} — cache invalidé`);
       }
+      // (v4.15.0) L'archive d'historique n'est pas re-téléchargeable : elle traverse tout changement
+      // de palier (le format de ses entrées n'a jamais dépendu du palier du cache).
+      const keptArch = (await idbLoadAll()).filter(([k]) => typeof k === 'string' && k.startsWith(HIST_ARCHIVE_PREFIX));
       await idbClear();
-      idbSet(IDB_TIER_KEY, CACHE_TIER); // pas d'await : ne bloque pas le reste du boot
+      for (const [k, v] of keptArch) {
+        const cur = BIGCACHE[k];
+        if (!cur) BIGCACHE[k] = v;
+        else if (cur.v && v && v.v && v.v.series) {          // écrite pendant le chargement : on réunit les deux
+          cur.v.series = cur.v.series || {};
+          for (const [id, d] of Object.entries(v.v.series)) if (!cur.v.series[id]) cur.v.series[id] = d;
+        }
+      }
+      idbBatch([[IDB_TIER_KEY, CACHE_TIER], ...keptArch.map(([k]) => [k, BIGCACHE[k]])], []);   // pas d'await : ne bloque pas le boot
       migrateLocalStorageCacheToIdb();
       return;
     }
@@ -3578,6 +3589,35 @@
       : detailArr;
     return { ids: outIds, detail };
   }
+  // (v4.15.0) Archive aussi ce que tu as vu dans tes LISTES (Reste à voir / Hors listes). Jusque-là
+  // l'archive ne se nourrissait que de l'historique Crunchyroll (~1000 dernières entrées), de la
+  // complétion et de Découverte : une série de ta watchlist vue il y a longtemps, sortie de cette
+  // fenêtre, n'y entrait jamais — donc absente de la sauvegarde et perdue au changement de compte.
+  // Appelée après chaque chargement réussi ET juste avant un export. Sans requête.
+  function archiveLoadedSeries(accountId, list, src) {
+    if (!accountId || !Array.isArray(list)) return 0;
+    const detail = [];
+    for (const s of list) {
+      if (!s || !s.id || !Array.isArray(s.episodes)) continue;
+      const eps = [];
+      let seconds = 0;
+      for (const e of s.episodes) {
+        if (!e || !(e.seen || e.started)) continue;
+        const k = (e.season != null && e.n != null) ? `s${e.season}e${e.n}` : (e.id || null);
+        if (!k) continue;
+        eps.push(k);
+        if (e.seen) seconds += e.dur || 0;
+      }
+      if (eps.length) detail.push({ id: s.id, title: s.title || '', eps, seconds, genres: s.categories || [] });
+    }
+    return detail.length ? historyArchiveMerge(accountId, detail, src || 'lists') : 0;
+  }
+  function archiveAllLoaded() {
+    if (!ACCOUNT_ID) return;
+    safeCall(() => archiveLoadedSeries(ACCOUNT_ID, STATE.series, 'lists'), undefined, 'archive:suivi');
+    safeCall(() => archiveLoadedSeries(ACCOUNT_ID, STATE.orphan && STATE.orphan.series, 'lists'), undefined, 'archive:orphan');
+  }
+
   function historyArchiveCount(accountId) {
     return Object.keys(historyArchiveLoad(accountId).series).length;
   }
@@ -6157,6 +6197,7 @@
     removingId: null,
     listPicker: null,   // { seriesId, title } ou null
     confirmModal: null, // { title, message, confirmLabel, danger, onConfirm } ou null (voir confirmModalHtml)
+    importModal: null,  // { steps, done, failed, warn } pendant un import de sauvegarde (voir runImportFlow)
     favRefreshing: false,   // true pendant refreshFavorites() (bouton « Rafraîchir les favoris »)
   };
   })();
@@ -6492,6 +6533,7 @@
         STATE.lastSync = new Date();
         STATE.fromSnapshot = false;
         snapshotSave();
+        safeCall(() => archiveLoadedSeries(accountId, STATE.series, 'lists'), undefined, 'archive:suivi');   // (v4.15.0)
       }
       T.report(`chargement de ${fresh.length} séries`);
     } catch (e) {
@@ -8976,6 +9018,7 @@
       O.lastSync = new Date();
       O.fromSnapshot = false;
       orphanSnapshotSave();
+      safeCall(() => archiveLoadedSeries(accountId, O.series, 'lists'), undefined, 'archive:orphan');   // (v4.15.0)
       idle(() => fillMissingRatings(O.series));
       idle(() => fillMissingMyRatings(O.series, accountId));
       idle(() => enrichAnilistSchedule(O.series));
@@ -12053,6 +12096,36 @@
     color:#0a0a0c;font:700 13px/1 system-ui;cursor:pointer}
   .crrav-confirm-ok:hover{filter:brightness(1.08)}
   .crrav-confirm-ok.danger{background:#e0483d;border-color:#e0483d;color:#fff}
+  /* (v4.16.0) Modale d'import : nœud persistant posé sur root (comme le toast), mis à jour en place. */
+  .crrav-imp{position:fixed;inset:0;z-index:92;display:flex;align-items:flex-end;justify-content:center;
+    background:rgba(6,6,8,.78)}
+  .crrav-imp-sheet{width:100%;max-width:460px;background:#141419;border:1px solid rgba(255,255,255,.1);
+    border-radius:16px 16px 0 0;padding:18px 16px;display:flex;flex-direction:column;gap:12px;max-height:88vh;overflow:auto}
+  @media(min-width:640px){.crrav-imp{align-items:center}.crrav-imp-sheet{border-radius:16px}}
+  .crrav-imp-title{margin:0;font:700 15px/1.3 system-ui;color:#f2f2f4}
+  .crrav-imp-bar{height:6px;border-radius:99px;background:rgba(255,255,255,.08);overflow:hidden}
+  .crrav-imp-bar i{display:block;height:100%;width:0;background:#f47521;border-radius:99px;transition:width .35s ease}
+  .crrav-imp.failed .crrav-imp-bar i{background:#e0483d}
+  .crrav-imp-steps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:9px}
+  .crrav-imp-steps li{display:flex;gap:10px;align-items:flex-start;color:#8f8f99;font:500 12.5px/1.35 system-ui}
+  .crrav-imp-steps li b{display:block;font-weight:600;color:inherit}
+  .crrav-imp-steps li small{display:block;margin-top:1px;font:400 11.5px/1.35 system-ui;color:#8f8f99;word-break:break-word}
+  .crrav-imp-ico{flex:0 0 20px;height:20px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;
+    font:700 12px/1 system-ui;background:rgba(255,255,255,.07);color:#8f8f99}
+  .crrav-imp-steps li.running{color:#f2f2f4}
+  .crrav-imp-steps li.running .crrav-imp-ico{background:rgba(244,117,33,.18);color:#f47521;animation:crrav-imp-spin 1s linear infinite}
+  .crrav-imp-steps li.running small{color:#c9c9d2}
+  .crrav-imp-steps li.done{color:#d8d8de}
+  .crrav-imp-steps li.done .crrav-imp-ico{background:rgba(70,190,120,.18);color:#52c98a}
+  .crrav-imp-steps li.error{color:#f2c4bf}
+  .crrav-imp-steps li.error .crrav-imp-ico{background:rgba(224,72,61,.2);color:#ee6a5f}
+  .crrav-imp-steps li.error small{color:#e6a9a2}
+  .crrav-imp-steps li.skipped{opacity:.55}
+  .crrav-imp-actions{display:flex;margin-top:2px}
+  .crrav-imp-actions .crrav-confirm-ok{flex:1}
+  .crrav-imp-actions .crrav-confirm-ok.ghost{background:transparent;color:#c9c9d2;border-color:rgba(255,255,255,.18)}
+  @keyframes crrav-imp-spin{to{transform:rotate(360deg)}}
+  @media(prefers-reduced-motion:reduce){.crrav-imp-steps li.running .crrav-imp-ico{animation:none}.crrav-imp-bar i{transition:none}}
   .crrav-ignoreall{color:#e6a9a2}
   .crrav-ignoreall:hover{border-color:#e0483d;color:#f2c4bf}
   .crrav-ignoreall-bottom{display:flex;justify-content:center;margin:18px 0}
@@ -16334,8 +16407,8 @@
             <div class="crrav-setcard-h">
               <span class="crrav-setcard-t">🗑 Cache mémorisé</span>
             </div>
-            <p class="crrav-setcard-note">Supprime les épisodes, notes et historiques mémorisés — mais
-              garde tes réglages, tes filtres et tes séries ignorées. Le rechargement suivant sera plus long.</p>
+            <p class="crrav-setcard-note">Supprime les épisodes, notes et données re-téléchargeables — mais
+              garde tes réglages, tes filtres, tes séries ignorées et ton historique de visionnage. Le rechargement suivant sera plus long.</p>
             <div class="crrav-setcard-btns">
               <button class="crrav-btn danger" data-act="clear-cache">Vider le cache</button>
             </div>
@@ -17853,6 +17926,7 @@
   // `history`) reste importable ; un fichier récent importé par une vieille version ignore
   // simplement la section qu'elle ne connaît pas.
   function buildBackupPayload() {
+    archiveAllLoaded();   // (v4.15.0) ce qui est vu dans les listes entre dans l'archive avant de partir
     return {
       kind: 'mon-crunchy-config',
       version: SCRIPT_VERSION,
@@ -17891,34 +17965,60 @@
       : '✓ Sauvegarde exportée (aucun historique mémorisé pour l\'instant)');
   }
 
+  // ── Lecture d'une sauvegarde, en trois briques réutilisées par applyBackup (tests) ET par la
+  // modale d'import (étape par étape) ─────────────────────────────────────────────────────────
+  // Contrôle un fichier déjà parsé sans RIEN modifier : quelles sections, combien de séries/épisodes.
+  function backupInspect(parsed) {
+    const info = { ok: false, st: null, hist: null, nSeries: 0, nEps: 0, version: null };
+    if (!parsed || typeof parsed !== 'object' || parsed.kind !== 'mon-crunchy-config') return info;
+    info.st = (parsed.state && typeof parsed.state === 'object') ? parsed.state : null;
+    info.hist = (parsed.history && Array.isArray(parsed.history.series)) ? parsed.history.series : null;
+    if (!info.st && !info.hist) return info;
+    info.version = typeof parsed.version === 'string' ? parsed.version : null;
+    if (info.hist) {
+      const clean = info.hist.slice(0, HIST_IMPORT_MAX_SERIES).map(historyEntryClean).filter(Boolean);
+      info.nSeries = clean.length;
+      info.nEps = clean.reduce((s, d) => s + d.eps.length, 0);
+    }
+    info.ok = true;
+    return info;
+  }
+  // Restaure réglages / filtres / ignorées / empreinte diffusion. false = stockage plein.
+  function backupApplySettings(st) {
+    // Fusion prudente : on ne garde que les 4 sections attendues, et seulement si
+    // elles ont le bon type. Un fichier tronqué ne doit pas casser la configuration.
+    const next = { v: STATE_SCHEMA_VERSION };
+    for (const k of ['settings', 'filters', 'ignored', 'airsnap']) {
+      next[k] = (st[k] && typeof st[k] === 'object' && !Array.isArray(st[k])) ? st[k] : {};
+    }
+    APP_STATE = next;
+    if (!persistState(APP_STATE)) return false;
+    Object.assign(CFG, CFG_DEFAULTS);   // repart des défauts…
+    applySettings();                     // …puis applique les réglages importés
+    STATE.filters = loadFilters();
+    return true;
+  }
+  // Fusionne l'historique dans l'archive du compte connecté. Lève si le compte est introuvable.
+  async function backupApplyHistory(hist) {
+    const accountId = await getAccountId();
+    if (!accountId) throw new Error('compte introuvable');
+    return historyImportInto(accountId, hist);
+  }
+
   // Applique un fichier de sauvegarde déjà lu. Sépare la LOGIQUE (testable) de l'interface :
   // renvoie un bilan, ne touche ni toast ni rendu. Les deux sections sont indépendantes — une
   // sauvegarde d'avant la 4.13.0 n'a que `state`, un fichier ne contenant que `history` marche aussi.
   async function applyBackup(parsed) {
     const res = { ok: false, error: null, settings: false, history: null, historyError: null };
-    if (!parsed || parsed.kind !== 'mon-crunchy-config') { res.error = 'format'; return res; }
-    const st = (parsed.state && typeof parsed.state === 'object') ? parsed.state : null;
-    const hist = (parsed.history && Array.isArray(parsed.history.series)) ? parsed.history.series : null;
-    if (!st && !hist) { res.error = 'format'; return res; }
-    if (st) {
-      // Fusion prudente : on ne garde que les 4 sections attendues, et seulement si
-      // elles ont le bon type. Un fichier tronqué ne doit pas casser la configuration.
-      const next = { v: STATE_SCHEMA_VERSION };
-      for (const k of ['settings', 'filters', 'ignored', 'airsnap']) {
-        next[k] = (st[k] && typeof st[k] === 'object' && !Array.isArray(st[k])) ? st[k] : {};
-      }
-      APP_STATE = next;
-      if (!persistState(APP_STATE)) { res.error = 'storage'; return res; }
-      Object.assign(CFG, CFG_DEFAULTS);   // repart des défauts…
-      applySettings();                     // …puis applique les réglages importés
-      STATE.filters = loadFilters();
+    const info = backupInspect(parsed);
+    if (!info.ok) { res.error = 'format'; return res; }
+    if (info.st) {
+      if (!backupApplySettings(info.st)) { res.error = 'storage'; return res; }
       res.settings = true;
     }
-    if (hist) {
+    if (info.hist) {
       try {
-        const accountId = await getAccountId();
-        if (!accountId) throw new Error('compte introuvable');
-        res.history = historyImportInto(accountId, hist);
+        res.history = await backupApplyHistory(info.hist);
       } catch (e) {
         safeCall.log(e, 'import:history');
         res.historyError = e.message || String(e);
@@ -17928,30 +18028,160 @@
     return res;
   }
 
-  function importSettings(file) {
-    const reader = new FileReader();
-    reader.onerror = () => showToast('✗ Fichier illisible');
-    reader.onload = async () => {
-      const parsed = safeCall(() => JSON.parse(String(reader.result)), null, 'import:parse');
-      const res = await applyBackup(parsed);
-      if (res.error === 'format') { showToast("✗ Ce fichier n'est pas un export de Mon Crunchy"); return; }
-      if (res.error === 'storage') { showToast('✗ Import impossible (stockage plein)'); return; }
-      STATE.settingsOpen = false;
-      if (res.historyError) {
-        showToast("✗ Historique non importé : compte Crunchyroll introuvable — connecte-toi puis réimporte le fichier");
-      } else if (res.history) {
-        const h = res.history;
-        showToast(h.newSeries || h.newEps
-          ? `✓ Sauvegarde importée — ${h.newSeries} série${h.newSeries > 1 ? 's' : ''} et ${h.newEps} épisode${h.newEps > 1 ? 's' : ''} ajoutés à l'historique — actualisation…`
-          : '✓ Sauvegarde importée — l\'historique était déjà à jour — actualisation…');
-      } else {
-        showToast('✓ Configuration importée — actualisation…');
-      }
-      forceRender();
-      refreshActive();
-    };
-    reader.readAsText(file);
+  // ─── Modale d'import : le déroulé COMPLET, étape par étape ──────────────────────────────────
+  // Importer ne se limite pas à fusionner un fichier : sur un compte neuf, le cache est vide et
+  // il faut ensuite relire tes listes puis analyser chaque série de l'historique (fiche + épisodes)
+  // — plusieurs minutes pour quelques centaines de séries. La modale montre où en est chaque étape,
+  // avec le détail en direct ; « Continuer en arrière-plan » la ferme sans rien interrompre.
+  const IMPORT_STEPS = [
+    ['read', 'Lecture du fichier'],
+    ['check', 'Vérification du contenu'],
+    ['settings', 'Réglages, filtres et séries ignorées'],
+    ['history', 'Fusion de l\'historique de visionnage'],
+    ['lists', 'Reste à voir — relecture de tes listes'],
+    ['orphans', 'Hors listes — analyse des séries de l\'historique'],
+  ];
+  const IMPORT_ICONS = { pending: '○', running: '◐', done: '✓', error: '✕', skipped: '–' };
+
+  function readFileAsText(file) {
+    return new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onerror = () => reject(new Error('Fichier illisible'));
+      r.onload = () => resolve(String(r.result));
+      r.readAsText(file);
+    });
   }
+  const nextPaint = () => new Promise((r) => setTimeout(r, 40));   // laisse la modale se peindre entre deux étapes
+
+  // Nœud PERSISTANT (comme le toast) mis à jour en place : recréer le DOM à chaque message de
+  // progression relancerait l'animation de la pastille et ferait clignoter la modale.
+  function renderImportModal() {
+    if (!root) return;
+    const M = STATE.importModal;
+    let el = root.querySelector('#crrav-imp');
+    if (!M) { if (el) el.remove(); return; }
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'crrav-imp';
+      el.className = 'crrav-imp';
+      el.setAttribute('role', 'dialog');
+      el.setAttribute('aria-modal', 'true');
+      el.setAttribute('aria-label', 'Import de la sauvegarde');
+      el.innerHTML = `<div class="crrav-imp-sheet">
+        <h3 class="crrav-imp-title"></h3>
+        <div class="crrav-imp-bar"><i></i></div>
+        <ol class="crrav-imp-steps" aria-live="polite">${M.steps.map((s) =>
+          `<li data-k="${s.key}"><span class="crrav-imp-ico"></span><div><b></b><small></small></div></li>`).join('')}</ol>
+        <div class="crrav-imp-actions"><button type="button" class="crrav-confirm-ok" data-imp-close></button></div>
+      </div>`;
+      root.appendChild(el);
+    }
+    const setText = (node, t) => { if (node && node.textContent !== t) node.textContent = t; };
+    const finished = M.done || M.failed;
+    setText(el.querySelector('.crrav-imp-title'),
+      M.failed ? 'Import impossible' : M.done ? (M.warn ? 'Import terminé (avec avertissements)' : 'Import terminé ✓') : 'Import en cours…');
+    const total = M.steps.length;
+    const doneN = M.steps.filter((s) => s.status === 'done' || s.status === 'skipped').length;
+    const running = M.steps.some((s) => s.status === 'running') ? 0.5 : 0;
+    const pct = finished && !M.failed ? 100 : Math.min(99, Math.round(((doneN + running) / total) * 100));
+    const bar = el.querySelector('.crrav-imp-bar i');
+    if (bar) bar.style.width = pct + '%';
+    el.classList.toggle('failed', !!M.failed);
+    for (const s of M.steps) {
+      const li = el.querySelector(`li[data-k="${s.key}"]`);
+      if (!li) continue;
+      if (li.className !== s.status) li.className = s.status;
+      setText(li.querySelector('.crrav-imp-ico'), IMPORT_ICONS[s.status] || '○');
+      setText(li.querySelector('b'), s.label);
+      setText(li.querySelector('small'), s.detail || '');
+    }
+    const btn = el.querySelector('[data-imp-close]');
+    setText(btn, M.failed ? 'Fermer' : M.done ? 'Terminé' : 'Continuer en arrière-plan');
+    if (btn) btn.classList.toggle('ghost', !finished);
+  }
+
+  async function runImportFlow(file) {
+    const M = STATE.importModal = {
+      fileName: (file && file.name) || 'sauvegarde.json', done: false, failed: false, warn: false,
+      steps: IMPORT_STEPS.map(([key, label]) => ({ key, label, status: 'pending', detail: '' })),
+    };
+    const set = (key, status, detail) => {
+      const s = M.steps.find((x) => x.key === key);
+      if (!s) return;
+      s.status = status;
+      if (detail !== undefined) s.detail = detail;
+      if (STATE.importModal === M) renderImportModal();
+    };
+    const fail = (key, msg) => {
+      set(key, 'error', msg);
+      M.failed = true;
+      for (const s of M.steps) if (s.status === 'pending') { s.status = 'skipped'; s.detail = 'non exécuté'; }
+      if (STATE.importModal === M) renderImportModal();
+    };
+    const plural = (n, w) => `${n} ${w}${n > 1 ? 's' : ''}`;
+    STATE.settingsOpen = false;     // la feuille Réglages ne doit pas rester derrière la modale
+    dismissToast();
+    forceRender();
+    renderImportModal();
+    try {
+      set('read', 'running');
+      let text;
+      try { text = await readFileAsText(file); } catch (e) { return fail('read', 'Fichier illisible.'); }
+      set('read', 'done', `${M.fileName} · ${fmtBytes(text.length)}`);
+      await nextPaint();
+
+      set('check', 'running');
+      const info = backupInspect(safeCall(() => JSON.parse(text), null, 'import:parse'));
+      if (!info.ok) return fail('check', "Ce fichier n'est pas une sauvegarde de Mon Crunchy.");
+      const bits = [];
+      if (info.hist) bits.push(`${plural(info.nSeries, 'série')} · ${plural(info.nEps, 'épisode')} d'historique`);
+      if (info.st) bits.push('réglages');
+      set('check', 'done', bits.join(' + ') + (info.version ? ` · créée avec la v${info.version}` : ''));
+      await nextPaint();
+
+      if (info.st) {
+        set('settings', 'running');
+        if (!backupApplySettings(info.st)) return fail('settings', 'Stockage plein : réglages non enregistrés.');
+        set('settings', 'done', 'restaurés');
+      } else set('settings', 'skipped', 'absents du fichier');
+
+      if (info.hist) {
+        set('history', 'running', 'Fusion avec l\'historique du compte connecté…');
+        await nextPaint();
+        let h;
+        try { h = await backupApplyHistory(info.hist); }
+        catch (e) { safeCall.log(e, 'import:history'); return fail('history', 'Compte Crunchyroll introuvable — connecte-toi puis réimporte le fichier.'); }
+        set('history', 'done', (h.newSeries || h.newEps)
+          ? `+${plural(h.newSeries, 'série')} · +${plural(h.newEps, 'épisode')} ajoutés`
+          : 'déjà à jour, rien à ajouter');
+      } else set('history', 'skipped', 'absent du fichier');
+
+      // Ces deux relectures sont les vraies étapes longues (réseau). Leur progression arrive en direct.
+      set('lists', 'running', 'Démarrage…');
+      await nextPaint();
+      await loadAll((m) => { progressMsg = m; set('lists', 'running', m); render(); });
+      if (STATE.error) { M.warn = true; set('lists', 'error', String(STATE.error)); }
+      else set('lists', 'done', `${plural(STATE.series.length, 'série')} dans tes listes`);
+
+      if (info.hist) {
+        set('orphans', 'running', 'Démarrage…');
+        await loadOrphelines((m) => { progressMsgOrphan = m; set('orphans', 'running', m); render(); });
+        const O = STATE.orphan;
+        if (O.error) { M.warn = true; set('orphans', 'error', String(O.error)); }
+        else set('orphans', 'done', `${plural(O.series.length, 'série')} hors de tes listes`);
+      } else set('orphans', 'skipped', 'pas d\'historique dans ce fichier');
+
+      M.done = true;
+      if (STATE.importModal === M) renderImportModal();
+      else showToast(M.warn ? '⚠ Import terminé (avec avertissements)' : '✓ Import terminé');   // modale fermée entre-temps
+    } catch (e) {
+      console.error('[reste-à-voir] import', e);
+      const cur = M.steps.find((s) => s.status === 'running');
+      fail(cur ? cur.key : 'check', 'Erreur inattendue : ' + (e.message || e));
+    }
+  }
+
+  function importSettings(file) { return runImportFlow(file); }
 
   function collectSettings() {
     const patch = {};
@@ -17994,8 +18224,12 @@
   // (2) ne détruit que les données re-téléchargeables (cache IndexedDB + éventuels
   // restes localStorage d'une installation pas encore migrée).
   function clearCache() {
-    const n = Object.keys(BIGCACHE).length;
+    // (v4.15.0) L'archive d'historique n'est PAS re-téléchargeable (Crunchyroll ne rend que ses
+    // ~1000 dernières entrées) : elle survit au vidage, en mémoire comme sur disque.
+    const keptArch = Object.keys(BIGCACHE).filter((k) => k.startsWith(HIST_ARCHIVE_PREFIX)).map((k) => [k, BIGCACHE[k]]);
+    const n = Object.keys(BIGCACHE).length - keptArch.length;
     for (const k of Object.keys(BIGCACHE)) delete BIGCACHE[k];
+    for (const [k, v] of keptArch) BIGCACHE[k] = v;
     // (fix) Un flush (écriture des clés en attente) puis un clear() juste derrière
     // lançaient deux transactions IndexedDB pour rien — annuler le flush en attente et
     // vider les Sets suffit, clear() fait tout le travail. clear() efface aussi la clé de
@@ -18006,7 +18240,7 @@
     deletedIdbKeys.clear();
     clearTimeout(bigCacheFlushTimer);
     bigCacheFlushTimer = null;
-    idbClear().then(() => idbSet(IDB_TIER_KEY, CACHE_TIER));
+    idbClear().then(() => idbBatch([[IDB_TIER_KEY, CACHE_TIER], ...keptArch], []));   // palier + archive réécrits dans la foulée
     // Réglages, filtres, ignorées et empreinte diffusion vivent dans une seule clé
     // (STATE_KEY), préservée. Restes éventuels d'une ancienne installation localStorage.
     const keep = new Set([STATE_KEY]);
@@ -18764,6 +18998,7 @@
     if (!root) return;
     renderToastOverlay();
     renderModalsOverlay();
+    renderImportModal();   // (v4.16.0) no-op sans import en cours
     const content = root.querySelector('.crrav-content');
     if (!content) return;
     // (fix clavier mobile) Sauvegarde le champ actif AVANT reconstruction : content.innerHTML
@@ -19704,6 +19939,13 @@
         if (e.target.classList && e.target.classList.contains('crrav-listpicker')) {
           STATE.listPicker = null;
           forceRender(); return;
+        }
+        // ── Modale d'import (voir runImportFlow) : fermer = continuer en arrière-plan, rien n'est annulé ──
+        if (e.target.closest('[data-imp-close]')) {
+          e.preventDefault();
+          STATE.importModal = null;
+          renderImportModal();
+          return;
         }
         // ── Modale de confirmation générique (voir confirmModalHtml / STATE.confirmModal) ──
         if (e.target.closest('[data-confirm-ok]')) {
