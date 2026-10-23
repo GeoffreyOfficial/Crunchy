@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      4.21.0
+// @version      4.21.1
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '4.21.0';
+  const SCRIPT_VERSION = '4.21.1';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -13770,11 +13770,14 @@
     .crrav-cal .crrav-calmgrid:not(.mini) .crrav-calmore.m4{display:none}
     .crrav-calcnt{font-size:10.5px}
   }
-  @container cal (min-width:1300px){
+  @container cal (min-width:1700px){
     .crrav-calmonth{display:grid;grid-template-columns:minmax(0,1fr) 360px;grid-template-areas:"g s" "l s";gap:10px 20px;align-items:start}
     .crrav-calmonth>.crrav-calmgrid{grid-area:g}
     .crrav-calmonth>.crrav-callegend{grid-area:l}
     .crrav-calmonth>.crrav-calselday{grid-area:s;position:sticky;top:8px;max-height:calc(100dvh - 24px);overflow:auto}
+    .crrav-cal .crrav-calmonth .crrav-calselday .crrav-calcards{grid-template-columns:minmax(0,1fr) !important;display:flex;flex-direction:column}
+    .crrav-cal .crrav-calmonth .crrav-calselday .crrav-calcard{flex-direction:row;min-height:0}
+    .crrav-cal .crrav-calmonth .crrav-calselday .crrav-calp{width:72px;height:auto;min-height:104px;align-self:stretch}
     .crrav-cal .crrav-calmgrid:not(.mini) .crrav-calcell{min-height:132px}
     .crrav-cal .crrav-calmgrid:not(.mini) .crrav-calmini.x4{display:flex}
     .crrav-cal .crrav-calmgrid:not(.mini) .crrav-calmore.m3{display:none}
