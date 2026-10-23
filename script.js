@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      4.20.0
+// @version      4.21.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '4.20.0';
+  const SCRIPT_VERSION = '4.21.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -6249,6 +6249,7 @@
     calShowProj: true,         // épisodes suivants prévus (projection hebdomadaire)
     calShowEst: false,         // séries sans date AniList, déduites du rythme
     calOnlyCr: false,          // nouveautés : seulement celles annoncées sur Crunchyroll
+    calConfirmed: false,       // (v4.21.0) calendrier : seulement les dates confirmées (pas de projection)
     onlyRated: false,          // uniquement celles que tu as notées 4★ ou plus
     onlyFavorite: false,       // uniquement tes favoris (notées 5★ par TOI)
     onlyShort: false,          // séries courtes : 12 épisodes ou moins au total
@@ -10297,6 +10298,7 @@
         ${(s.isNew || rating || state) ? `<div class="crrav-tlstack">${
           s.isNew ? '<span class="crrav-newdot">Nouvel épisode</span>' : ''}${rating}${state}</div>` : ''}
         ${ignoreBtn(s, source)}
+        ${source === 'watchlist' ? agendaBtn(s) : ''}
         ${source === 'watchlist' ? removeListBtn(s) : source === 'orphan' ? addListBtn(s, true) : ''}
         ${synopsisBlock(s)}
       </div>
@@ -10361,6 +10363,7 @@
       </div>
       <div class="crrav-lactions-more">
         ${ignoreBtn(s, source)}
+        ${source === 'watchlist' ? agendaBtn(s) : ''}
         ${source === 'watchlist' ? removeListBtn(s) : source === 'orphan' ? addListBtn(s) : ''}
       </div>
     </article>`;
@@ -13692,6 +13695,167 @@
   .crrav-tv .crrav-calt b{font-size:1.3em}
   .crrav-tv .crrav-calst,.crrav-tv .crrav-calsub{font-size:1.2em}
 
+  /* ── v4.21.0 : filtres groupés, recherche, vue Mois visuelle, agenda d'une série ── */
+  .crrav-cal .crrav-calchips{display:flex;flex-wrap:nowrap;align-items:center;gap:6px 14px;overflow-x:auto}
+  .crrav-calfg{flex:none;display:flex;align-items:center;gap:6px}
+  .crrav-calfg+.crrav-calfg{padding-left:12px;border-left:1px solid rgba(255,255,255,.12)}
+  .crrav-calfl{flex:none;font:800 10px/1 system-ui;letter-spacing:.09em;text-transform:uppercase;color:#8c8c9c}
+  .crrav-calchip.zero:not(.on){opacity:.45}
+  .crrav-calchip.reset{border-color:rgba(224,87,74,.5);color:#ff9d92;background:rgba(224,87,74,.08)}
+  .crrav-calchip[data-v="sequel"]::before{content:'';width:8px;height:8px;border-radius:50%;background:#8fa8ff}
+  .crrav-calchip[aria-pressed="true"][data-act="cal-opt"]{background:rgba(95,209,138,.14);border-color:rgba(95,209,138,.55);color:#9be8bb}
+  .crrav-calrow2{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+  .crrav-calsearch{flex:1 1 170px;min-width:0;display:flex;align-items:center;gap:8px;height:38px;padding:0 12px;border-radius:999px;
+    background:#16161c;border:1px solid rgba(255,255,255,.12);color:#9a9aa8}
+  .crrav-calsearch:focus-within{border-color:rgba(244,117,33,.7);color:#ffb27c}
+  .crrav-calq{flex:1;min-width:0;height:100%;border:0;background:transparent;color:#f2f2f4;font:500 14px/1 system-ui;outline:none;padding:0;-webkit-appearance:none;appearance:none}
+  .crrav-calq::placeholder{color:#7d7d8c}
+  .crrav-calq::-webkit-search-cancel-button{-webkit-appearance:none}
+  .crrav-calperiods{align-items:center}
+  .crrav-calperiods .crrav-calfl{padding-right:2px}
+  .crrav-calres{margin:0;font:600 12.5px/1.4 system-ui;color:#c9c9d4}
+  .crrav-calres b{color:#ffb27c;font-weight:800}
+  .crrav-calnc{margin-left:6px;font:600 12px/1 system-ui;color:#9a9aa8}
+  @container cal (min-width:640px){
+    .crrav-cal .crrav-calchips{flex-wrap:wrap;overflow:visible}
+    .crrav-calfg{flex:0 1 auto;flex-wrap:wrap;min-width:0}
+  }
+
+  /* Vue Mois : affiches dans la grille. */
+  .crrav-calmonth{display:flex;flex-direction:column;gap:10px}
+  .crrav-calmgrid:not(.mini){gap:4px}
+  .crrav-calmgrid:not(.mini) .crrav-calcell{min-height:88px;align-items:stretch;justify-content:flex-start;gap:4px;padding:4px;border-radius:10px;
+    border:1px solid rgba(255,255,255,.06);text-align:left}
+  .crrav-calmgrid:not(.mini) .crrav-calcell.wk:not(.has){background:#121217}
+  .crrav-calmgrid:not(.mini) .crrav-calcell.heat1{background:#1c1814}
+  .crrav-calmgrid:not(.mini) .crrav-calcell.heat2{background:#241b13}
+  .crrav-calmgrid:not(.mini) .crrav-calcell.heat3{background:#2e2013}
+  .crrav-calmgrid:not(.mini) .crrav-calcell.heat4{background:#3a2513}
+  .crrav-calmgrid:not(.mini) .crrav-calcell.today{border-color:#f47521;box-shadow:0 0 0 1px #f47521 inset}
+  .crrav-calmgrid:not(.mini) .crrav-calcell.sel{background:rgba(244,117,33,.26);border-color:#ff9a4d}
+  .crrav-calmgrid:not(.mini) .crrav-calcell:hover:not(.blank){border-color:rgba(255,154,77,.6)}
+  .crrav-calmgrid:not(.mini) .crrav-calcell.today .crrav-calnum{color:#ff9a4d}
+  .crrav-calnumrow{display:flex;align-items:center;justify-content:space-between;gap:4px}
+  .crrav-calmgrid:not(.mini) .crrav-calnum{font:800 12px/1 system-ui}
+  .crrav-calcnt{font:800 9.5px/1 system-ui;background:#f47521;color:#1a0b02;border-radius:99px;padding:2px 5px;min-width:15px;box-sizing:border-box;text-align:center}
+  .crrav-calthumbs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:2px;width:100%}
+  .crrav-calthumbs.t1{grid-template-columns:minmax(0,1fr)}
+  .crrav-calth{position:relative;display:block;aspect-ratio:1;border-radius:5px;overflow:hidden;background:hsl(var(--h,20) 40% 22%);--ring:transparent}
+  .crrav-calthumbs.t1 .crrav-calth{aspect-ratio:4/3}
+  .crrav-calth img{width:100%;height:100%;object-fit:cover;object-position:top;display:block}
+  .crrav-calth .crrav-calini{display:flex;width:100%;height:100%;align-items:center;justify-content:center;font:800 13px/1 system-ui;color:#fff}
+  .crrav-calth::after{content:'';position:absolute;inset:0;border-radius:inherit;box-shadow:inset 0 0 0 2px var(--ring)}
+  .crrav-calth.late{--ring:#f47521}.crrav-calth.prem{--ring:#8fa8ff}.crrav-calth.out{--ring:#5fd18a}
+  .crrav-calth.more{display:flex;align-items:center;justify-content:center;background:#2a2a34;color:#e4e4ea;font:800 11px/1 system-ui}
+  .crrav-calmini .crrav-calmp img{width:100%;height:100%;object-fit:cover;object-position:top;display:block}
+  .crrav-callegend{margin:0;display:flex;flex-wrap:wrap;gap:4px 14px;font:600 11px/1 system-ui;color:#9a9aa8}
+  .crrav-callegend span::before{content:'';display:inline-block;width:9px;height:9px;border-radius:3px;margin-right:5px;vertical-align:-1px;background:#444}
+  .crrav-callegend .late::before{background:#f47521}.crrav-callegend .prem::before{background:#8fa8ff}.crrav-callegend .out::before{background:#5fd18a}
+  .crrav-callegend .ep::before{background:#2a2a34;box-shadow:inset 0 0 0 1.5px #777}
+  @media (max-width:340px){.crrav-calmgrid:not(.mini) .crrav-calcell{min-height:70px;padding:3px}.crrav-calcnt{display:none}}
+  @container cal (min-width:560px){
+    .crrav-cal .crrav-calmgrid:not(.mini) .crrav-calcell{min-height:118px;padding:6px;gap:5px}
+    .crrav-cal .crrav-calmgrid:not(.mini) .crrav-calnum{font-size:14px}
+    .crrav-cal .crrav-calmgrid:not(.mini) .crrav-calthumbs{display:none}
+    .crrav-cal .crrav-calmgrid:not(.mini) .crrav-calmini{display:flex;align-items:center;gap:5px;padding:2px 5px 2px 2px;border-radius:7px;
+      background:hsl(var(--h) 36% 17%);color:#f0e3da;border-left:3px solid #6b5a4c;white-space:normal;min-width:0}
+    .crrav-cal .crrav-calmgrid:not(.mini) .crrav-calmini.late{border-left-color:#f47521;background:hsl(var(--h) 44% 20%)}
+    .crrav-cal .crrav-calmgrid:not(.mini) .crrav-calmini.prem{border-left-color:#8fa8ff;background:#1b2046;color:#d3dbff}
+    .crrav-cal .crrav-calmgrid:not(.mini) .crrav-calmini.out{border-left-color:#5fd18a;background:#142a1e;color:#bff0d2}
+    .crrav-calmp{flex:none;width:16px;height:22px;border-radius:3px;overflow:hidden;background:hsl(var(--h) 40% 24%)}
+    .crrav-calmp .crrav-calini{display:flex;width:100%;height:100%;align-items:center;justify-content:center;font:800 9px/1 system-ui}
+    .crrav-calmt{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:600 11px/1.2 system-ui}
+    .crrav-calmt em{font-style:normal;font-weight:800;color:#ffb27c}
+    .crrav-cal .crrav-calmgrid:not(.mini) .crrav-calmini.x4{display:none}
+    .crrav-cal .crrav-calmgrid:not(.mini) .crrav-calmore.m4{display:none}
+    .crrav-calcnt{font-size:10.5px}
+  }
+  @container cal (min-width:1300px){
+    .crrav-calmonth{display:grid;grid-template-columns:minmax(0,1fr) 360px;grid-template-areas:"g s" "l s";gap:10px 20px;align-items:start}
+    .crrav-calmonth>.crrav-calmgrid{grid-area:g}
+    .crrav-calmonth>.crrav-callegend{grid-area:l}
+    .crrav-calmonth>.crrav-calselday{grid-area:s;position:sticky;top:8px;max-height:calc(100dvh - 24px);overflow:auto}
+    .crrav-cal .crrav-calmgrid:not(.mini) .crrav-calcell{min-height:132px}
+    .crrav-cal .crrav-calmgrid:not(.mini) .crrav-calmini.x4{display:flex}
+    .crrav-cal .crrav-calmgrid:not(.mini) .crrav-calmore.m3{display:none}
+    .crrav-cal .crrav-calmgrid:not(.mini) .crrav-calmore.m4{display:block}
+  }
+  @container cal (min-width:2100px){
+    .crrav-cal .crrav-calmgrid:not(.mini) .crrav-calcell{min-height:160px}
+    .crrav-calmt{font-size:12.5px}.crrav-calmp{width:20px;height:28px}
+  }
+
+  /* Agenda d'une série : fiche modale (feuille en bas sur mobile, fenêtre centrée sur grand écran). */
+  .crrav-sa{position:fixed;inset:0;z-index:92;display:flex;align-items:flex-end;justify-content:center}
+  .crrav-sa-bg{position:absolute;inset:0;background:rgba(6,6,8,.74)}
+  .crrav-sa-sheet{position:relative;width:100%;max-width:600px;max-height:92vh;max-height:92dvh;overflow-y:auto;overscroll-behavior:contain;
+    box-sizing:border-box;padding:16px 14px 0;border-radius:20px 20px 0 0;border:1px solid rgba(255,255,255,.1);
+    background:linear-gradient(180deg,hsl(var(--h,20) 38% 17%),#141419 190px);color:#f2f2f4;font-family:system-ui,sans-serif;
+    animation:crrav-sa-in .22s ease}
+  @keyframes crrav-sa-in{from{transform:translateY(28px);opacity:0}to{transform:none;opacity:1}}
+  @media (min-width:700px){.crrav-sa{align-items:center}.crrav-sa-sheet{border-radius:20px;max-height:88vh;max-height:88dvh;padding:20px 20px 0}}
+  .crrav-sa-x{position:absolute;top:10px;right:10px;width:40px;height:40px;border-radius:50%;border:1px solid rgba(255,255,255,.18);
+    background:rgba(10,10,12,.7);color:#e4e4ea;font:700 15px/1 system-ui;cursor:pointer;z-index:2}
+  .crrav-sa-head{display:flex;gap:12px;padding-right:44px}
+  .crrav-sa-p{flex:none;width:68px;height:98px;border-radius:11px;overflow:hidden;background:hsl(var(--h,20) 40% 24%);box-shadow:0 6px 18px rgba(0,0,0,.45)}
+  .crrav-sa-p img{width:100%;height:100%;object-fit:cover;display:block}
+  .crrav-sa-p .crrav-calini{display:flex;width:100%;height:100%;align-items:center;justify-content:center;font:800 26px/1 system-ui}
+  .crrav-sa-ht{min-width:0;display:flex;flex-direction:column;justify-content:center;gap:5px}
+  .crrav-sa-kick{font:800 10px/1 system-ui;letter-spacing:.12em;color:#ff9a4d}
+  .crrav-sa-ht h3{margin:0;font:800 20px/1.15 system-ui;letter-spacing:-.01em;overflow-wrap:anywhere}
+  .crrav-sa-ht p{margin:0;font:700 13px/1.3 system-ui}
+  .crrav-sa .late{color:#ffb27c}.crrav-sa .ok{color:#5fd18a}.crrav-sa .mute{color:#9a9aa8}
+  .crrav-sa-tiles{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:14px}
+  .crrav-sa-t{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:10px 11px;display:flex;flex-direction:column;gap:4px;min-width:0}
+  .crrav-sa-t small{font:700 10px/1 system-ui;letter-spacing:.07em;text-transform:uppercase;color:#9a9aa8}
+  .crrav-sa-t b{font:800 17px/1.15 system-ui;font-variant-numeric:tabular-nums}
+  .crrav-sa-t em{font:600 11.5px/1.3 system-ui;font-style:normal;color:#c9b8aa}
+  .crrav-sa-dots{display:flex;flex-wrap:wrap;gap:3px;margin-top:14px}
+  .crrav-sa-dots i{width:11px;height:11px;border-radius:3px;border:1.5px solid #6a6a76;box-sizing:border-box}
+  .crrav-sa-dots i.seen{background:#5fd18a;border-color:#5fd18a}
+  .crrav-sa-dots i.out{background:#f47521;border-color:#f47521}
+  .crrav-sa-dots i.fin{outline:1.5px solid #ffd166;outline-offset:1px}
+  .crrav-sa-leg{margin:6px 0 0;display:flex;flex-wrap:wrap;gap:4px 14px;font:600 11.5px/1 system-ui;color:#9a9aa8}
+  .crrav-sa-leg .seen{color:#5fd18a}.crrav-sa-leg .out{color:#ffb27c}
+  .crrav-sa-seq{margin-top:12px;padding:10px 12px;border-radius:12px;background:#1b2046;border:1px solid rgba(143,168,255,.5);display:flex;flex-direction:column;gap:3px}
+  .crrav-sa-seq span{font:900 9.5px/1 system-ui;letter-spacing:.1em;color:#8fa8ff}
+  .crrav-sa-seq b{font:800 15px/1.2 system-ui;color:#e6eaff}.crrav-sa-seq small{font:600 12px/1.3 system-ui;color:#c9d3ff}
+  .crrav-sa-h{margin:18px 0 4px;font:800 13px/1 system-ui;letter-spacing:.06em;text-transform:uppercase;color:#c9c9d4}
+  .crrav-sa-h small{font-weight:600;color:#8c8c9c;letter-spacing:0;text-transform:none;margin-left:6px}
+  .crrav-sa-mh{margin:14px 0 2px;font:800 11px/1 system-ui;letter-spacing:.08em;text-transform:uppercase;color:#ff9a4d}
+  .crrav-sa-list{list-style:none;margin:0;padding:0}
+  .crrav-sa-r{display:flex;align-items:center;gap:11px;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.07)}
+  .crrav-sa-d{flex:none;width:46px;height:48px;border-radius:11px;background:#1f1f27;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px}
+  .crrav-sa-d b{font:800 18px/1 system-ui}.crrav-sa-d small{font:700 9.5px/1 system-ui;text-transform:uppercase;color:#9a9aa8;letter-spacing:.05em}
+  .crrav-sa-r.first .crrav-sa-d{background:rgba(244,117,33,.22);box-shadow:inset 0 0 0 1.5px #f47521}
+  .crrav-sa-r.fin .crrav-sa-d{box-shadow:inset 0 0 0 1.5px #ffd166}
+  .crrav-sa-r.est .crrav-sa-d{border:1.5px dashed rgba(255,255,255,.3);background:transparent}
+  .crrav-sa-i{flex:1 1 0;min-width:0;display:flex;flex-direction:column;gap:3px}
+  .crrav-sa-i b{font:800 15px/1.2 system-ui}
+  .crrav-sa-i u{text-decoration:none;font:800 9px/1 system-ui;letter-spacing:.06em;text-transform:uppercase;padding:2px 5px;border-radius:5px;background:#ffd166;color:#201700;margin-left:4px;vertical-align:1px}
+  .crrav-sa-i small{font:600 12px/1.3 system-ui;color:#a8a8b4}
+  .crrav-sa-r em{flex:none;font:700 10.5px/1 system-ui;font-style:normal;padding:4px 7px;border-radius:99px;background:rgba(255,255,255,.07);color:#9a9aa8}
+  .crrav-sa-r em.ok{background:rgba(95,209,138,.14);color:#7fe0a6}.crrav-sa-r em.est{background:transparent;border:1px dashed rgba(255,255,255,.3)}
+  .crrav-sa-ib{flex:none;width:40px;height:40px;border-radius:50%;border:1px solid rgba(255,255,255,.16);background:rgba(255,255,255,.05);color:#e4e4ea;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0}
+  .crrav-sa-ib:hover{background:#f47521;color:#1a0b02;border-color:#f47521}
+  .crrav-sa .crrav-calico{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+  .crrav-sa-none,.crrav-sa-empty{padding:16px 2px;font:500 13.5px/1.5 system-ui;color:#b6b6c2}
+  .crrav-sa-foot{position:sticky;bottom:0;display:flex;flex-wrap:wrap;gap:8px;padding:12px 0 calc(12px + env(safe-area-inset-bottom));margin-top:8px;
+    background:linear-gradient(180deg,rgba(20,20,25,0),#141419 28%)}
+  .crrav-sa-btn{flex:1 1 150px;min-height:46px;display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:0 14px;border-radius:13px;
+    border:1px solid rgba(255,255,255,.16);background:#1f1f27;color:#f2f2f4;font:700 13.5px/1 system-ui;cursor:pointer;text-decoration:none;box-sizing:border-box}
+  .crrav-sa-btn.pri{background:#f47521;border-color:#f47521;color:#1a0b02}
+  .crrav-sa-btn:hover{filter:brightness(1.12)}
+  @media (max-width:360px){.crrav-sa-tiles{grid-template-columns:minmax(0,1fr)}.crrav-sa-p{width:56px;height:80px}.crrav-sa-ht h3{font-size:17px}}
+  .crrav-agbtn{position:absolute;left:46px;bottom:8px;z-index:2;width:32px;height:32px;border-radius:50%;background:rgba(10,10,12,.92);
+    border:1px solid rgba(255,255,255,.22);color:#ffb27c;display:flex;align-items:center;justify-content:center;padding:0;cursor:pointer}
+  .crrav-agbtn:hover{background:#f47521;color:#1a0b02;border-color:#f47521}
+  .crrav-agbtn .crrav-calico{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+  .crrav-lactions-more .crrav-agbtn{position:static;width:40px;height:40px}
+  .crrav-dash-ag{margin-top:12px;min-height:44px;padding:0 16px;border-radius:12px;border:1px solid rgba(255,140,60,.5);background:rgba(255,100,10,.12);
+    color:#ffb27c;font:700 13.5px/1 system-ui;cursor:pointer}
+  .crrav-dash-ag:hover{background:rgba(255,100,10,.24);color:#fff}
+
   /* Panneau statistiques */
   .crrav-statswrap{padding:18px 20px 40px;display:flex;flex-direction:column;gap:20px}
 
@@ -15155,7 +15319,9 @@
   // AniList est en panne, l'agenda se construit avec ce qui est en mémoire et le dit.
   const CAL_HORIZONS = [7, 14, 30, 90, 180, 365];
   const CAL_VIEWS = ['agenda', 'week', 'month'];
-  const CAL_FILTERS = ['all', 'late', 'uptodate', 'new', 'fav'];
+  const CAL_FILTERS = ['all', 'mine', 'late', 'uptodate', 'unstarted', 'fav', 'final', 'new', 'sequel'];
+  const CAL_FILTER_LABEL = { all: 'Tout', mine: 'Toutes mes séries', late: 'En retard', uptodate: 'À jour', unstarted: 'À commencer',
+    fav: 'Favoris', final: 'Derniers épisodes', new: 'Toutes les nouveautés', sequel: 'Suites de mes séries' };
   const CAL_PROJ_NOTOTAL = 12;      // semaines projetées quand AniList ne donne pas de total prévu
   const CAL_EST_WEEKS = 8;          // idem pour les dates purement estimées
   const CAL_MAX_EVENTS = 1500;      // garde-fou de rendu
@@ -15218,11 +15384,14 @@
       proj: f.calShowProj !== false,
       est: f.calShowEst === true,
       onlyCr: f.calOnlyCr === true,
+      confirmed: f.calConfirmed === true,
+      q: calUi().q,
     };
   }
   function calUi() {
-    const u = STATE.calUi || (STATE.calUi = { off: 0, sel: null, side: false, open: null, fold: {} });
+    const u = STATE.calUi || (STATE.calUi = { off: 0, sel: null, side: false, open: null, fold: {}, q: '' });
     if (!Number.isInteger(u.off) || u.off < 0) u.off = 0;
+    if (typeof u.q !== 'string') u.q = '';
     return u;
   }
   // Fenêtre [start, end[ réellement affichée, selon la vue.
@@ -15252,9 +15421,9 @@
     const watch = ep && ep.id ? `https://www.crunchyroll.com/watch/${ep.id}` : web;
     return { web, watch };
   }
-  function calEpisodeEvents(opts, now, endTs) {
+  function calEpisodeEvents(opts, now, endTs, onlyId) {
     const events = [], noDate = [];
-    const rows = safeCall(() => estimatedSchedule(), [], 'cal:schedule') || [];
+    const rows = safeCall(() => estimatedSchedule(onlyId ? (STATE.series || []).filter((x) => x && x.id === onlyId) : undefined), [], 'cal:schedule') || [];
     for (const r of rows) {
       const s = r && r.s;
       if (!s || !s.id || IGNORED.has(s.id)) continue;
@@ -15552,6 +15721,10 @@
     uptodate: (e) => e.type !== 'prem' && !e.lateSeries,
     new: (e) => e.type === 'prem',
     fav: (e) => e.type !== 'prem' && e.fav,
+    mine: (e) => e.type !== 'prem',
+    unstarted: (e) => e.type !== 'prem' && !!e.s && !(e.s.seen > 0),
+    final: (e) => e.type === 'ep' && !!e.final,
+    sequel: (e) => e.type === 'prem' && !!e.followed,
   };
   const calTypeRank = { out: 0, ep: 1, prem: 2 };
   function calSort(a, b) {
@@ -15570,6 +15743,13 @@
     // L'agenda garde aussi les premières récemment sorties (avant aujourd'hui) pour le bloc « Vient de sortir ».
     all = all.filter((e) => Number.isFinite(e.ts) && e.ts < endTs
       && (e.ts >= range.start || (opts.view === 'agenda' && e.type === 'prem' && e.released)));
+    // (v4.21.0) Recherche par titre + « dates confirmées » s'appliquent AVANT les compteurs :
+    // les pastilles annoncent donc ce qu'on obtiendrait réellement en les touchant.
+    const qWords = aniNorm(opts.q || '').split(' ').filter(Boolean);
+    if (qWords.length) all = all.filter((e) => { const t = aniNorm(e.title); return qWords.every((w) => t.includes(w)); });
+    if (opts.confirmed) {
+      all = all.filter((e) => (e.type === 'prem' ? (e.precision === 'time' || e.precision === 'day') : e.type === 'ep' ? (e.exact && !e.est) : true));
+    }
     const counts = {};
     for (const k of CAL_FILTERS) counts[k] = all.filter(CAL_FILTER_FN[k]).length;
     let events = all.filter(CAL_FILTER_FN[opts.filter]).sort(calSort);
@@ -15667,6 +15847,7 @@
     cal: '<svg class="crrav-calico" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 2v4M16 2v4M3 10h18M5 5h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z"/></svg>',
     hide: '<svg class="crrav-calico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></svg>',
     dl: '<svg class="crrav-calico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M4 20h16"/></svg>',
+    list: '<svg class="crrav-calico" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></svg>',
     gear: '<svg class="crrav-calico" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h18M6 12h12M10 19h4"/></svg>',
   };
   function calPoster(e) {
@@ -15731,6 +15912,7 @@
         ${sub ? `<div class="crrav-calsub">${sub}</div>` : ''}
         <div class="crrav-calacts">
           <a class="crrav-calqa pri" data-act="cal-link" href="${href}" title="${escapeHtml(watchLbl)}" aria-label="${escapeHtml(watchLbl)}">${CAL_ICO.play}<span>${escapeHtml(watchLbl)}</span></a>
+          ${(e.type !== 'prem' && e.s) ? `<button type="button" class="crrav-calqa" data-act="cal-series" data-id="${escapeHtml(e.id)}" title="Toutes les prochaines sorties de cette série" aria-label="Agenda de la série">${CAL_ICO.list}<span>Série</span></button>` : ''}
           ${canIcs ? `<button type="button" class="crrav-calqa" data-act="cal-ics" data-k="${key}" title="Ajouter à mon agenda (.ics)" aria-label="Ajouter à mon agenda">${CAL_ICO.cal}<span>Agenda</span></button>` : ''}
           <button type="button" class="crrav-calqa" data-ignore="${escapeHtml(e.id)}" data-title="${escapeHtml(e.title)}"
             data-source="${e.source}" data-poster="${escapeHtml(e.poster || '')}" data-synopsis="${escapeHtml(e.synopsis || '')}"
@@ -15773,13 +15955,22 @@
       const past = ts < calStartOfDay(now);
       const cls = ['crrav-calcell', k === today ? 'today' : '', past ? 'past' : '', evs.length ? 'has' : '', ui.sel === k ? 'sel' : ''].filter(Boolean).join(' ');
       const dots = evs.slice(0, 3).map((e) => `<i class="${e.type}"></i>`).join('');
-      const minis = o.mini ? '' : evs.slice(0, 3).map((e) => `<span class="crrav-calmini ${e.type}">${e.precision === 'time' ? calTimeLabel(e.ts).replace(/h00$/, 'h') + ' ' : ''}${escapeHtml(e.title)}</span>`).join('');
-      const more = (!o.mini && evs.length > 3) ? `<span class="crrav-calmore">+${evs.length - 3}</span>` : '';
-      cells += `<button type="button" class="${cls}" data-act="${o.act || 'cal-sel'}" data-day="${k}" aria-label="${d} ${CAL_MONTHS[first.getMonth()]} — ${evs.length} sortie${evs.length > 1 ? 's' : ''}"
-        ${evs.length ? '' : (o.mini ? 'tabindex="-1"' : '')}><span class="crrav-calnum">${d}</span>${evs.length ? `<span class="crrav-caldots">${dots}${evs.length > 3 ? `<em>${evs.length}</em>` : ''}</span>` : ''}${minis}${more}</button>`;
+      const kind = (e) => (e.type === 'prem' ? 'prem' : e.type === 'out' ? 'out' : e.lateSeries ? 'late' : 'ep');
+      let thumbs = '', minis = '', more = '';
+      if (!o.mini && evs.length) {
+        const showT = evs.length <= 4 ? evs : evs.slice(0, 3);
+        thumbs = `<span class="crrav-calthumbs t${Math.min(4, evs.length)}">${showT.map((e) => `<b class="crrav-calth ${kind(e)}" style="--h:${calHue(e.title)}" title="${escapeHtml(e.title)}">${calPoster(e)}</b>`).join('')}${evs.length > 4 ? `<b class="crrav-calth more">+${evs.length - 3}</b>` : ''}</span>`;
+        minis = evs.slice(0, 4).map((e, i) => `<span class="crrav-calmini ${kind(e)}${i === 3 ? ' x4' : ''}" style="--h:${calHue(e.title)}"><b class="crrav-calmp">${calPoster(e)}</b><span class="crrav-calmt">${e.precision === 'time' ? `<em>${calTimeLabel(e.ts).replace(/h00$/, 'h')}</em> ` : ''}${escapeHtml(e.title)}</span></span>`).join('');
+        more = (evs.length > 3 ? `<span class="crrav-calmore m3">+${evs.length - 3} autre${evs.length - 3 > 1 ? 's' : ''}</span>` : '')
+          + (evs.length > 4 ? `<span class="crrav-calmore m4">+${evs.length - 4} autre${evs.length - 4 > 1 ? 's' : ''}</span>` : '');
+      }
+      const wk = ((lead + d - 1) % 7) >= 5 ? ' wk' : '';
+      const heat = !o.mini && evs.length ? ` heat${Math.min(4, Math.ceil(evs.length / 2))}` : '';
+      cells += `<button type="button" class="${cls}${wk}${heat}" data-act="${o.act || 'cal-sel'}" data-day="${k}" aria-label="${d} ${CAL_MONTHS[first.getMonth()]} — ${evs.length} sortie${evs.length > 1 ? 's' : ''}"
+        ${evs.length ? '' : (o.mini ? 'tabindex="-1"' : '')}><span class="crrav-calnumrow"><span class="crrav-calnum">${d}</span>${(!o.mini && evs.length) ? `<span class="crrav-calcnt">${evs.length}</span>` : ''}</span>${o.mini && evs.length ? `<span class="crrav-caldots">${dots}${evs.length > 3 ? `<em>${evs.length}</em>` : ''}</span>` : ''}${thumbs}${minis}${more}</button>`;
     }
     return `<div class="crrav-calmgrid${o.mini ? ' mini' : ''}">
-      ${['L', 'M', 'M', 'J', 'V', 'S', 'D'].map((x) => `<span class="crrav-calwd">${x}</span>`).join('')}${cells}</div>`;
+      ${['L', 'M', 'M', 'J', 'V', 'S', 'D'].map((x) => `<span class="crrav-calwd">${x}</span>`).join('')}${cells}</div>${o.mini ? '' : `<p class="crrav-callegend"><span class="ep">épisode</span><span class="late">en retard</span><span class="prem">nouveauté</span><span class="out">sorti aujourd’hui</span></p>`}`;
   }
 
   function calGroupDays(events) {
@@ -15869,10 +16060,10 @@
     }
     const evs = model.events.filter((e) => calDayKey(e.ts) === sel);
     const ts = new Date(sel + 'T12:00:00').getTime();
-    return `${calMonthGrid(model, model.range.start, {})}
+    return `<div class="crrav-calmonth">${calMonthGrid(model, model.range.start, {})}
       <section class="crrav-agsec crrav-calselday" data-calday="${sel}">${calDayHeader(ts, now, evs.length)}
         <div class="crrav-calcards">${evs.length ? evs.map((e) => calCardHtml(e, now, ui)).join('')
-          : '<p class="crrav-calempty">Rien de prévu ce jour-là.</p>'}</div></section>`;
+          : '<p class="crrav-calempty">Rien de prévu ce jour-là.</p>'}</div></section></div>`;
   }
 
   function calHeroHtml(h, now) {
@@ -15934,10 +16125,33 @@
 
     const seg = [['agenda', 'Agenda'], ['week', 'Semaine'], ['month', 'Mois']]
       .map(([v, l]) => `<button type="button" role="tab" aria-selected="${opts.view === v}" class="${opts.view === v ? 'on' : ''}" data-act="cal-view" data-v="${v}">${l}</button>`).join('');
-    const chipDefs = [['all', 'Tout'], ['late', 'En retard'], ['uptodate', 'À jour'], ['new', 'Nouveautés'], ['fav', 'Favoris ★']];
-    const chips = chipDefs.map(([v, l]) => `<button type="button" class="crrav-calchip${opts.filter === v ? ' on' : ''}" data-act="cal-filter" data-v="${v}" aria-pressed="${opts.filter === v}">${l}<i>${model.counts[v]}</i></button>`).join('');
+    const chip = (v, l, tip) => `<button type="button" class="crrav-calchip${opts.filter === v ? ' on' : ''}${model.counts[v] ? '' : ' zero'}" data-act="cal-filter" data-v="${v}" aria-pressed="${opts.filter === v}" title="${escapeHtml(tip)}">${l}<i>${model.counts[v]}</i></button>`;
+    const chips = `<div class="crrav-calfg">${chip('all', 'Tout', 'Tout afficher')}</div>
+      <div class="crrav-calfg" role="group" aria-label="Mes séries"><span class="crrav-calfl">Mes séries</span>
+        ${chip('mine', 'Toutes', 'Les épisodes de toutes les séries de tes listes')}
+        ${chip('late', 'En retard', 'Séries où il te reste des épisodes déjà sortis')}
+        ${chip('uptodate', 'À jour', 'Séries dont tu as vu tous les épisodes sortis')}
+        ${chip('unstarted', 'À commencer', 'Séries de tes listes que tu n’as pas encore commencées')}
+        ${chip('fav', 'Favoris ★', 'Séries notées 5 étoiles')}
+        ${chip('final', 'Derniers ép.', 'Le dernier épisode de la saison')}</div>
+      <div class="crrav-calfg" role="group" aria-label="Nouveautés"><span class="crrav-calfl">Nouveautés</span>
+        ${chip('new', 'Toutes', 'Séries pas encore dans tes listes : premières à venir ou tout juste sorties')}
+        ${chip('sequel', 'Suites', 'Nouvelles saisons de séries que tu suis déjà')}</div>`;
+    const qv = ui.q || '';
+    const active = opts.filter !== 'all' || !!qv.trim() || opts.confirmed;
+    const filterRow2 = `<div class="crrav-calrow2">
+        <label class="crrav-calsearch"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+          <input type="search" class="crrav-calq" value="${escapeHtml(qv)}" placeholder="Chercher une série…" aria-label="Chercher dans l’agenda" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search" maxlength="80"></label>
+        <button type="button" class="crrav-calchip sm${opts.confirmed ? ' on' : ''}" data-act="cal-opt" data-k="calConfirmed" aria-pressed="${opts.confirmed}" title="Masque les projections et dates estimées : seulement ce qui est annoncé">✓ Dates confirmées</button>
+        ${active ? '<button type="button" class="crrav-calchip sm reset" data-act="cal-reset">✕ Effacer</button>' : ''}
+      </div>`;
+    const resBits = [];
+    if (opts.filter !== 'all') resBits.push(CAL_FILTER_LABEL[opts.filter]);
+    if (qv.trim()) resBits.push(`« ${escapeHtml(qv.trim())} »`);
+    if (opts.confirmed) resBits.push('dates confirmées');
+    const resLine = active ? `<p class="crrav-calres" aria-live="polite"><b>${model.events.length}</b> sortie${model.events.length > 1 ? 's' : ''} · ${resBits.join(' · ')}</p>` : '';
     const periods = opts.view === 'agenda'
-      ? `<div class="crrav-calperiods" role="group" aria-label="Période">${CAL_HORIZONS.map((h) => `<button type="button" class="crrav-calchip sm${opts.horizon === h ? ' on' : ''}" data-act="cal-horizon" data-v="${h}" aria-pressed="${opts.horizon === h}">${CAL_HORIZON_LABEL[h]}</button>`).join('')}</div>`
+      ? `<div class="crrav-calperiods" role="group" aria-label="Période"><span class="crrav-calfl">Période</span>${CAL_HORIZONS.map((h) => `<button type="button" class="crrav-calchip sm${opts.horizon === h ? ' on' : ''}" data-act="cal-horizon" data-v="${h}" aria-pressed="${opts.horizon === h}">${CAL_HORIZON_LABEL[h]}</button>`).join('')}</div>`
       : '';
 
     // Navigation semaine / mois.
@@ -15949,7 +16163,7 @@
         : `${CAL_MONTHS[s.getMonth()]} ${s.getFullYear()}`;
       const max = opts.view === 'week' ? 52 : 12;
       nav = `<div class="crrav-calnav"><button type="button" class="crrav-calnb" data-act="cal-nav" data-d="-1" aria-label="Précédent"${ui.off <= 0 ? ' disabled' : ''}>‹</button>
-        <b>${escapeHtml(title)}</b>
+        <b>${escapeHtml(title)}</b><small class="crrav-calnc">${model.events.length} sortie${model.events.length > 1 ? 's' : ''}</small>
         <button type="button" class="crrav-calnb" data-act="cal-nav" data-d="1" aria-label="Suivant"${ui.off >= max ? ' disabled' : ''}>›</button>
         ${ui.off > 0 ? '<button type="button" class="crrav-calchip sm" data-act="cal-today">Aujourd’hui</button>' : ''}</div>`;
     }
@@ -15965,12 +16179,12 @@
     let body;
     if (!model.events.length && opts.view === 'agenda') {
       const wider = opts.view === 'agenda' ? CAL_HORIZONS.find((h) => h > opts.horizon) : null;
-      const why = opts.filter !== 'all' ? 'Rien ne correspond à ce filtre sur la période.'
+      const why = active ? 'Rien ne correspond à ces filtres sur la période.'
         : (ap ? 'Les dates sont en cours de recherche, elles apparaîtront ici.'
           : 'Aucune sortie datée sur cette période pour l’instant.');
       body = `<div class="crrav-msg"><h3>Rien à afficher</h3><p>${why}</p>
         <div class="crrav-calemptyacts">
-          ${opts.filter !== 'all' ? '<button type="button" class="crrav-calchip" data-act="cal-filter" data-v="all">Tout afficher</button>' : ''}
+          ${active ? '<button type="button" class="crrav-calchip" data-act="cal-reset">Effacer les filtres</button>' : ''}
           ${wider ? `<button type="button" class="crrav-calchip" data-act="cal-horizon" data-v="${wider}">Élargir à ${CAL_HORIZON_LABEL[wider]}</button>` : ''}
           ${!opts.est ? '<button type="button" class="crrav-calchip" data-act="cal-opt" data-k="calShowEst">Inclure les dates estimées</button>' : ''}
         </div></div>`;
@@ -16001,7 +16215,9 @@
       </div>
       ${calHeroHtml(model.hero, now)}
       <div class="crrav-calchips" role="group" aria-label="Filtrer">${chips}</div>
+      ${filterRow2}
       ${periods}
+      ${resLine}
       <div class="crrav-calgrid">
         <div class="crrav-calmain">
           ${notes.join('')}${nav}${body}${noDate}${dbg}
@@ -16012,6 +16228,127 @@
         </aside>
       </div>
     </div></div>`;
+  }
+
+  // ── Agenda d'une série (v4.21.0) ────────────────────────────────────────────────────────────
+  // Fiche détaillée des prochaines sorties d'UNE série : ouverte depuis une carte du panneau, une
+  // carte du calendrier ou la fiche série Crunchyroll. Pur calcul sur STATE.series (aucune requête).
+  function calSeriesModel(id, now) {
+    now = now || Date.now();
+    const s = (STATE.series || []).find((x) => x && x.id === id);
+    if (!s) return null;
+    const ignored = IGNORED.has(id);
+    const ev = ignored ? [] : (safeCall(() => calEpisodeEvents({ proj: true, est: true, horizon: 365 }, now, calAddDays(now, 365), id), { events: [] }, 'cal:series').events || [])
+      .filter((e) => e.id === id && Number.isFinite(e.ts)).sort((a, b) => a.ts - b.ts);
+    const total = (Number.isFinite(s.plannedTotal) && s.plannedTotal > 0) ? s.plannedTotal : null;
+    const nextAbs = ev.length ? ev[0].abs : (s.aniNextNum || null);
+    const released = nextAbs ? Math.max(0, nextAbs - 1) : null;
+    const seenSeason = s.targetSeasonSeen || 0;
+    // Nouvelle saison annoncée (suite de cette série) : dans les nouveautés déjà chargées.
+    const sequels = calPremiereEvents({ onlyCr: false, est: false, proj: true, horizon: 365 }, now, calAddDays(now, 730))
+      .filter((p) => p.followed && p.followed.id === id && !p.released);
+    return {
+      s, id, now, ignored, events: ev, total, released, seenSeason, late: s.remaining > 0 ? s.remaining : 0,
+      first: ev[0] || null, last: ev.length ? ev[ev.length - 1] : null,
+      seasonEnd: (s.seasonEndTs && s.seasonEndTs > now - DAY) ? { ts: s.seasonEndTs, approx: !!s.plannedApprox } : null,
+      sequel: sequels.length ? sequels[0] : null,
+      exactCount: ev.filter((e) => e.exact).length, estCount: ev.filter((e) => e.est).length,
+    };
+  }
+  function calSeriesSheetHtml() {
+    const sa = STATE.serieAgenda;
+    if (!sa || !sa.id) return '';
+    const now = Date.now();
+    const m = safeCall(() => calSeriesModel(sa.id, now), null, 'cal:sa-model');
+    if (!m) {
+      return `<div class="crrav-sa" role="dialog" aria-modal="true" aria-label="Agenda de la série"><div class="crrav-sa-bg" data-act="cal-sa-close"></div>
+        <section class="crrav-sa-sheet"><button type="button" class="crrav-sa-x" data-act="cal-sa-close" aria-label="Fermer">✕</button>
+        <p class="crrav-sa-empty">Cette série n’est pas (encore) chargée. Ouvre « Reste à voir » puis réessaie.</p></section></div>`;
+    }
+    const s = m.s, hue = calHue(s.title);
+    const f = m.first;
+    const when = (e) => {
+      const k = calDayKey(e.ts);
+      return k === calDayKey(now) ? "Aujourd'hui" : k === calDayKey(now + DAY) ? 'Demain' : calDateLabel(e.ts);
+    };
+    const state = m.late > 0 ? `<span class="late">${m.late} ép. de retard</span>` : (s.seen > 0 ? '<span class="ok">À jour ✓</span>' : '<span class="mute">Pas commencée</span>');
+    // Frise d'épisodes de la saison en cours : vus / sortis non vus / à venir.
+    let dots = '';
+    if (m.total && m.total <= 60 && m.released != null) {
+      const out = [];
+      for (let i = 1; i <= m.total; i++) {
+        const st = i <= m.seenSeason ? 'seen' : i <= m.released ? 'out' : 'next';
+        out.push(`<i class="${st}${i === m.total ? ' fin' : ''}" title="E${i}"></i>`);
+      }
+      dots = `<div class="crrav-sa-dots" aria-hidden="true">${out.join('')}</div>
+        <p class="crrav-sa-leg"><span class="seen">vus ${Math.min(m.seenSeason, m.total)}</span><span class="out">sortis non vus ${Math.max(0, m.released - m.seenSeason)}</span><span class="next">à venir ${Math.max(0, m.total - m.released)}</span></p>`;
+    }
+    const tile = (k, v, sub) => `<div class="crrav-sa-t"><small>${k}</small><b>${v}</b>${sub ? `<em>${sub}</em>` : ''}</div>`;
+    const tiles = [
+      f ? tile('Prochain épisode', `${escapeHtml(f.label)}`, [when(f), f.precision === 'time' ? calTimeLabel(f.ts) : 'heure à préciser', calCountdown(f.ts, now)].filter((x, i, a) => a.findIndex((y) => String(y).toLowerCase() === String(x).toLowerCase()) === i).map(escapeHtml).join(' · '))
+        : tile('Prochain épisode', '—', 'date pas encore annoncée'),
+      tile('Sortis', m.released != null ? `${m.released}${m.total ? ' / ' + m.total : ''}` : '—', m.total && m.released != null ? `${Math.max(0, m.total - m.released)} à venir` : ''),
+      m.last ? tile(m.last.final ? 'Dernier épisode' : 'Dernière date connue', escapeHtml(calDateLabel(m.last.ts, new Date(m.last.ts).getFullYear() !== new Date(now).getFullYear())), m.last.exact ? 'annoncé' : 'prévu (rythme hebdo)')
+        : (m.seasonEnd ? tile('Fin de saison', `${m.seasonEnd.approx ? '~ ' : ''}${escapeHtml(calDateLabel(m.seasonEnd.ts))}`, '') : ''),
+      m.late > 0 ? tile('À rattraper', `${m.late} ép.`, 'avant le prochain') : tile('Ton avancée', `${s.seen}/${s.total}`, 'épisodes vus'),
+    ].join('');
+    // Liste des sorties, groupées par mois quand elle est longue.
+    let rows = '', lastMonth = '';
+    for (const e of m.events) {
+      const d = new Date(e.ts);
+      const mk = calMonthKey(e.ts);
+      if (m.events.length > 8 && mk !== lastMonth) { rows += `<h4 class="crrav-sa-mh">${CAL_MONTHS[d.getMonth()]} ${d.getFullYear()}</h4>`; lastMonth = mk; }
+      const tag = e.est ? '<em class="est">estimé</em>' : e.exact ? '<em class="ok">annoncé</em>' : '<em class="mute">prévu</em>';
+      const canIcs = e.precision === 'time' || e.precision === 'day';
+      rows += `<li class="crrav-sa-r${e.first ? ' first' : ''}${e.final ? ' fin' : ''}${e.est ? ' est' : ''}">
+        <span class="crrav-sa-d"><b>${d.getDate()}</b><small>${CAL_MONTHS_SHORT[d.getMonth()]}</small></span>
+        <span class="crrav-sa-i"><b>${escapeHtml(e.label)}${e.final ? ' <u>dernier</u>' : ''}</b>
+          <small>${CAL_DAYS[d.getDay()]} · ${e.precision === 'time' ? calTimeLabel(e.ts) : 'heure à préciser'} · ${escapeHtml(calCountdown(e.ts, now))}</small></span>
+        ${tag}
+        ${canIcs ? `<button type="button" class="crrav-sa-ib" data-act="cal-sa-ics1" data-k="${escapeHtml(e.key)}" title="Ajouter à mon agenda" aria-label="Ajouter ${escapeHtml(e.label)} à mon agenda">${CAL_ICO.cal}</button>` : ''}
+      </li>`;
+    }
+    if (!rows) {
+      rows = `<li class="crrav-sa-none">${m.ignored ? 'Série ignorée : elle n’apparaît pas dans l’agenda. Réaffiche-la depuis Réglages → Ignorées.'
+        : 'Aucune sortie datée pour le moment. AniList n’a pas encore publié le prochain épisode — active « Dates estimées » dans l’agenda pour voir une projection.'}</li>`;
+    }
+    const sequel = m.sequel ? `<div class="crrav-sa-seq"><span>NOUVELLE SAISON</span><b>${escapeHtml(m.sequel.title)}</b><small>${escapeHtml(calPremiereWhen(m.sequel, now))}</small></div>` : '';
+    const href = crUrl(m.late > 0 ? calSeriesUrls(s, s.next).watch : calSeriesUrls(s, s.next).web);
+    const icsOk = m.events.some((e) => e.precision === 'time' || e.precision === 'day');
+    return `<div class="crrav-sa" role="dialog" aria-modal="true" aria-label="Agenda de ${escapeHtml(s.title)}" style="--h:${hue}">
+      <div class="crrav-sa-bg" data-act="cal-sa-close"></div>
+      <section class="crrav-sa-sheet">
+        <button type="button" class="crrav-sa-x" data-act="cal-sa-close" aria-label="Fermer">✕</button>
+        <header class="crrav-sa-head">
+          <div class="crrav-sa-p">${calPoster({ poster: s.poster, title: s.title })}</div>
+          <div class="crrav-sa-ht"><span class="crrav-sa-kick">AGENDA DE LA SÉRIE</span><h3>${escapeHtml(s.title)}</h3>
+            <p>${state}${m.estCount && !m.exactCount ? ' · <span class="mute">dates estimées</span>' : ''}</p></div>
+        </header>
+        <div class="crrav-sa-tiles">${tiles}</div>
+        ${dots}
+        ${sequel}
+        <h4 class="crrav-sa-h">Prochaines sorties <small>${m.events.length ? `${m.events.length} épisode${m.events.length > 1 ? 's' : ''}` : ''}</small></h4>
+        <ul class="crrav-sa-list">${rows}</ul>
+        <footer class="crrav-sa-foot">
+          <a class="crrav-sa-btn pri" data-act="cal-link" href="${href}">${CAL_ICO.play}<span>${m.late > 0 ? 'Rattraper' : 'Voir la série'}</span></a>
+          ${icsOk ? `<button type="button" class="crrav-sa-btn" data-act="cal-sa-ics">${CAL_ICO.dl}<span>Tout ajouter à mon agenda</span></button>` : ''}
+          <button type="button" class="crrav-sa-btn" data-act="cal-sa-focus" data-id="${escapeHtml(s.id)}">${CAL_ICO.cal}<span>Voir dans l’agenda</span></button>
+        </footer>
+      </section></div>`;
+  }
+  function openSeriesAgenda(id) {
+    if (!id) return;
+    STATE.serieAgenda = { id: String(id) };
+    if (root && root.style.display !== 'none') { forceRender(); return; }
+    STATE.tab = 'calendrier';
+    SESSION_NAV.tab = STATE.tab;
+    saveSessionNav(SESSION_NAV);
+    open();
+  }
+  function agendaBtn(s) {
+    if (!s || !s.id || IGNORED.has(s.id)) return '';
+    if (!(s.airing || (s.aniNextTs && s.aniNextTs > Date.now()))) return '';
+    return `<button type="button" class="crrav-agbtn" data-act="cal-series" data-id="${escapeHtml(s.id)}" title="Agenda des prochaines sorties de cette série" aria-label="Agenda de la série">${CAL_ICO.cal}</button>`;
   }
 
   // Actions du calendrier (délégation : voir le gestionnaire de clics principal).
@@ -16040,7 +16377,29 @@
       if (k === 'calShowProj') f.calShowProj = !(f.calShowProj !== false);
       else if (k === 'calShowEst') f.calShowEst = !(f.calShowEst === true);
       else if (k === 'calOnlyCr') f.calOnlyCr = !(f.calOnlyCr === true);
+      else if (k === 'calConfirmed') f.calConfirmed = !(f.calConfirmed === true);
       redo(true);
+      return true;
+    }
+    if (a === 'cal-reset') { f.calFilter = 'all'; f.calConfirmed = false; ui.q = ''; redo(true); return true; }
+    if (a === 'cal-series') { openSeriesAgenda(act.dataset.id); return true; }
+    if (a === 'cal-sa-close') { STATE.serieAgenda = null; forceRender(); return true; }
+    if (a === 'cal-sa-ics' || a === 'cal-sa-ics1') {
+      const sa = STATE.serieAgenda;
+      const m = sa ? calSeriesModel(sa.id, Date.now()) : null;
+      if (m) {
+        const list = a === 'cal-sa-ics' ? m.events : m.events.filter((e) => e.key === act.dataset.k);
+        calDownloadIcs(list, `sorties-${String(m.s.title).replace(/[^A-Za-z0-9]+/g, '-').slice(0, 40)}.ics`);
+      }
+      return true;
+    }
+    if (a === 'cal-sa-focus') {
+      const sa = STATE.serieAgenda;
+      const m = sa ? calSeriesModel(sa.id, Date.now()) : null;
+      STATE.serieAgenda = null;
+      if (m) { ui.q = m.s.title; f.calView = 'agenda'; f.calFilter = 'all'; f.calHorizon = 365; ui.off = 0; ui.sel = null; saveFilters(); }
+      STATE.tab = 'calendrier'; SESSION_NAV.tab = STATE.tab; saveSessionNav(SESSION_NAV);
+      forceRender(); calEnsureFuture(calNeededDays(calOpts(), Date.now()));
       return true;
     }
     if (a === 'cal-nav') {
@@ -16050,7 +16409,11 @@
       return true;
     }
     if (a === 'cal-today') { ui.off = 0; ui.sel = null; redo(false); return true; }
-    if (a === 'cal-sel') { ui.sel = act.dataset.day; redo(false); return true; }
+    if (a === 'cal-sel') {
+      ui.sel = act.dataset.day; redo(false);
+      safeCall(() => { const el = root.querySelector('.crrav-calselday'); if (el && el.scrollIntoView && root.clientWidth < 1100) el.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }, undefined, 'cal:sel-scroll');
+      return true;
+    }
     if (a === 'cal-fold') {
       const mk = act.dataset.m;
       ui.fold[mk] = !(act.classList && act.classList.contains('folded'));
@@ -20376,7 +20739,7 @@
       el.className = 'crrav-modals';
       root.appendChild(el);
     }
-    el.innerHTML = listPickerHtml() + confirmModalHtml();
+    el.innerHTML = listPickerHtml() + confirmModalHtml() + calSeriesSheetHtml();
   }
 
   function renderNow() {
@@ -20832,6 +21195,18 @@
         const s = root.querySelector('.crrav-search-ignored');
         if (s) { s.focus(); s.setSelectionRange(s.value.length, s.value.length); }
       }, 180));
+    }
+
+    // (v4.21.0) Recherche dans l'agenda : filtre local, focus repris après le rendu.
+    const calq = content.querySelector('.crrav-calq');
+    if (calq && !calq.dataset.wired) {
+      calq.dataset.wired = '1';
+      calq.addEventListener('input', debounce((e) => {
+        calUi().q = String(e.target.value || '').slice(0, 80);
+        forceRender();
+        const s = root.querySelector('.crrav-calq');
+        if (s) { s.focus(); s.setSelectionRange(s.value.length, s.value.length); }
+      }, 200));
     }
   }
 
@@ -22270,7 +22645,10 @@
   }
 
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && root && root.style.display !== 'none') close();
+    if (e.key === 'Escape' && root && root.style.display !== 'none') {
+      if (STATE.serieAgenda) { STATE.serieAgenda = null; forceRender(); return; }
+      close();
+    }
   });
 
   // ─────────────────────────────────────────────────────────────
@@ -23231,7 +23609,7 @@
             : '<b class="dim">date pas encore annoncée</b>'}</div>
           <div class="c"><small>Épisodes sortis</small><b>${p.released}${total ? ` / ${total}` : ''}</b>${pct != null ? `<span class="bar"><i style="width:${pct}%"></i></span>` : ''}</div>
           ${end ? `<div class="c"><small>Fin de saison</small><b>${p.endApprox ? '~ ' : ''}${crpDate(end)}</b></div>` : ''}
-        </div></div>`;
+        </div>${sid ? `<button type="button" class="crrav-dash-ag" data-crrav-seriesag="${escapeHtml(sid)}">📅 Agenda des prochaines sorties</button>` : ''}</div>`;
     }
     const genres = (d.genres || []).length ? `<div class="crrav-dash-tags">${d.genres.map((g) => `<span>${escapeHtml(g)}</span>`).join('')}</div>` : '';
     return `<div class="crrav-dash-in">
@@ -24745,6 +25123,15 @@
         const m = mclose.closest('[role="menu"]');
         if (m && m.isConnected) document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
       }, 120);
+      return;
+    }
+    const seriesag = e.target.closest('[data-crrav-seriesag]');
+    if (seriesag) {
+      e.preventDefault();
+      e.stopPropagation();
+      const sid = seriesag.dataset.crravSeriesag;
+      if ((STATE.series || []).some((x) => x && x.id === sid)) safeCall(() => openSeriesAgenda(sid), undefined, 'crp:seriesAgenda');
+      else safeCall(openCalendar, undefined, 'crp:openCalendar');
       return;
     }
     const calopen = e.target.closest('[data-crrav-calopen]');
