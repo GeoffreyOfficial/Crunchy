@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      4.34.0
+// @version      4.35.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '4.34.0';
+  const SCRIPT_VERSION = '4.35.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -13639,6 +13639,18 @@
   .crrav-caldlab b{font:800 12px/1.1 system-ui;letter-spacing:.08em;text-transform:uppercase}
   .crrav-caldayh.today .crrav-caldlab b{color:#ffb27c}
   .crrav-caldlab small{font:600 11.5px/1.2 system-ui;color:#9a9aa8}
+  /* (v4.35.0) Titre de jour simplifié : « Vendredi 30 Octobre » puis « 3 sorties ». */
+  .crrav-cal .crrav-caldayh.dt{padding:14px 2px 6px}
+  .crrav-cal .crrav-caldayh.dt .crrav-caldlab{gap:3px}
+  .crrav-cal .crrav-caldayh.dt .crrav-caldlab b{display:flex;flex-wrap:wrap;align-items:center;gap:3px 10px;font:800 19px/1.15 system-ui;letter-spacing:-.01em;text-transform:none;color:#f2f2f4}
+  .crrav-cal .crrav-caldayh.dt.today .crrav-caldlab b{color:#ffb27c}
+  .crrav-cal .crrav-agsec.past .crrav-caldayh.dt .crrav-caldlab b{color:#9a9aa8}
+  .crrav-cal .crrav-agsec.empty .crrav-caldayh.dt{padding:6px 2px}
+  .crrav-cal .crrav-agsec.empty .crrav-caldayh.dt .crrav-caldlab{flex-direction:row;flex-wrap:wrap;align-items:baseline;gap:2px 10px}
+  .crrav-cal .crrav-agsec.empty .crrav-caldayh.dt .crrav-caldlab b{font-size:14px}
+  @container cal (min-width:560px){ .crrav-cal .crrav-caldayh.dt .crrav-caldlab b{font-size:24px} .crrav-cal .crrav-caldayh.dt{padding:18px 2px 8px} .crrav-cal .crrav-agsec.empty .crrav-caldayh.dt .crrav-caldlab b{font-size:16px} }
+  .crrav-cal[data-view="week"] .crrav-caldayh.dt .crrav-caldlab b{font-size:15px}
+  .crrav-cal[data-view="week"] .crrav-caldayh.dt{flex-direction:column;align-items:flex-start}
   .crrav-agsec.past{opacity:1}
   .crrav-agsec.empty .crrav-caldayh{padding:6px 2px}
   .crrav-cal .crrav-agsec.empty .crrav-caldayh{padding:5px 2px;gap:8px;align-items:baseline}
@@ -14054,7 +14066,7 @@
   .crrav-cal .crrav-calp{position:relative;overflow:hidden}
   .crrav-cal .crrav-calp::after{content:'';position:absolute;top:0;bottom:0;left:0;width:34%;pointer-events:none;z-index:3;background:linear-gradient(90deg,transparent,rgba(255,255,255,.22),transparent);transform:translateX(-130%) skewX(-18deg)}
   @media (hover:hover) and (pointer:fine){ .crrav-cal .crrav-calcard:hover .crrav-calp::after{animation:crrav-sheen .9s ease-out .05s 1 both} }
-  .crrav-cal .crrav-caldayh.today .crrav-caldnum{animation:crrav-pulse 2.4s ease-out infinite;border-radius:10px}
+  .crrav-cal .crrav-caldayh.today .crrav-calwhen{animation:crrav-pulse 2.4s ease-out infinite}
   .crrav-cal .crrav-calwhen.today{animation:crrav-glow 2.2s ease-in-out infinite}
   .crrav-cal .crrav-calnew,.crrav-cal .crrav-calvu.todo{animation:crrav-glow 2.8s ease-in-out infinite}
   .crrav-cal .crrav-calchip,.crrav-cal .crrav-calseg button,.crrav-cal .crrav-calib,.crrav-cal .crrav-calnb,.crrav-cal .crrav-calqa{transition:background .2s,color .2s,border-color .2s,transform .18s cubic-bezier(.2,.85,.25,1),filter .2s,box-shadow .2s}
@@ -14094,8 +14106,11 @@
   .crrav-cal .crrav-calinfo{flex:1 1 0;min-height:0;min-width:0;display:flex;flex-direction:column;gap:4px;overflow:hidden}
   .crrav-cal .crrav-calgenres{flex:0 0 auto;display:flex;flex-wrap:nowrap;gap:4px;overflow:hidden;min-width:0;-webkit-mask-image:linear-gradient(90deg,#000 88%,transparent);mask-image:linear-gradient(90deg,#000 88%,transparent)}
   .crrav-cal .crrav-calgenres span{flex:0 0 auto;font:700 9.5px/1 system-ui;padding:3px 7px;border-radius:999px;background:hsla(var(--h,24),70%,55%,.2);color:hsl(var(--h,24),85%,78%);border:1px solid hsla(var(--h,24),70%,60%,.35);white-space:nowrap}
-  .crrav-cal .crrav-calsyn{flex:1 1 0;min-height:0;margin:0;overflow:hidden;overflow-wrap:anywhere;font:500 10.5px/1.35 system-ui;color:#c4c4d0;
-    -webkit-mask-image:linear-gradient(180deg,#000 calc(100% - 18px),transparent);mask-image:linear-gradient(180deg,#000 calc(100% - 18px),transparent)}
+  /* (v4.35.0) Résumé DÉFILABLE (molette / doigt) : on peut tout lire, la page ne bouge pas pendant qu'on le fait défiler. */
+  .crrav-cal .crrav-calsyn{flex:1 1 0;min-height:0;margin:0;padding-right:4px;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;touch-action:pan-y;-webkit-overflow-scrolling:touch;
+    overflow-wrap:anywhere;font:500 10.5px/1.35 system-ui;color:#c4c4d0;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.35) transparent}
+  .crrav-cal .crrav-calsyn::-webkit-scrollbar{width:4px}
+  .crrav-cal .crrav-calsyn::-webkit-scrollbar-thumb{background:rgba(255,255,255,.35);border-radius:4px}
   .crrav-cal .crrav-calstar i{display:inline-block;width:1px;height:8px;margin:0 5px;background:rgba(255,255,255,.35);vertical-align:-1px}
   .crrav-cal .crrav-calstar em{font-style:normal;color:#8fb8ff}
   @container ct (min-width:230px){ .crrav-cal .crrav-calsyn{font-size:11.5px} .crrav-cal .crrav-calgenres span{font-size:10px} }
@@ -16475,6 +16490,41 @@
     return Number.isFinite(r) && r > 0 ? r : null;
   }
   function calAniOf(v) { return Number.isFinite(v) && v > 0 ? v / 20 : null; }
+  // (v4.35.0) Les notes sont celles de l'ANIMÉ, pas de l'épisode : on les rassemble par fiche Crunchyroll ET par titre depuis toutes les
+  // sources connues (tes séries, catalogue Crunchyroll, annonces et séries en cours AniList) pour que chaque carte ait les DEUX.
+  let calScoreIdx = null, calRatingsVer = 0;
+  function calScoreIndex() {
+    const sig = [(STATE.series || []).length, ((STATE.aniLive || {}).items || []).length, ((STATE.aniFut || {}).items || []).length,
+      ((STATE.crNew || {}).items || []).length, ((STATE.crSeason || {}).items || []).length, calRatingsVer].join('|');
+    if (calScoreIdx && calScoreIdx.sig === sig) return calScoreIdx;
+    const byId = new Map(), byTitle = new Map();
+    const merge = (map, key, cr, ani) => {
+      if (!key) return;
+      const o = map.get(key) || { cr: null, ani: null };
+      if (o.cr == null && cr != null) o.cr = cr;
+      if (o.ani == null && ani != null) o.ani = ani;
+      map.set(key, o);
+    };
+    const add = (ids, titles, cr, ani) => {
+      for (const id of ids) if (id) merge(byId, id, cr, ani);
+      for (const t of titles) { const n = aniNorm(t); if (n) merge(byTitle, n, cr, ani); }
+    };
+    for (const s of (STATE.series || [])) if (s) add([s.id], [s.title], calScoreOf(s) ?? calRatingOf(s.id), calAniScoreOf(s));
+    for (const it of [].concat(((STATE.aniLive || {}).items) || [], ((STATE.aniFut || {}).items) || [])) {
+      if (it) add([it.crId], it.titles || [it.title], it.crId ? calRatingOf(it.crId) : null, calAniOf(it.aniScore));
+    }
+    for (const it of [].concat(((STATE.crNew || {}).items) || [], ((STATE.crSeason || {}).items) || [])) {
+      if (it) add([it.id, it.crId], [it.title], calRatingOf(it.id), null);
+    }
+    calScoreIdx = { sig, byId, byTitle };
+    return calScoreIdx;
+  }
+  function calScoresOf(e) {
+    const X = calScoreIndex();
+    const cand = [X.byId.get(e.crId), X.byId.get(e.id), X.byTitle.get(aniNorm(e.title))].filter(Boolean);
+    const pick = (own, k) => { if (Number.isFinite(own) && own > 0) return own; for (const c of cand) if (c[k] != null) return c[k]; return null; };
+    return { cr: pick(e.score, 'cr'), ani: pick(e.ani, 'ani') };
+  }
   // Les notes manquantes (séries du catalogue / annoncées) sont lues en fond, avec le cache habituel (21 j), puis la vue se redessine.
   let calRatingsRunning = false;
   async function calEnsureRatings() {
@@ -16497,10 +16547,10 @@
       }, 2);
       for (const it of unresolved) if (it.crId) ids.add(it.crId);
       const todo = [...ids].filter((id) => !mine.has(id) && cacheGet('rating:' + id, RATING_TTL) == null).slice(0, 120);
-      if (!todo.length) { if (resolved) render(); return; }
+      if (!todo.length) { if (resolved) { calRatingsVer++; render(); } return; }
       let changed = 0;
       await pool(todo, async (id) => { const v = await getRating(id); if (v != null) changed++; }, Math.max(2, Math.min(4, paceLimit())));
-      if (changed || resolved) { LOG(`calendrier : ${changed} note(s) lue(s) pour le catalogue`); render(); }
+      if (changed || resolved) { calRatingsVer++; LOG(`calendrier : ${changed} note(s) lue(s) pour le catalogue`); render(); }
     } catch (e) { safeCall.log(e, 'calEnsureRatings'); }
     finally { calRatingsRunning = false; }
   }
@@ -16800,8 +16850,9 @@
       : (e.type === 'out' && !e.seen) || e.late > 0 ? 'Regarder' : 'Voir la série';
     const watchShort = e.type === 'prem' || e.type === 'air' ? 'Regarder' : watchLbl;
     const igLabel = e.type === 'prem' ? 'Ignorer cette nouveauté' : 'Ignorer cette série';
-    const aniN = Number.isFinite(e.ani) && e.ani > 0 ? e.ani : calAniScoreOf(e.s);
-    const crN = Number.isFinite(e.score) && e.score > 0 ? e.score : null;
+    const sc = calScoresOf(e);
+    const aniN = sc.ani || calAniScoreOf(e.s);
+    const crN = sc.cr;
     const star = (crN || aniN)
       ? `<span class="crrav-calstar" title="${[crN ? 'Crunchyroll ' + crN.toFixed(1) + '/5' : '', aniN ? 'AniList ' + aniN.toFixed(1) + '/5' : ''].filter(Boolean).join(' · ')}">${crN ? `★ ${crN.toFixed(1)}` : ''}${crN && aniN ? '<i></i>' : ''}${aniN ? `<em>AL ★ ${aniN.toFixed(1)}</em>` : ''}</span>` : '';
     // (v4.33.0) Genres + résumé : visibles dans le détail (survol sur PC, toucher sur mobile), pour TOUTES les cartes.
@@ -16846,13 +16897,14 @@
   function calDayHeader(ts, now, count, extra, showWhen) {
     const d = new Date(ts);
     const k = calDayKey(ts), tk = calDayKey(now), mk = calDayKey(now + DAY);
-    // (v4.34.0) Le numéro est déjà en gros : la ligne du bas donne le MOIS (jamais le jour deux fois). Seul « aujourd'hui » a un badge.
+    // (v4.35.0) Un seul titre lisible (« Vendredi 30 Octobre ») + le nombre de sorties dessous. « aujourd'hui » garde son badge ; demain / hier sont dits en petit.
+    const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
     const rel = k === mk ? 'Demain' : k === calDayKey(now - DAY) ? 'Hier' : '';
-    const lab = k === tk ? (showWhen ? CAL_DAYS[d.getDay()] : "Aujourd'hui") : (rel || CAL_DAYS[d.getDay()]);
-    const hot = k === tk ? ' today' : '';
-    const sub = [rel ? CAL_DAYS[d.getDay()] : '', CAL_MONTHS_SHORT[d.getMonth()]].filter(Boolean).join(' · ');
-    return `<header class="crrav-caldayh${hot}"><span class="crrav-caldnum">${d.getDate()}</span>
-      <span class="crrav-caldlab"><b>${escapeHtml(lab)}${showWhen && k === tk ? '<span class="crrav-calwhen today">aujourd’hui</span>' : ''}</b><small>${sub}${count != null ? ` · ${count} sortie${count > 1 ? 's' : ''}` : ''}${extra || ''}</small></span></header>`;
+    const title = `${cap(CAL_DAYS[d.getDay()])} ${d.getDate()} ${cap(CAL_MONTHS[d.getMonth()])}`;
+    const parts = [rel, count != null ? `${count} sortie${count > 1 ? 's' : ''}` : ''].filter(Boolean);
+    const small = (parts.join(' · ') + (extra || '')).replace(/^ · /, '');
+    return `<header class="crrav-caldayh dt${k === tk ? ' today' : ''}">
+      <span class="crrav-caldlab"><b>${escapeHtml(title)}${k === tk ? '<span class="crrav-calwhen today">aujourd’hui</span>' : ''}</b>${small ? `<small>${small}</small>` : ''}</span></header>`;
   }
 
   // Mini-grille mensuelle (utilisée seule en vue Mois, en réduit dans le panneau latéral).
@@ -22442,6 +22494,17 @@
         if (el.open) statsAccordionOpen.add(id); else statsAccordionOpen.delete(id);
       }, true);
       let scrollSaveTimer = null;
+      // (v4.35.0) Molette sur le détail d'une carte du calendrier : elle fait défiler le RÉSUMÉ (où que soit la souris sur le voile) au lieu de la page.
+      root.addEventListener('wheel', (e) => {
+        try {
+          const calc = e.target && e.target.closest && e.target.closest('.crrav-cal .crrav-calc');
+          const syn = calc && calc.querySelector('.crrav-calsyn');
+          if (!syn || syn.scrollHeight <= syn.clientHeight + 1) return;
+          const up = e.deltaY < 0;
+          if ((up && syn.scrollTop <= 0) || (!up && syn.scrollTop + syn.clientHeight >= syn.scrollHeight - 1)) return;
+          syn.scrollTop += e.deltaY; e.preventDefault();
+        } catch (_) { /* ignore */ }
+      }, { passive: false });
       root.addEventListener('scroll', () => {
         clearTimeout(scrollSaveTimer);
         scrollSaveTimer = setTimeout(() => {
