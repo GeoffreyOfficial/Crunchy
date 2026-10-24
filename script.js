@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      4.35.0
+// @version      4.36.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '4.35.0';
+  const SCRIPT_VERSION = '4.36.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -13645,10 +13645,16 @@
   .crrav-cal .crrav-caldayh.dt .crrav-caldlab b{display:flex;flex-wrap:wrap;align-items:center;gap:3px 10px;font:800 19px/1.15 system-ui;letter-spacing:-.01em;text-transform:none;color:#f2f2f4}
   .crrav-cal .crrav-caldayh.dt.today .crrav-caldlab b{color:#ffb27c}
   .crrav-cal .crrav-agsec.past .crrav-caldayh.dt .crrav-caldlab b{color:#9a9aa8}
-  .crrav-cal .crrav-agsec.empty .crrav-caldayh.dt{padding:6px 2px}
+  .crrav-cal .crrav-agsec + .crrav-agsec{border-top:1px solid rgba(255,255,255,.05)}
+  /* Jours vides : une simple ligne discrète (pas de gros titre ni de bloc). */
+  .crrav-cal .crrav-agsec.empty{border-top:0}
+  .crrav-cal .crrav-agsec.empty .crrav-caldayh.dt{padding:5px 2px;opacity:.55}
+  .crrav-cal .crrav-agsec.empty .crrav-caldayh.dt .crrav-caldlab b{font-weight:600;color:#8a8a98}
+  .crrav-cal .crrav-agsec.empty .crrav-caldayh.dt .crrav-caldlab small{font-weight:500;font-size:11px;color:#6c6c7a}
+  .crrav-cal .crrav-agsec.empty .crrav-caldayh.dt .crrav-caldlab small::before{content:'· '}
   .crrav-cal .crrav-agsec.empty .crrav-caldayh.dt .crrav-caldlab{flex-direction:row;flex-wrap:wrap;align-items:baseline;gap:2px 10px}
   .crrav-cal .crrav-agsec.empty .crrav-caldayh.dt .crrav-caldlab b{font-size:14px}
-  @container cal (min-width:560px){ .crrav-cal .crrav-caldayh.dt .crrav-caldlab b{font-size:24px} .crrav-cal .crrav-caldayh.dt{padding:18px 2px 8px} .crrav-cal .crrav-agsec.empty .crrav-caldayh.dt .crrav-caldlab b{font-size:16px} }
+  @container cal (min-width:560px){ .crrav-cal .crrav-caldayh.dt .crrav-caldlab b{font-size:24px} .crrav-cal .crrav-caldayh.dt{padding:18px 2px 8px} .crrav-cal .crrav-agsec.empty .crrav-caldayh.dt{padding:6px 2px} .crrav-cal .crrav-agsec.empty .crrav-caldayh.dt .crrav-caldlab b{font-size:14px} }
   .crrav-cal[data-view="week"] .crrav-caldayh.dt .crrav-caldlab b{font-size:15px}
   .crrav-cal[data-view="week"] .crrav-caldayh.dt{flex-direction:column;align-items:flex-start}
   .crrav-agsec.past{opacity:1}
@@ -13979,7 +13985,8 @@
   .crrav-calcell.past:not(.has){opacity:.62}
   .crrav-calnav{flex-wrap:wrap;gap:6px 10px}
   /* Jours passés / aujourd'hui / à venir : lisibles d'un coup d'œil. */
-  .crrav-cal .crrav-agsec.past{background:rgba(255,255,255,.028);border-radius:14px;padding:0 4px 6px;margin-top:6px}
+  /* (v4.36.0) Plus de panneau plus clair sur les jours passés : tous les jours se présentent pareil, séparés d'un filet discret. */
+  .crrav-cal .crrav-agsec.past{background:none;padding:0;margin-top:0}
   .crrav-cal .crrav-agsec.past .crrav-caldnum{color:#6c6c7a}
   .crrav-cal .crrav-agsec.past .crrav-caldlab b{color:#8a8a98}
   .crrav-calwhen{display:inline-block;margin-left:8px;font:800 9px/1 system-ui;letter-spacing:.1em;text-transform:uppercase;padding:3px 6px;border-radius:999px;vertical-align:1px;
