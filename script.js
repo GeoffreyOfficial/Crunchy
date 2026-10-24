@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      4.23.0
+// @version      4.24.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '4.23.0';
+  const SCRIPT_VERSION = '4.24.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -283,7 +283,7 @@
     newPremieresWindowDays: 10,   // « déjà sorties » : épisode 1 sorti il y a moins de … jours
                                    // (v4.2.1) 0 = seulement ceux sortis AUJOURD'HUI : dès le lendemain,
                                    // la série n'est plus dans Nouveautés
-    calFutureEnabled: true,       // (v4.19.0) Calendrier : nouveautés annoncées jusqu'à un an à l'avance (AniList)
+    calFutureEnabled: true,       // (v4.24.0) Calendrier : nouvelles séries et « Tout Crunchyroll » lus directement chez Crunchyroll
     newPremieresUpcomingDays: 30, // « à venir » : épisode 1 prévu dans moins de … jours (pas
                                    // encore diffusé) — les deux cas cohabitent dans le bloc,
                                    // visuellement distingués (voir newPremiereCard)
@@ -901,24 +901,13 @@
     { key: 'askListEachTime', label: 'Demander la liste à chaque ajout depuis Découverte', type: 'bool',
       help: 'Désactivé : le bouton + ajoute directement à la liste par défaut ci-dessus. Activé : un choix de liste est proposé à chaque ajout.',
       impact: 'discover', sub: 'discoverLists' },
-    { key: 'discoverNewPremieres', label: 'Calendrier — bloc « Nouveautés » (épisode 1 tout juste sorti)',
-      type: 'bool',
-      help: 'Repère, via AniList, les séries dont l’épisode 1 vient de sortir et l’épisode 2 pas encore — une façon de découvrir les nouveaux simulcasts. Les cartes renvoient vers une recherche Crunchyroll (pas de fiche précise : AniList ne connaît pas les identifiants Crunchyroll). Si tu ne l’ajoutes pas à une liste, une série disparaît d’elle-même du bloc dès que l’épisode 2 sort.',
-      impact: 'newpremieres' },
-    { key: 'newPremieresWindowDays', label: 'Nouveautés — « déjà sorti » depuis moins de',
+    { key: 'newPremieresWindowDays', label: 'Calendrier — « Vient de sortir » : nouvelles séries sorties depuis moins de',
       type: 'int', min: 0, max: 60, unit: 'j',
-      help: 'Une série quitte le bloc une fois ce délai dépassé (ou dès que l’épisode 2 sort, ce qui arrive en premier). 0 = seulement les sorties du jour : dès le lendemain, elle n’apparaît plus.',
+      help: 'Dans l’Agenda, le bloc « Vient de sortir » garde les nouvelles séries (épisode 1 lu chez Crunchyroll) sorties depuis moins de ce délai. 0 = seulement celles du jour. Les vues Semaine et Mois montrent toujours la date réelle.',
       impact: 'newpremieres' },
-    { key: 'newPremieresUpcomingDays', label: 'Nouveautés — « à venir » dans moins de',
-      type: 'int', min: 1, max: 60, unit: 'j',
-      help: 'Épisode 1 pas encore sorti mais prévu dans ce délai (badge « Bientôt »).',
-      impact: 'newpremieres' },
-    { key: 'newPremieresTarget', label: 'Nouveautés — nombre de cartes affichées',
-      type: 'int', min: 1, max: 60, unit: 'cartes',
-      impact: 'newpremieres' },
-    { key: 'calFutureEnabled', label: 'Calendrier — nouveautés annoncées plus loin dans l’année',
+    { key: 'calFutureEnabled', label: 'Calendrier — nouvelles séries et « Tout Crunchyroll »',
       type: 'bool',
-      help: 'Va chercher chez AniList les séries pas encore sorties (jusqu’à un an à l’avance) pour les placer dans l’agenda : date exacte quand elle est connue, sinon le mois ou la saison. Les séries ignorées n’y apparaissent jamais. Désactivé, l’agenda ne montre que tes séries en cours et les nouveautés des prochains jours.',
+      help: 'Lit directement le catalogue Crunchyroll (séries ajoutées récemment, catalogue de la saison) pour afficher les nouvelles séries et les épisodes hors de tes listes. Les séries ignorées n’y apparaissent jamais. Désactivé, l’agenda ne montre que tes propres séries.',
       impact: 'calfuture' },
   ];
   const SETTINGS_KEYS = SETTINGS_SCHEMA.map((s) => s.key);
@@ -2675,7 +2664,7 @@
   // (fix) 'watchedids:' et 'anilist:' inclus : ce sont les entrées les plus volumineuses
   // (historique de visionnage détaillé, et schedule/genres/tags par série) — sans elles,
   // la purge tapait sur des entrées bien plus légères en épargnant les grosses.
-  const EVICTABLE = ['rating:', 'myrating:', 'series:', 'series-en:', 'seasoncount:', 'snapshot', 'crmatch:', 'watchedids:', 'anilist:', 'discep:', 'discbrowse:', 'nugget:', 'favrecs:', 'calfuture:', 'calair:', 'crnew:', 'crnewep:'];
+  const EVICTABLE = ['rating:', 'myrating:', 'series:', 'series-en:', 'seasoncount:', 'snapshot', 'crmatch:', 'watchedids:', 'anilist:', 'discep:', 'discbrowse:', 'nugget:', 'favrecs:', 'calfuture:', 'calair:', 'crnew:', 'crnewep:', 'crseason:'];
   function evictOldest(fraction) {
     let evicted = eps3EvictOldest(fraction);
     const entries = Object.keys(BIGCACHE)
@@ -6257,14 +6246,11 @@
     // (v4.19.0) Calendrier : vue, période, filtre et options (validés par calOpts).
     calView: 'agenda',         // 'agenda' | 'week' | 'month'
     calHorizon: 90,            // jours : 7 · 14 · 30 · 90 · 180 · 365
-    calFilter: 'all',          // 'all' | 'late' | 'uptodate' | 'new' | 'fav'
-    calShowProj: true,         // épisodes suivants prévus (projection hebdomadaire)
-    calShowEst: false,         // séries sans date AniList, déduites du rythme
-    calOnlyCr: false,          // nouveautés : seulement celles annoncées sur Crunchyroll
+    calFilter: 'all',          // (v4.24.0) statut : 'all' | 'unseen' | 'seen' | 'late' (un seul à la fois ; retoucher = annuler)
+    calFlags: [],              // (v4.24.0) repères cumulables : 'new' | 'prem' | 'fav' | 'final'
     calConfirmed: false,       // (v4.21.0) calendrier : seulement les dates confirmées (pas de projection)
     calWeekMode: 'rolling',    // (v4.22.0) semaine : 'rolling' (aujourd'hui −3 / +3) | 'calendar' (lundi → dimanche)
     calScope: 'mine',          // (v4.22.0) 'mine' (mes séries + nouveautés) | 'all' (tout Crunchyroll de la période)
-    calCrOnly: true,           // (v4.22.0) seulement les séries confirmées sur Crunchyroll
     onlyRated: false,          // uniquement celles que tu as notées 4★ ou plus
     onlyFavorite: false,       // uniquement tes favoris (notées 5★ par TOI)
     onlyShort: false,          // séries courtes : 12 épisodes ou moins au total
@@ -6408,12 +6394,11 @@
     discover: { series: [], loading: false, error: null, warning: null, shortfallDetail: null, lastSync: null, excludedIds: new Set(), searchedFilters: undefined, similarTo: null, similarProfile: null, similarFetching: false, legendaryHunt: false, cancelRequested: false, scan: null },
     orphan: { series: [], loading: false, error: null, warning: null, lastSync: null, fromSnapshot: false },
     newPremieres: { series: [], loading: false, error: null, lastSync: null, debug: null },
-    // (v4.19.0) Calendrier : nouveautés lointaines (AniList) et état d'affichage (non persisté).
-    calFuture: { items: [], loading: false, error: null, lastSync: null, cover: 0, triedCover: 0, wantDays: 0, partial: false, stale: false },
+    // Calendrier : état d'affichage (non persisté).
     calUi: { off: 0, sel: null, side: false, open: null, fold: {} },
-    // (v4.22.0) Tout Crunchyroll de la semaine (séries hors de tes listes) : grille de diffusion AniList, par semaine.
+    // (v4.24.0) Calendrier 100 % Crunchyroll : nouvelles séries (catalogue « ajouté récemment ») et catalogue de la saison (« Tout Crunchyroll »).
     crNew: { items: [], loading: false, error: null, lastSync: null, tried: false },
-    calAir: { byWeek: new Map(), loading: false, error: null, partial: false, tried: new Set(), lastSync: null, match: null, matchFor: null },
+    crSeason: { items: [], loading: false, error: null, lastSync: null, tried: new Set() },
     // Crunchylists détectées (id + titre), pour le bouton d'ajout depuis Découverte.
     myLists: { items: [], loading: false, error: null },
     // Ids ajoutés depuis Découverte dans CETTE session : masqués de la liste sans
@@ -13581,7 +13566,7 @@
   .crrav-calcard.prem{background:linear-gradient(135deg,#1b2046,#13141f 70%);border-color:rgba(143,168,255,.5);box-shadow:inset 4px 0 0 #8fa8ff}
   .crrav-calcard.prem .crrav-calepi{background:rgba(143,168,255,.22);color:#d3dbff;letter-spacing:.04em;text-transform:uppercase}
   .crrav-calcard.out{box-shadow:inset 4px 0 0 #5fd18a}
-  .crrav-calchip[data-v="new"]::before{content:'';width:8px;height:8px;border-radius:50%;background:#8fa8ff}
+  .crrav-calchip[data-v="prem"]::before{content:'';width:8px;height:8px;border-radius:50%;background:#8fa8ff}
   .crrav-calcard.proj .crrav-calttl{opacity:.92}
   .crrav-calcard.open{border-color:rgba(244,117,33,.6)}
   .crrav-calp{position:relative;width:40px;height:58px;border-radius:8px}
@@ -13723,13 +13708,13 @@
   .crrav-tv .crrav-calst,.crrav-tv .crrav-calsub{font-size:1.2em}
 
   /* ── v4.21.0 : filtres groupés, recherche, vue Mois visuelle, agenda d'une série ── */
-  .crrav-cal .crrav-calchips{display:flex;flex-wrap:nowrap;align-items:center;gap:6px 14px;overflow-x:auto}
-  .crrav-calfg{flex:none;display:flex;align-items:center;gap:6px}
-  .crrav-calfg+.crrav-calfg{padding-left:12px;border-left:1px solid rgba(255,255,255,.12)}
+  /* (v4.24.0) Filtres : jamais de défilement horizontal caché — chaque groupe (Statut / Repères) passe à la ligne et reste entièrement visible. */
+  .crrav-cal .crrav-calchips{display:flex;flex-direction:column;align-items:stretch;gap:6px;overflow:visible}
+  .crrav-calfg{flex:none;display:flex;flex-wrap:wrap;align-items:center;gap:6px;min-width:0}
+  .crrav-cal .crrav-calchips .crrav-calchip{min-height:32px;padding:0 10px;font-size:13px;gap:5px}
   .crrav-calfl{flex:none;font:800 10px/1 system-ui;letter-spacing:.09em;text-transform:uppercase;color:#8c8c9c}
   .crrav-calchip.zero:not(.on){opacity:.45}
   .crrav-calchip.reset{border-color:rgba(224,87,74,.5);color:#ff9d92;background:rgba(224,87,74,.08)}
-  .crrav-calchip[data-v="sequel"]::before{content:'';width:8px;height:8px;border-radius:50%;background:#8fa8ff}
   .crrav-calchip[aria-pressed="true"][data-act="cal-opt"]{background:rgba(95,209,138,.14);border-color:rgba(95,209,138,.55);color:#9be8bb}
   .crrav-calrow2{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
   .crrav-calsearch{flex:1 1 170px;min-width:0;display:flex;align-items:center;gap:8px;height:38px;padding:0 12px;border-radius:999px;
@@ -13744,8 +13729,10 @@
   .crrav-calres b{color:#ffb27c;font-weight:800}
   .crrav-calnc{margin-left:6px;font:600 12px/1 system-ui;color:#9a9aa8}
   @container cal (min-width:640px){
-    .crrav-cal .crrav-calchips{flex-wrap:wrap;overflow:visible}
-    .crrav-calfg{flex:0 1 auto;flex-wrap:wrap;min-width:0}
+    .crrav-cal .crrav-calchips{flex-direction:row;flex-wrap:wrap;align-items:center;gap:6px 14px}
+    .crrav-calfg{flex:0 1 auto}
+    .crrav-calfg+.crrav-calfg{padding-left:12px;border-left:1px solid rgba(255,255,255,.12)}
+    .crrav-cal .crrav-calchips .crrav-calchip{min-height:34px;padding:0 12px;font-size:13.5px}
   }
 
   /* Vue Mois : affiches dans la grille. */
@@ -13946,7 +13933,7 @@
   .crrav-cal .crrav-calcard.open{box-shadow:0 0 0 2px #f47521}
   /* Détail (au toucher) : voile sur la tuile avec statut + actions. */
   .crrav-cal .crrav-calcard .crrav-calc{display:none;position:absolute;inset:0;z-index:5;flex-direction:column;justify-content:space-between;gap:4px;
-    padding:7px;background:rgba(10,10,14,.9);min-width:0}
+    padding:7px;background:rgba(10,10,14,.95);min-width:0}
   .crrav-cal .crrav-calcard.open .crrav-calc{display:flex}
   .crrav-cal .crrav-calstline{display:flex;flex-wrap:wrap;align-items:center;gap:2px 6px;margin:0}
   .crrav-cal .crrav-calc .crrav-calst{display:inline;margin:0;font:800 11px/1.25 system-ui}
@@ -13954,11 +13941,17 @@
   .crrav-cal .crrav-calc .crrav-calsub{display:none;margin:0;font:500 10.5px/1.3 system-ui;color:#8c8c9c}
   .crrav-cal .crrav-calc .crrav-calsub::before{content:none}
   .crrav-cal .crrav-calc .crrav-calacts,.crrav-cal .crrav-calcard.open .crrav-calc .crrav-calacts{display:flex;gap:5px;margin:0;padding:0;flex-wrap:nowrap}
-  .crrav-cal .crrav-calc .crrav-calqa{flex:1 1 0;min-width:0;width:auto;min-height:34px;padding:0 6px;border-radius:9px;font:700 11.5px/1 system-ui;white-space:nowrap}
-  .crrav-cal .crrav-calc .crrav-calqa.pri{flex:1.6 1 0}
+  /* (v4.24.0) Les boutons du détail s'adaptent à la LARGEUR DE LA TUILE (conteneur « ct »), pas à celle de l'écran :
+     « Regarder » n'est jamais coupé — il s'affiche en entier ou fait place à l'icône seule. */
+  .crrav-cal .crrav-calcard{container-type:inline-size;container-name:ct}
+  .crrav-cal .crrav-calc .crrav-calqa{flex:0 0 34px;min-width:34px;width:34px;min-height:34px;padding:0;border-radius:9px;font:700 11.5px/1 system-ui;white-space:nowrap}
+  .crrav-cal .crrav-calc .crrav-calqa.pri{flex:1 1 auto;width:auto;min-width:34px;padding:0 8px;gap:5px}
   .crrav-cal .crrav-calc .crrav-calqa span{display:none}
-  .crrav-cal .crrav-calc .crrav-calqa.pri span{display:inline}
-  @container cal (max-width:300px){ .crrav-cal .crrav-calc .crrav-calqa[data-act="cal-series"]{display:none} .crrav-cal .crrav-calc{padding:4px;gap:2px} .crrav-cal .crrav-calc .crrav-calacts{gap:3px} .crrav-cal .crrav-calc .crrav-calqa{padding:0 2px;min-height:30px} .crrav-cal .crrav-calago{display:none} .crrav-cal .crrav-calc .crrav-calqa.pri span{display:none} }
+  .crrav-cal .crrav-calc .crrav-calqa.pri span{display:inline;white-space:nowrap}
+  @container ct (max-width:229px){ .crrav-cal .crrav-calc .crrav-calqa.pri span{display:none} .crrav-cal .crrav-calc .crrav-calqa.pri{padding:0} }
+  @container ct (max-width:199px){ .crrav-cal .crrav-calago,.crrav-cal .crrav-calepi{display:none} .crrav-cal .crrav-calstline{flex-wrap:nowrap;min-width:0} .crrav-cal .crrav-calc .crrav-calst{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap} }
+  @container ct (max-width:159px){ .crrav-cal .crrav-calc .crrav-calqa[data-act="cal-series"]{display:none} .crrav-cal .crrav-calc{padding:5px} .crrav-cal .crrav-calc .crrav-calacts{gap:4px} }
+  @container ct (max-width:129px){ .crrav-cal .crrav-calc .crrav-calqa[data-act="cal-ics"]{display:none} .crrav-cal .crrav-calc .crrav-calqa{flex-basis:30px;min-width:30px;width:30px;min-height:30px} }
   @container cal (max-width:230px){
     .crrav-cal .crrav-calcards{grid-template-columns:minmax(0,1fr)}
   }
@@ -13974,8 +13967,7 @@
     .crrav-cal .crrav-calc{padding:10px;gap:6px}
     .crrav-cal .crrav-calc .crrav-calst{font-size:12.5px}
     .crrav-cal .crrav-calc .crrav-calsub{display:block}
-    .crrav-cal .crrav-calc .crrav-calqa span{display:inline}
-    .crrav-cal .crrav-calc .crrav-calqa{min-height:38px;font-size:12px}
+    .crrav-cal .crrav-calc .crrav-calqa{font-size:12px}
     .crrav-cal .crrav-calweekgrid{display:block !important}
   }
   @container cal (min-width:1480px){
@@ -15449,14 +15441,15 @@
   // AniList est en panne, l'agenda se construit avec ce qui est en mémoire et le dit.
   const CAL_HORIZONS = [7, 14, 30, 90, 180, 365];
   const CAL_VIEWS = ['agenda', 'week', 'month'];
-  const CAL_FILTERS = ['all', 'mine', 'unseen', 'seen', 'fresh', 'late', 'uptodate', 'unstarted', 'fav', 'final', 'new', 'sequel', 'offlist'];
-  const CAL_FILTER_LABEL = { all: 'Tout', mine: 'Toutes mes séries', late: 'En retard', uptodate: 'À jour', unstarted: 'À commencer',
-    fav: 'Favoris', final: 'Derniers épisodes', new: 'Toutes les nouveautés', sequel: 'Suites de mes séries',
-    unseen: 'À voir (sortis, pas vus)', seen: 'Déjà vus', fresh: 'NEW', offlist: 'Hors de mes listes' };
+  // (v4.24.0) Deux familles de filtres : UN statut à la fois (retoucher l'actif l'annule) + des repères CUMULABLES.
+  const CAL_STATUS = ['all', 'unseen', 'seen', 'late'];
+  const CAL_FLAGS = ['new', 'prem', 'fav', 'final'];
+  const CAL_FILTERS = CAL_STATUS.concat(CAL_FLAGS);
+  const CAL_FILTER_LABEL = { all: 'Tout', unseen: 'À voir', seen: 'Déjà vus', late: 'En retard',
+    new: 'NEW', prem: 'Nouvelles séries', fav: 'Favoris', final: 'Derniers épisodes' };
   const CAL_PROJ_NOTOTAL = 12;      // semaines projetées quand AniList ne donne pas de total prévu
   const CAL_EST_WEEKS = 8;          // idem pour les dates purement estimées
   const CAL_MAX_EVENTS = 1500;      // garde-fou de rendu
-  const CAL_FUTURE_TTL = 12 * 3600e3;
   const CAL_MONTHS = ['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre'];
   const CAL_MONTHS_SHORT = ['janv.', 'févr.', 'mars', 'avr.', 'mai', 'juin', 'juil.', 'août', 'sept.', 'oct.', 'nov.', 'déc.'];
   const CAL_DAYS = ['dimanche', 'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi'];
@@ -15510,13 +15503,18 @@
   function calOpts() {
     const f = STATE.filters || {};
     const pick = (v, list, d) => (list.includes(v) ? v : d);
+    // Anciens réglages (une seule pastille) → nouveau modèle statut + repères.
+    const legacy = { fresh: 'new', new: 'prem', sequel: 'prem', fav: 'fav', final: 'final' };
+    const fl = new Set(Array.isArray(f.calFlags) ? f.calFlags.filter((k) => CAL_FLAGS.includes(k)) : []);
+    if (legacy[f.calFilter]) fl.add(legacy[f.calFilter]);
     return {
       view: pick(f.calView, CAL_VIEWS, 'agenda'),
       horizon: CAL_HORIZONS.includes(Number(f.calHorizon)) ? Number(f.calHorizon) : 90,
-      filter: pick(f.calFilter, CAL_FILTERS, 'all'),
-      proj: f.calShowProj !== false,
-      est: f.calShowEst === true,
-      onlyCr: f.calCrOnly !== false,
+      filter: pick(f.calFilter, CAL_STATUS, 'all'),
+      flags: CAL_FLAGS.filter((k) => fl.has(k)),
+      proj: true,       // (v4.24.0) options d'affichage retirées : prochains épisodes toujours montrés (marqués « prévu »)
+      est: false,
+      onlyCr: true,     // tout vient de Crunchyroll
       confirmed: f.calConfirmed === true,
       weekMode: f.calWeekMode === 'calendar' ? 'calendar' : 'rolling',
       scope: f.calScope === 'all' ? 'all' : 'mine',
@@ -15654,7 +15652,8 @@
       let any = false;
       for (const e of eps) { const t = e.avail || e.air; if (t && t >= startTs && t < stop) { any = true; break; } }
       if (!any) continue;
-      const sorted = eps.filter((e) => e.avail || e.air).slice().sort((a, b) => (a.season - b.season) || (a.n - b.n));
+      // (v4.24.0) Date « réécrite » (ré-upload, rattrapage) : épisode daté APRÈS un épisode plus récent → pas une sortie.
+      const sorted = calDropRestamped(eps.filter((e) => e.avail || e.air).slice().sort((a, b) => (a.season - b.season) || (a.n - b.n)), (e) => e.avail || e.air);
       const rankOf = calSeasonRanks(s);
       const score = calScoreOf(s);
       const lateSeries = s.remaining > 0;
@@ -15695,186 +15694,108 @@
     return best;
   }
 
-  // ── Nouveautés : séries pas encore sorties (jusqu'à un an) + premières tout juste sorties ───
-  const ANILIST_CALFUTURE_FIELDS = `id title { romaji english native } format status genres
-    description(asHtml: false) coverImage { large } bannerImage averageScore startDate { year month day } season seasonYear
-    popularity episodes nextAiringEpisode { episode airingAt } externalLinks { site url type }`;
-  const ANILIST_CALFUTURE_SEASON_QUERY = `query ($season: MediaSeason!, $year: Int!, $page: Int!, $perPage: Int!) {
-    Page(page: $page, perPage: $perPage) {
-      pageInfo { hasNextPage }
-      media(type: ANIME, status: NOT_YET_RELEASED, season: $season, seasonYear: $year, isAdult: false, sort: POPULARITY_DESC) { ${ANILIST_CALFUTURE_FIELDS} }
-    }
-  }`;
-  const ANILIST_CALFUTURE_DATE_QUERY = `query ($from: FuzzyDateInt!, $to: FuzzyDateInt!, $page: Int!, $perPage: Int!) {
-    Page(page: $page, perPage: $perPage) {
-      pageInfo { hasNextPage }
-      media(type: ANIME, status: NOT_YET_RELEASED, startDate_greater: $from, startDate_lesser: $to, isAdult: false, sort: POPULARITY_DESC) { ${ANILIST_CALFUTURE_FIELDS} }
-    }
-  }`;
-  const calFuzzy = (ts) => { const d = new Date(ts); return d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate(); };
-
-  // Fiche AniList → élément d'agenda (ou null si inexploitable). Pure : testable sans réseau.
-  function calFutureItem(m, nowMs) {
-    if (!m || !m.id) return null;
-    if (m.format === 'MOVIE' || m.format === 'MUSIC') return null;
-    const t = m.title || {};
-    const title = t.english || t.romaji || t.native || '';
-    if (!title) return null;
-    // Même filtre de genres que Découverte/Nouveautés (réglage permanent, « hentai » exclu).
-    if (categoriesRejectedByGenre(m.genres || [], [], [])) return null;
-    const sd = m.startDate || {};
-    let ts = null, precision = 'season';
-    if (m.nextAiringEpisode && m.nextAiringEpisode.episode === 1 && m.nextAiringEpisode.airingAt) {
-      ts = m.nextAiringEpisode.airingAt * 1000; precision = 'time';
-    } else if (sd.year && sd.month && sd.day) {
-      ts = new Date(sd.year, sd.month - 1, sd.day).getTime(); precision = 'day';
-    } else if (sd.year && sd.month) {
-      ts = new Date(sd.year, sd.month - 1, 1).getTime(); precision = 'month';
-    } else if (m.season && m.seasonYear) {
-      ts = calSeasonStart(m.season, m.seasonYear); precision = 'season';
-    } else return null;
-    if (!Number.isFinite(ts)) return null;
-    // Statut « pas encore sortie » mais date exacte déjà dépassée de plus d'un jour : fiche périmée.
-    if ((precision === 'time' || precision === 'day') && ts < calStartOfDay(nowMs) - DAY) return null;
-    // Mois ou saison déjà entamés : on range l'élément aujourd'hui plutôt que dans le passé.
-    if ((precision === 'month' || precision === 'season') && ts < calStartOfDay(nowMs)) ts = calStartOfDay(nowMs);
-    const cr = crLinkFromAnilist(m);
-    return {
-      id: 'ani:' + m.id, aniId: m.id, title,
-      titles: [t.english, t.romaji, t.native].filter(Boolean),
-      poster: (m.coverImage && m.coverImage.large) || '', wide: m.bannerImage || '',
-      score: Number.isFinite(m.averageScore) && m.averageScore > 0 ? m.averageScore / 20 : null,
-      synopsis: aniStripDescription(m.description).slice(0, 320),
-      categories: m.genres || [], ts, precision,
-      season: m.season || null, seasonYear: m.seasonYear || null,
-      popularity: Number.isFinite(m.popularity) ? m.popularity : 0,
-      episodes: Number.isFinite(m.episodes) ? m.episodes : null,
-      crId: (cr && cr.id) || '', crSlug: (cr && cr.slug) || '', crUrl: (cr && cr.url) || '',
-    };
-  }
-
-  async function loadCalFuture(force) {
-    const F = STATE.calFuture;
-    if (!CFG.calFutureEnabled) { F.items = []; F.cover = 0; render(); return; }
-    if (F.loading) return;
-    const want = Math.max(F.wantDays || 0, 30);
-    const cover = CAL_HORIZONS.find((h) => h >= want) || 365;
-    const cached = cacheGetStale('calfuture:v2');
-    const okCache = cached && Array.isArray(cached.items);
-    if (okCache && !force && cached.cover >= cover && Date.now() - cached.at < CAL_FUTURE_TTL) {
-      F.items = cached.items; F.cover = cached.cover; F.lastSync = cached.at; F.error = null; F.partial = false;
-      render(); return;
-    }
-    const useStale = () => { if (okCache) { F.items = cached.items; F.cover = Math.min(cached.cover, F.cover || cached.cover); F.lastSync = cached.at; F.stale = true; } };
-    const cd = anilistCooldownRemainingMs();
-    if (cd > 0) {
-      F.error = 'AniList en pause (' + Math.ceil(cd / 60000) + ' min) — les sorties lointaines reviendront toutes seules.';
-      useStale(); render(); return;
-    }
-    F.loading = true; F.error = null; F.stale = false; F.partial = false;
-    render();
-    try {
-      const nowMs = Date.now();
-      const endTs = nowMs + cover * DAY;
-      const byId = new Map();
-      let fails = 0, lastErr = null, calls = 0;
-      const grab = async (query, vars) => {
-        let page = 1, more = true;
-        while (more && page <= 2) {
-          let data = null;
-          try { calls++; data = await anilistQuery(query, { ...vars, page, perPage: 50 }); }
-          catch (e) { fails++; lastErr = e; return; }
-          const pg = data && data.Page;
-          for (const m of ((pg && pg.media) || [])) if (m && m.id && !byId.has(m.id)) byId.set(m.id, m);
-          more = !!(pg && pg.pageInfo && pg.pageInfo.hasNextPage);
-          page++;
-        }
-      };
-      for (const { season, year } of calSeasonsUntil(nowMs, endTs)) {
-        if (anilistCooldownRemainingMs() > 0) { fails++; break; }
-        await grab(ANILIST_CALFUTURE_SEASON_QUERY, { season, year });
-      }
-      if (anilistCooldownRemainingMs() === 0) await grab(ANILIST_CALFUTURE_DATE_QUERY, { from: calFuzzy(nowMs), to: calFuzzy(endTs) });
-      if (!byId.size && fails) throw lastErr || new Error('AniList indisponible');
-      const items = [];
-      for (const m of byId.values()) {
-        const it = safeCall(() => calFutureItem(m, nowMs), null, 'cal:futureItem');
-        if (it) items.push(it);
-      }
-      items.sort((a, b) => a.ts - b.ts || b.popularity - a.popularity);
-      F.partial = fails > 0;
-      F.items = items; F.cover = F.partial ? 0 : cover; F.lastSync = Date.now();
-      cacheSet('calfuture:v2', { items, cover: F.partial ? 0 : cover, at: F.lastSync });
-      LOG(`calendrier : ${items.length} nouveauté(s) à venir (${calls} requête(s) AniList, ${fails} échec(s), jusqu'à ${cover} j)`);
-    } catch (e) {
-      safeCall.log(e, 'loadCalFuture');
-      F.error = 'Sorties lointaines indisponibles (' + (e && e.message ? e.message : 'AniList') + ').';
-      useStale();
-    } finally {
-      F.loading = false;
-      render();
-    }
-  }
-  // Déclenche (au plus une fois par couverture et par session) le chargement lointain.
-  function calEnsureFuture(days) {
-    calEnsureAir();
-    calEnsureCrNew();
-    const F = STATE.calFuture;
-    if (!CFG.calFutureEnabled || F.loading) return;
-    const cover = CAL_HORIZONS.find((h) => h >= Math.max(days || 0, 30)) || 365;
-    if (F.cover >= cover && F.lastSync) return;
-    if (F.triedCover >= cover) return;
-    F.triedCover = cover; F.wantDays = cover;
-    setTimeout(() => { safeCall(() => loadCalFuture(), undefined, 'cal:future'); }, 0);
-  }
-
-  // ── (v4.23.0) Nouvelles séries DIRECTEMENT depuis Crunchyroll (sans AniList) ────────────────────────────────────────
-  // Le catalogue Crunchyroll trié « ajouté récemment » donne les séries toutes neuves ; pour chacune (hors de tes listes)
-  // on lit la 1re saison et la date de mise en ligne de l'épisode 1 : c'est l'information de Crunchyroll lui-même, avec
-  // sa vraie fiche, son image large et ses genres — donc le bon lien. AniList ne sert plus que pour l'à-venir lointain.
+  // ── (v4.24.0) Calendrier 100 % Crunchyroll ──────────────────────────────────────────────────────────────────────
+  // Passé, présent et nouveautés viennent de Crunchyroll LUI-MÊME : AniList ne dit plus ce qui est sorti.
+  //   • tes séries : les épisodes de ta watchlist, avec leur vraie date de mise en ligne ;
+  //   • nouvelles séries : catalogue « ajouté récemment » → épisode 1 (vraie fiche, vraie image, vrai lien) ;
+  //   • « Tout Crunchyroll » : catalogue de la saison (étiquette de saison Crunchyroll) → tous les épisodes datés.
+  // Seule la DATE des PROCHAINS épisodes de tes propres séries reste indicative (AniList) : Crunchyroll ne la publie pas à l'avance.
   const CAL_CRNEW_TTL = 3 * 3600e3;
-  const CAL_CRNEW_DAYS = 60;
-  async function crNewItem(p, now) {
-    const ck = 'crnewep:' + p.id;
-    let ep1 = cacheGet(ck, 14 * DAY);
-    if (ep1 === null || ep1 === undefined) {
-      const seasons = (await fetchSeasonsRaw(p.id)).filter((x) => !/\b(OAD|OVA|OAV|special|sp[ée]cial)\b/i.test(String(x.title || '')));
-      if (!seasons.length) return null;
-      const seqOf = (x) => (Number.isFinite(x.season_sequence_number) ? x.season_sequence_number : Number.isFinite(x.season_number) ? x.season_number : 1e9);
-      const first = seasons.reduce((a, x) => (!a || seqOf(x) < seqOf(a) ? x : a), null);
-      const er = await api(`/content/v2/cms/seasons/${first.id}/episodes`, { locale: CFG.locale });
-      const eps = ((er && er.data) || []).filter((e) => e.episode_number !== null && e.episode_number !== undefined);
-      if (!eps.length) return null;
-      const one = eps.reduce((a, e) => (e.episode_number < a.episode_number ? e : a), eps[0]);
-      const ts = Date.parse(one.availability_starts || one.premium_available_date || one.episode_air_date || '') || null;
-      ep1 = { ts, id: one.id, n: eps.length };
-      cacheSet(ck, ep1);
+  const CAL_CRNEW_DAYS = 60;           // « nouvelle série » : épisode 1 sorti il y a moins de 60 jours (ou dans les 14 prochains)
+  const CAL_CRSEASON_PAGE = 100;
+  const CAL_RESTAMP_GAP = 12 * 3600e3;
+  const CR_SPECIAL_RE = /\b(OAD|OVA|OAV|special|sp[ée]cial)\b/i;
+  const CR_DUB_RE = /\bdub\b|doublage/i;
+
+  // Une date de mise en ligne POSTÉRIEURE à celle d'un épisode plus récent est un horodatage réécrit (ré-upload, version,
+  // rattrapage du catalogue) : ce n'est pas une sortie. Ex. « E1 » daté d'hier alors que E2 date du mois dernier.
+  function calDropRestamped(sorted, tsOf) {
+    const keep = new Array(sorted.length).fill(true);
+    let minAfter = Infinity;
+    for (let i = sorted.length - 1; i >= 0; i--) {
+      const t = tsOf(sorted[i]);
+      if (!Number.isFinite(t)) continue;
+      if (t - minAfter > CAL_RESTAMP_GAP) keep[i] = false;
+      else if (t < minAfter) minAfter = t;
     }
-    if (!ep1 || !Number.isFinite(ep1.ts)) return null;
-    if (ep1.ts < now - CAL_CRNEW_DAYS * DAY || ep1.ts > now + 14 * DAY) return null;
+    return sorted.filter((_, i) => keep[i]);
+  }
+
+  const calCrSeasonTag = (ts) => { const s = calSeasonOf(ts); return `${s.season.toLowerCase()}-${s.year}`; };
+  // Étiquettes de saison Crunchyroll couvrant la période affichée (3 au plus ; la saison précédente en début de saison).
+  function calCrSeasonTagsFor(range, now) {
+    const cur = calSeasonOf(now);
+    let ref = Math.min(range.start, now);
+    if (now - calSeasonStart(cur.season, cur.year) < 60 * DAY) ref = Math.min(ref, calSeasonStart(cur.season, cur.year) - DAY);
+    let { season, year } = calSeasonOf(ref);
+    const last = calCrSeasonTag(now);
+    const out = [];
+    for (let guard = 0; guard < 12; guard++) {
+      const tag = `${season.toLowerCase()}-${year}`;
+      out.push(tag);
+      if (tag === last) break;
+      const i = CAL_SEASONS.indexOf(season) + 1;
+      if (i >= 4) { season = CAL_SEASONS[0]; year++; } else season = CAL_SEASONS[i];
+    }
+    return out.slice(-3);
+  }
+
+  // Série du catalogue → { épisodes datés de la saison utile }. which : 'new' = 1re saison (nouvelle série), 'season' = dernière saison.
+  async function crCatalogItem(p, now, which) {
+    const seasons = (await fetchSeasonsRaw(p.id)).filter((x) => !CR_SPECIAL_RE.test(String(x.title || '')));
+    if (!seasons.length) return null;
+    const seqOf = (x) => (Number.isFinite(x.season_sequence_number) ? x.season_sequence_number : Number.isFinite(x.season_number) ? x.season_number : 1e9);
+    const ordered = seasons.slice().sort((a, b) => seqOf(a) - seqOf(b));
+    const target = which === 'new' ? ordered[0] : ordered[ordered.length - 1];
+    const rank = ordered.indexOf(target) + 1;
+    const ck = 'crnewep:v2:' + target.id;
+    let rec = cacheGetStale(ck);
+    const recent = (r) => r.eps.some((e) => e.ts > now - 45 * DAY && e.ts < now + 30 * DAY);
+    if (!(rec && Array.isArray(rec.eps) && (Date.now() - rec.at) < (recent(rec) ? CAL_CRNEW_TTL : 14 * DAY))) {
+      const er = await api(`/content/v2/cms/seasons/${target.id}/episodes`, { locale: CFG.locale });
+      let eps = ((er && er.data) || [])
+        .filter((e) => e && e.id && Number.isInteger(e.episode_number) && e.episode_number >= 1)
+        .map((e) => ({ id: e.id, n: e.episode_number, t: e.title || '', ts: Date.parse(e.availability_starts || e.premium_available_date || e.episode_air_date || '') || null }))
+        .filter((e) => Number.isFinite(e.ts))
+        .sort((a, b) => a.n - b.n);
+      eps = calDropRestamped(eps, (e) => e.ts).slice(0, 150);
+      rec = { eps, at: Date.now() };
+      cacheSet(ck, rec);
+    }
+    const all = rec.eps;
+    if (!all.length) return null;
+    const first = all[0];
+    if (which === 'new') {
+      if (!(first.ts >= now - CAL_CRNEW_DAYS * DAY && first.ts <= now + 14 * DAY)) return null;
+    } else if (!all.some((e) => e.ts > now - 130 * DAY && e.ts < now + 60 * DAY)) return null;
     const categories = extractGenres(p);
     if (categoriesRejectedByGenre(categories, [], [])) return null;
     return {
-      id: p.id, title: p.title, titles: [p.title], poster: posterOf(p), wide: posterWideOf(p), synopsis: String(p.description || '').slice(0, 320),
-      categories, ts: ep1.ts, precision: 'time', crId: p.id, crSlug: p.slug_title || '', crSource: 'crunchyroll',
+      id: p.id, title: p.title, poster: posterOf(p), wide: posterWideOf(p), synopsis: String(p.description || '').slice(0, 320),
+      categories, ts: first.ts, firstN: first.n, rank, crId: p.id, crSlug: p.slug_title || '', crSource: 'crunchyroll',
+      eps: all.filter((e) => e.ts > now - 210 * DAY && e.ts < now + 120 * DAY),
     };
   }
+  async function crItemsFrom(panels, now, which) {
+    const mine = new Set((STATE.series || []).map((s) => s.id));
+    const todo = panels.filter((p) => p && p.id && p.title && !mine.has(p.id) && !IGNORED.has(p.id) && !CR_DUB_RE.test(p.title));
+    const res = await pool(todo, async (p) => { try { return await crCatalogItem(p, now, which); } catch (e) { safeCall.log(e, 'crItemsFrom:item'); return null; } }, 3);
+    return res.filter(Boolean).sort((a, b) => b.ts - a.ts);
+  }
+  // Nouvelles séries : catalogue trié « ajouté récemment ».
   async function loadCrNew(force) {
     const N = STATE.crNew;
     if (N.loading || !CFG.calFutureEnabled) return;
-    const cached = cacheGetStale('crnew:v1');
+    const cached = cacheGetStale('crnew:v2');
     if (!force && cached && Array.isArray(cached.items) && Date.now() - cached.at < CAL_CRNEW_TTL) { N.items = cached.items; N.lastSync = cached.at; render(); return; }
     N.loading = true; N.error = null; render();
     try {
       const now = Date.now();
       const r = await api('/content/v2/discover/browse', { sort_by: 'newly_added', n: 50, start: 0, locale: CFG.locale, type: 'series' });
       const panels = (r && Array.isArray(r.data)) ? r.data : [];
-      const mine = new Set((STATE.series || []).map((s) => s.id));
-      const todo = panels.filter((p) => p && p.id && p.title && !mine.has(p.id) && !IGNORED.has(p.id) && !/\bdub\b|doublage/i.test(p.title));
-      const res = await pool(todo, async (p) => { try { return await crNewItem(p, now); } catch (e) { safeCall.log(e, 'loadCrNew:item'); return null; } }, 3);
-      const items = res.filter(Boolean).sort((a, b) => b.ts - a.ts);
+      const items = await crItemsFrom(panels, now, 'new');
       N.items = items; N.lastSync = Date.now();
-      cacheSet('crnew:v1', { items, at: N.lastSync });
+      cacheSet('crnew:v2', { items, at: N.lastSync });
       LOG(`calendrier : ${items.length} nouvelle(s) série(s) sur Crunchyroll (${panels.length} lue(s))`);
     } catch (e) {
       safeCall.log(e, 'loadCrNew');
@@ -15888,149 +15809,60 @@
     N.tried = true;
     setTimeout(() => { safeCall(() => loadCrNew(), undefined, 'cal:crnew'); }, 0);
   }
-
-  // ── (v4.22.0) « Tout Crunchyroll » : épisodes de la semaine hors de tes listes (grille de diffusion AniList) ─────────
-  const ANILIST_CALAIR_QUERY = `query ($from: Int!, $to: Int!, $page: Int!) {
-    Page(page: $page, perPage: 50) {
-      pageInfo { hasNextPage }
-      airingSchedules(airingAt_greater: $from, airingAt_lesser: $to, sort: TIME) {
-        episode airingAt
-        media { id title { romaji english native } format genres isAdult coverImage { large } bannerImage averageScore popularity
-          episodes duration externalLinks { site url type } }
-      }
-    }
-  }`;
-  const CAL_AIR_PAGES = 14;                // ≈ 700 diffusions / semaine
-  const CAL_AIR_TTL_NOW = 3 * 3600e3;      // semaine en cours / à venir : se rafraîchit
-  const CAL_AIR_TTL_PAST = 14 * 86400e3;   // semaine entièrement passée : figée
-  const CAL_AIR_AHEAD = 28;                // AniList ne publie guère plus loin
-  // « Saison 2 », « 2nd Season », « Season 3 », « S2 » dans le titre → numéro ; sinon 1 (les suites portent presque toujours la mention).
-  function calSeasonFromTitle(t) {
-    const txt = [t && t.english, t && t.romaji].filter(Boolean).join(' | ');
-    const m = txt.match(/\b(\d{1,2})(?:st|nd|rd|th)\s+season\b/i) || txt.match(/\b(?:season|saison)\s*(\d{1,2})\b/i)
-      || txt.match(/\bS(\d{1,2})\b/);
-    const n = m ? parseInt(m[1], 10) : 1;
-    return n >= 1 && n <= 30 ? n : 1;
-  }
-  // Ligne « airingSchedules » AniList → diffusion exploitable (ou null). Pure : testable sans réseau.
-  function calAirItem(row) {
-    const m = row && row.media;
-    if (!m || !m.id || !row.airingAt || !Number.isFinite(row.episode) || row.episode < 1) return null;
-    if (m.isAdult || m.format === 'MOVIE' || m.format === 'MUSIC') return null;
-    const t = m.title || {};
-    const title = t.english || t.romaji || t.native || '';
-    if (!title) return null;
-    if (categoriesRejectedByGenre(m.genres || [], [], [])) return null;
-    const cr = crLinkFromAnilist(m);
-    return {
-      key: `air:${m.id}:${row.episode}`, aniId: m.id, title, titles: [t.english, t.romaji, t.native].filter(Boolean),
-      ep: row.episode, ts: row.airingAt * 1000, poster: (m.coverImage && m.coverImage.large) || '', wide: m.bannerImage || '',
-      score: Number.isFinite(m.averageScore) && m.averageScore > 0 ? m.averageScore / 20 : null,
-      categories: m.genres || [], popularity: Number.isFinite(m.popularity) ? m.popularity : 0,
-      total: Number.isFinite(m.episodes) ? m.episodes : null, dur: Number.isFinite(m.duration) ? m.duration : 24,
-      season: calSeasonFromTitle(t), crId: (cr && cr.id) || '', crSlug: (cr && cr.slug) || '', crUrl: (cr && cr.url) || '', crOk: !!cr,
-    };
-  }
-  function calAirWeeksFor(range, now) {
-    const lim = now + CAL_AIR_AHEAD * DAY;
-    const out = [];
-    for (let w = calWeekStart(range.start); w < range.end && w < lim; w = calAddDays(w, 7)) out.push(w);
-    return out;
-  }
-  const calAirFresh = (wk, now) => !!wk && !wk.partial && (now - wk.at) < ((calAddDays(wk.week, 8) < now) ? CAL_AIR_TTL_PAST : CAL_AIR_TTL_NOW);
-  async function loadCalAir(range, force) {
-    const A = STATE.calAir;
-    if (A.loading) return;
-    const now = Date.now();
-    const weeks = calAirWeeksFor(range, now);
-    A.loading = true; A.error = null; A.partial = false;
+  // « Tout Crunchyroll » : catalogue de la saison (une requête par étiquette de saison, ses épisodes sont mis en cache).
+  async function loadCrSeason(tags, force) {
+    const N = STATE.crSeason;
+    if (N.loading || !CFG.calFutureEnabled) return;
+    N.loading = true; N.error = null;
+    for (const t of tags) N.tried.add(t);
     render();
     try {
-      for (const w of weeks) {
-        if (!force && calAirFresh(A.byWeek.get(w), now)) continue;
-        const ck = `calair:v1:${w}`;
+      const now = Date.now();
+      const byId = new Map((N.items || []).map((it) => [it.id, it]));
+      let fails = 0, lastErr = null;
+      for (const tag of tags) {
+        const ck = 'crseason:v1:' + tag;
         const cached = cacheGetStale(ck);
-        if (!force && cached && Array.isArray(cached.items) && calAirFresh({ ...cached, week: w }, now)) { A.byWeek.set(w, { week: w, items: cached.items, at: cached.at, partial: false }); render(); continue; }
-        if (anilistCooldownRemainingMs() > 0) {
-          A.error = 'AniList en pause (' + Math.ceil(anilistCooldownRemainingMs() / 60000) + ' min) — les séries hors de tes listes reviendront toutes seules.';
-          if (cached && Array.isArray(cached.items) && !A.byWeek.has(w)) A.byWeek.set(w, { week: w, items: cached.items, at: cached.at, partial: true });
-          break;
-        }
-        const from = Math.floor(w / 1000) - 1, to = Math.floor(calAddDays(w, 7) / 1000);
-        const items = new Map();
-        let page = 1, more = true, failed = false;
-        while (more && page <= CAL_AIR_PAGES) {
-          let data = null;
-          try { data = await anilistQuery(ANILIST_CALAIR_QUERY, { from, to, page }); }
-          catch (e) { failed = true; A.error = 'Séries hors de tes listes indisponibles (' + (e && e.message ? e.message : 'AniList') + ').'; break; }
-          const pg = data && data.Page;
-          for (const row of ((pg && pg.airingSchedules) || [])) {
-            const it = safeCall(() => calAirItem(row), null, 'cal:airItem');
-            if (it && !items.has(it.key)) items.set(it.key, it);
+        const ttl = tag === calCrSeasonTag(now) ? CAL_CRNEW_TTL : 14 * DAY;
+        let items = null;
+        if (!force && cached && Array.isArray(cached.items) && Date.now() - cached.at < ttl) items = cached.items;
+        else {
+          try {
+            const r = await api('/content/v2/discover/browse', { sort_by: 'newly_added', n: CAL_CRSEASON_PAGE, start: 0, locale: CFG.locale, type: 'series', seasonal_tag: tag });
+            const panels = (r && Array.isArray(r.data)) ? r.data : [];
+            items = await crItemsFrom(panels, now, 'season');
+            cacheSet(ck, { items, at: Date.now() });
+            LOG(`calendrier : catalogue ${tag} → ${items.length} série(s) avec épisodes datés (${panels.length} lue(s))`);
+          } catch (e) {
+            fails++; lastErr = e; safeCall.log(e, 'loadCrSeason');
+            if (cached && Array.isArray(cached.items)) items = cached.items;
           }
-          more = !!(pg && pg.pageInfo && pg.pageInfo.hasNextPage);
-          page++;
         }
-        if (more && !failed) failed = true;   // plafond de pages atteint : on le dit plutôt que de faire croire à une semaine complète
-        const list = [...items.values()];
-        if (failed && !list.length && cached && Array.isArray(cached.items)) A.byWeek.set(w, { week: w, items: cached.items, at: cached.at, partial: true });
-        else A.byWeek.set(w, { week: w, items: list, at: Date.now(), partial: failed });
-        if (failed) A.partial = true; else cacheSet(ck, { items: list, at: Date.now() });
-        render();
-        if (failed && A.error) break;
+        for (const it of (items || [])) byId.set(it.id, it);
       }
-      A.lastSync = Date.now();
+      N.items = [...byId.values()]; N.lastSync = Date.now();
+      if (fails) N.error = 'Catalogue de la saison Crunchyroll ' + (fails === tags.length ? 'indisponible' : 'incomplet') + ' (' + (lastErr && lastErr.message ? lastErr.message : 'réseau') + ').';
     } catch (e) {
-      safeCall.log(e, 'loadCalAir');
-      A.error = 'Séries hors de tes listes indisponibles (' + (e && e.message ? e.message : 'AniList') + ').';
-    } finally {
-      A.loading = false;
-      render();
-    }
+      safeCall.log(e, 'loadCrSeason');
+      N.error = 'Catalogue de la saison Crunchyroll indisponible (' + (e && e.message ? e.message : 'réseau') + ').';
+    } finally { N.loading = false; render(); }
   }
-  // Charge (une fois par semaine et par session) les diffusions de la période affichée, seulement si elles sont demandées.
-  function calEnsureAir(force) {
-    const A = STATE.calAir;
-    if (!A || A.loading) return;
+  function calEnsureCrSeason(force) {
+    const N = STATE.crSeason;
+    if (!N || N.loading || !CFG.calFutureEnabled) return;
     const opts = calOpts();
-    if (opts.scope !== 'all' && opts.filter !== 'offlist') return;
+    if (opts.scope !== 'all') return;
     const now = Date.now();
-    const range = calRange(opts, now);
-    const weeks = calAirWeeksFor(range, now);
-    const need = weeks.filter((w) => force || !calAirFresh(A.byWeek.get(w), now));
+    const tags = calCrSeasonTagsFor(calRange(opts, now), now);
+    const need = tags.filter((t) => force || !N.tried.has(t));
     if (!need.length) return;
-    if (!force && need.every((w) => A.tried.has(w))) return;
-    for (const w of weeks) A.tried.add(w);
-    setTimeout(() => { safeCall(() => loadCalAir(range, force), undefined, 'cal:air'); }, 0);
+    setTimeout(() => { safeCall(() => loadCrSeason(need, force), undefined, 'cal:crseason'); }, 0);
   }
-  function calAirEvents(opts, now, startTs, endTs) {
-    const A = STATE.calAir;
-    const out = [];
-    if (!A || !A.byWeek || !A.byWeek.size) return out;
-    if (A.matchFor !== STATE.series || !A.match) { A.match = new Map(); A.matchFor = STATE.series; }
-    const find = calFollowedFinder();
-    for (const wk of A.byWeek.values()) {
-      for (const it of wk.items) {
-        if (!(it.ts >= startTs && it.ts < endTs)) continue;
-        const id = it.crId || ('ani:' + it.aniId);
-        if (IGNORED.has(id) || IGNORED.has('ani:' + it.aniId) || (it.crId && IGNORED.has(it.crId))) continue;
-        if (opts.onlyCr && !it.crOk) continue;
-        let inList = A.match.get(it.aniId);
-        if (inList === undefined) { inList = !!find(it.titles); A.match.set(it.aniId, inList); }
-        if (inList) continue;   // déjà dans tes listes : ses épisodes viennent de Crunchyroll directement
-        const urls = it.crId ? calSeriesUrls({ id: it.crId, slug: it.crSlug }, null)
-          : it.crUrl ? { web: it.crUrl, watch: it.crUrl }
-            : (() => { const q = `https://www.crunchyroll.com/fr/search?q=${encodeURIComponent(it.title)}`; return { web: q, watch: q, search: true }; })();
-        out.push({
-          type: 'air', key: it.key, id, aniId: it.aniId, title: it.title, poster: it.poster, wide: it.wide, ts: it.ts, precision: 'time',
-          n: it.ep, abs: it.ep, label: `E${it.ep}`, sxe: `S${it.season}E${it.ep}`, isNew: it.ep === 1, listed: false, seen: false,
-          released: it.ts <= now, score: it.score, categories: it.categories, popularity: it.popularity, crOk: it.crOk, crId: it.crId,
-          lateSeries: false, late: 0, fav: false, source: 'newpremieres', urls, dur: it.dur, exact: true, proj: false, est: false,
-          final: !!(it.total && it.ep === it.total), left: null, seasonEnd: null, cur: '', synopsis: '', titles: it.titles,
-        });
-      }
-    }
-    return out;
+  // Déclenche (une fois par session et par besoin) les lectures du catalogue Crunchyroll.
+  function calEnsureFuture() {
+    if (!CFG.calFutureEnabled) return;
+    calEnsureCrNew();
+    calEnsureCrSeason();
   }
 
   // Titre déjà dans tes listes ? (suite / nouvelle saison d'une série suivie)
@@ -16048,87 +15880,73 @@
       return null;
     };
   }
-  function calPremiereEvents(opts, now, endTs) {
-    const out = new Map();
-    const find = calFollowedFinder();
-    const seenCr = new Set(), seenTitle = new Set();
-    const put = (e) => {
-      if (IGNORED.has(e.id) || out.has(e.id)) return;
-      const nt = aniNorm(e.title);
-      if ((e.crId && seenCr.has(e.crId)) || (nt && seenTitle.has(nt))) return;
-      if (e.crId) seenCr.add(e.crId);
-      if (nt) seenTitle.add(nt);
-      out.set(e.id, e);
+  // Séries du catalogue Crunchyroll (hors de tes listes) : nouvelles séries d'abord, puis catalogue de la saison.
+  function calCrSeries() {
+    const map = new Map();
+    for (const it of ((STATE.crNew && STATE.crNew.items) || [])) if (it && it.id && Array.isArray(it.eps)) map.set(it.id, { ...it, fresh: true });
+    for (const it of ((STATE.crSeason && STATE.crSeason.items) || [])) if (it && it.id && Array.isArray(it.eps) && !map.has(it.id)) map.set(it.id, { ...it, fresh: false });
+    return [...map.values()];
+  }
+  function calCrBase(it, ep, now) {
+    return {
+      id: it.id, title: it.title, poster: it.poster || '', wide: it.wide || '', synopsis: it.synopsis || '', categories: it.categories || [],
+      ts: ep.ts, precision: 'time', released: ep.ts <= now, n: ep.n, abs: ep.n, label: `E${ep.n}`, sxe: `S${it.rank || 1}E${ep.n}`,
+      score: null, listed: false, seen: false, crId: it.id, crSlug: it.crSlug || '', crOk: true, crSource: 'crunchyroll', followed: null,
+      source: 'newpremieres', popularity: 0, urls: calSeriesUrls({ id: it.id, slug: it.crSlug }, { id: ep.id }), epTitle: ep.t || '',
+      lateSeries: false, late: 0, fav: false, dur: 24, exact: true, proj: false, est: false, final: false, left: null, seasonEnd: null, cur: '',
     };
-    if (CFG.calFutureEnabled) {
-      for (const it of ((STATE.crNew && STATE.crNew.items) || [])) {
-        if (!it || !it.id || !Number.isFinite(it.ts) || it.ts > endTs) continue;
-        put({
-          type: 'prem', key: 'prem:' + it.id, id: it.id, title: it.title, poster: it.poster, wide: it.wide || '', synopsis: it.synopsis,
-          categories: it.categories || [], ts: it.ts, precision: 'time', released: it.ts <= now, label: 'Ép. 1', sxe: 'S1E1', score: null, isNew: true, listed: false,
-          crId: it.crId, crSlug: it.crSlug, crUrl: '', crOk: true, followed: find([it.title]), crSource: 'crunchyroll', source: 'newpremieres', popularity: 0,
-        });
-      }
+  }
+  // Nouvelles séries : épisode 1 lu directement chez Crunchyroll (déjà sorti ou dans les 14 jours).
+  function calPremiereEvents(opts, now, endTs) {
+    const out = [];
+    if (!CFG.calFutureEnabled) return out;
+    const find = calFollowedFinder();
+    const mine = new Set((STATE.series || []).map((s) => s.id));
+    const seenTitle = new Set();
+    for (const it of calCrSeries()) {
+      if (!it.fresh || IGNORED.has(it.id) || mine.has(it.id)) continue;
+      const ep = it.eps.find((x) => x.n === it.firstN);
+      if (!ep || ep.ts > endTs) continue;
+      const nt = aniNorm(it.title);
+      if (nt && seenTitle.has(nt)) continue;
+      if (nt) seenTitle.add(nt);
+      out.push({ ...calCrBase(it, ep, now), type: 'prem', key: 'prem:' + it.id, label: 'Ép. 1', isNew: true, followed: find([it.title]) });
     }
-    const fromMs = newPremieresFromMs();
-    if (CFG.discoverNewPremieres) {
-      for (const p of (STATE.newPremieres.series || [])) {
-        if (!p || !p.id || !Number.isFinite(p.ep1Ts)) continue;
-        if (p.released && p.ep1Ts < fromMs) continue;
-        if (p.ep1Ts > endTs) continue;
-        const fol = p.followedId ? (STATE.series || []).find((x) => x.id === p.followedId) : null;
-        put({
-          type: 'prem', key: 'prem:' + p.id, id: p.id, title: p.title, poster: p.poster || '', synopsis: p.synopsis || '',
-          categories: p.categories || [], ts: p.ep1Ts, precision: 'time', released: !!p.released, label: 'Ép. 1', sxe: `S${calSeasonFromTitle({ english: p.title })}E1`,
-          wide: p.wide || '', score: Number.isFinite(p.score) ? p.score : null, isNew: true, listed: false,
-          crId: p.crId || '', crSlug: p.crSlug || '', crUrl: p.crUrl || '', crOk: !!(p.crId || p.crConfidence === 'declared'),
-          followed: fol || null, source: 'newpremieres', popularity: 0, crSource: p.crSource || null,
-        });
-      }
+    return out;
+  }
+  // « Tout Crunchyroll » : épisodes datés des séries hors de tes listes, sur la période.
+  function calAirEvents(opts, now, startTs, endTs) {
+    const out = [];
+    if (!CFG.calFutureEnabled || opts.scope !== 'all') return out;
+    const find = calFollowedFinder();
+    const mine = new Set((STATE.series || []).map((s) => s.id));
+    const seenTitle = new Set();
+    for (const it of calCrSeries()) {
+      if (IGNORED.has(it.id) || mine.has(it.id)) continue;
+      const nt = aniNorm(it.title);
+      if (nt && seenTitle.has(nt)) continue;
+      if (nt) seenTitle.add(nt);
+      if (!it.fresh && find([it.title])) continue;      // déjà dans tes listes sous un autre identifiant (doublage…)
+      const eps = it.eps.slice().sort((a, b) => a.n - b.n);
+      eps.forEach((ep, i) => {
+        if (!(ep.ts >= startTs && ep.ts < endTs)) return;
+        if (it.fresh && ep.n === it.firstN) return;     // l'épisode 1 d'une nouvelle série est une « nouveauté »
+        const prev = i > 0 ? eps[i - 1].ts : null;
+        out.push({ ...calCrBase(it, ep, now), type: 'air', key: `air:${it.id}:${ep.id}`, isNew: ep.n === 1 || (prev != null && ep.ts - prev > CAL_NEW_GAP) });
+      });
     }
-    if (CFG.calFutureEnabled) {
-      for (const it of (STATE.calFuture.items || [])) {
-        if (!it || !it.id || !Number.isFinite(it.ts) || it.ts > endTs) continue;
-        const fol = find(it.titles);
-        put({
-          type: 'prem', key: 'prem:' + it.id, id: it.id, title: it.title, poster: it.poster, synopsis: it.synopsis,
-          categories: it.categories, ts: it.ts, precision: it.precision, released: it.precision === 'time' && it.ts <= now,
-          label: 'Ép. 1', sxe: `S${calSeasonFromTitle({ english: it.title })}E1`, wide: it.wide || '', score: it.score != null ? it.score : null, isNew: true, listed: false,
-          crId: it.crId, crSlug: it.crSlug, crUrl: it.crUrl, crOk: !!(it.crId || it.crUrl),
-          followed: fol, season: it.season, seasonYear: it.seasonYear, source: 'newpremieres', popularity: it.popularity || 0,
-        });
-      }
-    }
-    let list = [...out.values()];
-    if (opts.onlyCr) list = list.filter((e) => e.crOk || e.followed);
-    for (const e of list) {
-      e.urls = null;
-      if (e.followed) e.urls = calSeriesUrls(e.followed, e.followed.next);
-      else if (e.crId && e.crSource !== 'search') e.urls = calSeriesUrls({ id: e.crId, slug: e.crSlug }, null);
-      else if (e.crUrl) e.urls = { web: e.crUrl, watch: e.crUrl };
-      else {
-        const q = `https://www.crunchyroll.com/fr/search?q=${encodeURIComponent(e.title)}`;
-        e.urls = { web: q, watch: q, search: true };
-      }
-      e.lateSeries = false; e.late = 0; e.fav = false;
-    }
-    return list;
+    return out;
   }
 
   const CAL_FILTER_FN = {
     all: () => true,
-    late: (e) => !!e.listed && e.lateSeries,
-    uptodate: (e) => !!e.listed && !e.lateSeries,
-    new: (e) => e.type === 'prem',
-    fav: (e) => !!e.listed && e.fav,
-    mine: (e) => !!e.listed,
     unseen: (e) => !!e.listed && e.type === 'out' && !e.seen,
     seen: (e) => !!e.listed && e.type === 'out' && !!e.seen,
-    fresh: (e) => !!e.isNew,
-    offlist: (e) => e.type === 'air',
-    unstarted: (e) => !!e.listed && !!e.s && !(e.s.seen > 0),
+    late: (e) => !!e.listed && e.lateSeries,
+    new: (e) => !!e.isNew,
+    prem: (e) => e.type === 'prem',
+    fav: (e) => !!e.listed && e.fav,
     final: (e) => e.type === 'ep' && !!e.final,
-    sequel: (e) => e.type === 'prem' && !!e.followed,
   };
   const calTypeRank = { out: 0, ep: 1, prem: 2, air: 3 };
   function calSort(a, b) {
@@ -16144,16 +15962,12 @@
     const endTs = range.end;
     const ep = calEpisodeEvents(opts, now, endTs);
     const prems = calPremiereEvents(opts, now, endTs);
-    // (v4.22.0) Passé : épisodes déjà sortis de tes listes ; « Tout Crunchyroll » : séries hors de tes listes (grille AniList).
-    let air = (opts.scope === 'all' || opts.filter === 'offlist') ? calAirEvents(opts, now, range.start, endTs) : [];
-    if (air.length) {
-      const pn = new Set(prems.map((p) => aniNorm(p.title)));
-      air = air.filter((a) => !(a.n === 1 && pn.has(aniNorm(a.title))));
-    }
+    // Passé : épisodes déjà sortis de tes listes ; « Tout Crunchyroll » : épisodes des séries hors de tes listes (catalogue Crunchyroll).
+    const air = calAirEvents(opts, now, range.start, endTs);
     let all = ep.events.concat(calReleasedEvents(now, range.start, endTs), prems, air);
     // L'agenda garde aussi les premières récemment sorties (avant aujourd'hui) pour le bloc « Vient de sortir ».
     all = all.filter((e) => Number.isFinite(e.ts) && e.ts < endTs
-      && (e.ts >= range.start || (opts.view === 'agenda' && e.type === 'prem' && e.released)));
+      && (e.ts >= range.start || (opts.view === 'agenda' && e.type === 'prem' && e.released && e.ts >= newPremieresFromMs())));
     // (v4.21.0) Recherche par titre + « dates confirmées » s'appliquent AVANT les compteurs :
     // les pastilles annoncent donc ce qu'on obtiendrait réellement en les touchant.
     const qWords = aniNorm(opts.q || '').split(' ').filter(Boolean);
@@ -16161,9 +15975,14 @@
     if (opts.confirmed) {
       all = all.filter((e) => (e.type === 'prem' ? (e.precision === 'time' || e.precision === 'day') : e.type === 'ep' ? (e.exact && !e.est) : true));
     }
+    // Compteurs « conditionnels » : chaque pastille annonce ce qu'on obtiendrait en la touchant, les AUTRES filtres actifs étant conservés
+    // (statut : on remplace le statut ; repère : on l'ajoute) — donc toujours à jour, quelle que soit la combinaison.
+    const flagsOn = opts.flags || [];
+    const pass = (e, status, flags) => CAL_FILTER_FN[status](e) && flags.every((k) => CAL_FILTER_FN[k](e));
     const counts = {};
-    for (const k of CAL_FILTERS) counts[k] = all.filter(CAL_FILTER_FN[k]).length;
-    let events = all.filter(CAL_FILTER_FN[opts.filter]).sort(calSort);
+    for (const k of CAL_STATUS) counts[k] = all.filter((e) => pass(e, k, flagsOn)).length;
+    for (const k of CAL_FLAGS) counts[k] = all.filter((e) => pass(e, opts.filter, flagsOn.includes(k) ? flagsOn : flagsOn.concat(k))).length;
+    let events = all.filter((e) => pass(e, opts.filter, flagsOn)).sort(calSort);
     let truncated = 0;
     if (events.length > CAL_MAX_EVENTS) { truncated = events.length - CAL_MAX_EVENTS; events = events.slice(0, CAL_MAX_EVENTS); }
     // Résumé de la fenêtre.
@@ -16306,7 +16125,7 @@
       stCls = e.released ? 'ok' : 'new';
       const bits = [];
       if (e.followed) bits.push(`Suite de « ${escapeHtml(e.followed.title)} » (dans tes listes)`);
-      else bits.push(e.crOk ? 'Sur Crunchyroll ✓' : 'Crunchyroll à confirmer');
+      else bits.push('Sur Crunchyroll ✓');
       if (e.categories && e.categories.length) bits.push(escapeHtml(e.categories.slice(0, 2).join(' · ')));
       sub = bits.join(' · ');
       chip = e.followed ? 'Nouvelle saison' : 'Nouveau';
@@ -16318,8 +16137,8 @@
       const past = e.ts <= now;
       timeB = timed ? calTimeLabel(e.ts) : '—';
       timeS = past ? calAgo(e.ts, now) : calCountdown(e.ts, now);
-      status = past ? 'Sorti · hors de tes listes' : 'Annoncé · hors de tes listes'; stCls = 'mute';
-      const bits = [e.crOk ? 'Sur Crunchyroll ✓' : 'Crunchyroll à confirmer'];
+      status = past ? 'Sorti · pas dans tes listes' : 'Annoncé · pas dans tes listes'; stCls = 'mute';
+      const bits = ['Sur Crunchyroll ✓'];
       if (e.categories && e.categories.length) bits.push(escapeHtml(e.categories.slice(0, 2).join(' · ')));
       if (e.final) bits.push('dernier épisode');
       sub = bits.join(' · ');
@@ -16343,8 +16162,9 @@
       e.proj ? 'proj' : '', e.est ? 'est' : '', ui.open === e.key ? 'open' : ''].filter(Boolean).join(' ');
     const canIcs = e.type !== 'out' && !(e.type === 'air' && e.ts < now) && (e.precision === 'time' || e.precision === 'day');
     const href = e.urls ? (e.urls.search ? crUrl(e.urls.web) : crUrl(e.urls.watch || e.urls.web)) : '#';
-    const watchLbl = e.type === 'prem' || e.type === 'air' ? (e.urls && e.urls.search ? 'Chercher sur Crunchyroll' : 'Voir sur Crunchyroll')
+    const watchLbl = e.type === 'prem' || e.type === 'air' ? 'Regarder sur Crunchyroll'
       : (e.type === 'out' && !e.seen) || e.late > 0 ? 'Regarder' : 'Voir la série';
+    const watchShort = e.type === 'prem' || e.type === 'air' ? 'Regarder' : watchLbl;
     const igLabel = e.type === 'prem' ? 'Ignorer cette nouveauté' : 'Ignorer cette série';
     const star = Number.isFinite(e.score) && e.score > 0 ? `<span class="crrav-calstar" title="Note du public">★ ${e.score.toFixed(1)}</span>` : '';
     const tr = (e.isNew ? '<span class="crrav-calnew">NEW</span>' : '')
@@ -16363,7 +16183,7 @@
         ${timeS ? `<div class="crrav-calago">${escapeHtml(timeB)} · ${escapeHtml(timeS)}</div>` : ''}
         ${sub ? `<div class="crrav-calsub">${sub}</div>` : ''}
         <div class="crrav-calacts">
-          <a class="crrav-calqa pri" data-act="cal-link" href="${href}" title="${escapeHtml(watchLbl)}" aria-label="${escapeHtml(watchLbl)}">${CAL_ICO.play}<span>${escapeHtml(watchLbl)}</span></a>
+          <a class="crrav-calqa pri" data-act="cal-link" href="${href}" title="${escapeHtml(watchLbl)}" aria-label="${escapeHtml(watchLbl)}">${CAL_ICO.play}<span>${escapeHtml(watchShort)}</span></a>
           ${(e.type !== 'prem' && e.s) ? `<button type="button" class="crrav-calqa" data-act="cal-series" data-id="${escapeHtml(e.id)}" title="Toutes les prochaines sorties de cette série" aria-label="Agenda de la série">${CAL_ICO.list}<span>Série</span></button>` : ''}
           ${canIcs ? `<button type="button" class="crrav-calqa" data-act="cal-ics" data-k="${key}" title="Ajouter à mon agenda (.ics)" aria-label="Ajouter à mon agenda">${CAL_ICO.cal}<span>Agenda</span></button>` : ''}
           <button type="button" class="crrav-calqa" data-ignore="${escapeHtml(e.id)}" data-title="${escapeHtml(e.title)}"
@@ -16554,14 +16374,10 @@
       ${row('Jour le plus chargé', bz)}</div>`;
   }
 
-  function calOptsHtml(o) {
-    const chk = (k, label, on, help) => `<label class="crrav-calopt" title="${escapeHtml(help)}"><input type="checkbox" data-act="cal-opt" data-k="${k}"${on ? ' checked' : ''}><span>${label}</span></label>`;
-    return `<div class="crrav-calcard2"><h3>Affichage</h3>
-      ${chk('calShowProj', 'Épisodes suivants prévus', o.proj, 'Projette les épisodes suivants de chaque série, une semaine après le précédent, jusqu’au total annoncé')}
-      ${chk('calShowEst', 'Dates estimées (sans AniList)', o.est, 'Ajoute les séries sans date annoncée, déduites de leur rythme hebdomadaire — moins fiable')}
-      ${chk('calCrOnly', 'Seulement les séries confirmées sur Crunchyroll', o.onlyCr, 'Masque les séries et nouveautés dont AniList ne déclare pas de sortie sur Crunchyroll')}
-      ${chk('calWeekCal', 'Semaine du lundi au dimanche (sinon glissante)', o.weekMode === 'calendar', 'Vue Semaine : lundi → dimanche au lieu de « aujourd’hui −3 / +3 jours »')}
-    </div>`;
+  // Pied de panneau : d'où viennent les dates.
+  function calFootHtml() {
+    const N = STATE.crNew || {};
+    return `<p class="crrav-calfoot">Épisodes sortis et nouvelles séries : Crunchyroll${N.lastSync ? ' (mis à jour ' + calDateLabel(N.lastSync) + ')' : ''}. Date des prochains épisodes de tes séries : AniList (indicatif) ; les épisodes « prévus » suivent le rythme hebdomadaire.</p>`;
   }
 
   function renderCalendrier() {
@@ -16577,45 +16393,42 @@
     const ui = calUi();
     const now = Date.now();
     const model = calModel(opts, now);
-    const F = STATE.calFuture;
     const ap = STATE.anilistProgress;
 
     const seg = [['agenda', 'Agenda'], ['week', 'Semaine'], ['month', 'Mois']]
       .map(([v, l]) => `<button type="button" role="tab" aria-selected="${opts.view === v}" class="${opts.view === v ? 'on' : ''}" data-act="cal-view" data-v="${v}">${l}</button>`).join('');
-    const chip = (v, l, tip) => `<button type="button" class="crrav-calchip${opts.filter === v ? ' on' : ''}${model.counts[v] ? '' : ' zero'}" data-act="cal-filter" data-v="${v}" aria-pressed="${opts.filter === v}" title="${escapeHtml(tip)}">${l}<i>${model.counts[v]}</i></button>`;
-    const chips = `<div class="crrav-calfg">${chip('all', 'Tout', 'Tout afficher')}</div>
-      <div class="crrav-calfg" role="group" aria-label="Mes séries"><span class="crrav-calfl">Mes séries</span>
-        ${chip('mine', 'Toutes', 'Les épisodes de toutes les séries de tes listes')}
-        ${chip('late', 'En retard', 'Séries où il te reste des épisodes déjà sortis')}
-        ${chip('uptodate', 'À jour', 'Séries dont tu as vu tous les épisodes sortis')}
-        ${chip('unseen', 'À voir', 'Épisodes déjà sortis de tes listes que tu n’as pas encore vus')}
-        ${chip('seen', 'Vus', 'Épisodes sortis que tu as déjà vus')}
-        ${chip('unstarted', 'À commencer', 'Séries de tes listes que tu n’as pas encore commencées')}
-        ${chip('fav', 'Favoris ★', 'Séries notées 5 étoiles')}
-        ${chip('final', 'Derniers ép.', 'Le dernier épisode de la saison')}</div>
-      <div class="crrav-calfg" role="group" aria-label="Autres"><span class="crrav-calfl">Repères</span>
-        ${chip('fresh', 'NEW', 'Épisode 1 d’une série, ou premier épisode après plus d’un mois de pause')}
-        ${opts.scope === 'all' ? chip('offlist', 'Hors de mes listes', 'Épisodes de séries Crunchyroll qui ne sont dans aucune de tes listes') : ''}</div>
-      <div class="crrav-calfg" role="group" aria-label="Nouveautés"><span class="crrav-calfl">Nouveautés</span>
-        ${chip('new', 'Toutes', 'Séries pas encore dans tes listes : premières à venir ou tout juste sorties')}
-        ${chip('sequel', 'Suites', 'Nouvelles saisons de séries que tu suis déjà')}</div>`;
+    // (v4.24.0) Filtres : STATUT (un seul à la fois ; retoucher l'actif l'annule) + REPÈRES cumulables (on/off).
+    // Chaque pastille annonce le nombre obtenu EN LA TOUCHANT, les autres filtres actifs étant conservés.
+    const pill = (on, v, l, tip, n) => `<button type="button" class="crrav-calchip${on ? ' on' : ''}${n ? '' : ' zero'}" data-act="cal-filter" data-v="${v}" aria-pressed="${on}" title="${escapeHtml(tip)}">${l}<i>${n}</i></button>`;
+    const stat = (v, l, tip) => pill(opts.filter === v, v, l, tip, model.counts[v]);
+    const flag = (v, l, tip) => pill(opts.flags.includes(v), v, l, tip, model.counts[v]);
+    const chips = `<div class="crrav-calfg" role="group" aria-label="Statut"><span class="crrav-calfl">Statut</span>
+        ${stat('all', 'Tout', 'Tous les épisodes')}
+        ${stat('unseen', 'À voir', 'Épisodes de tes listes déjà sortis que tu n’as pas encore vus')}
+        ${stat('seen', 'Vus', 'Épisodes de tes listes déjà sortis que tu as vus')}
+        ${stat('late', 'En retard', 'Séries de tes listes où il te reste des épisodes déjà sortis')}</div>
+      <div class="crrav-calfg" role="group" aria-label="Repères (cumulables)"><span class="crrav-calfl">Repères</span>
+        ${flag('new', 'NEW', 'Épisode 1, ou premier épisode après plus d’un mois de pause')}
+        ${flag('prem', 'Nouvelles séries', 'Séries qui démarrent sur Crunchyroll (épisode 1)')}
+        ${flag('fav', '♥ Favoris', 'Séries que tu as notées 5 étoiles')}
+        ${flag('final', 'Derniers ép.', 'Le dernier épisode de la saison')}
+        <button type="button" class="crrav-calchip${opts.confirmed ? ' on' : ''}" data-act="cal-opt" data-k="calConfirmed" aria-pressed="${opts.confirmed}" title="Masque les épisodes prévus : seulement les dates annoncées">✓ Dates confirmées</button></div>`;
     const qv = ui.q || '';
-    const active = opts.filter !== 'all' || !!qv.trim() || opts.confirmed;
+    const active = opts.filter !== 'all' || opts.flags.length > 0 || !!qv.trim() || opts.confirmed;
     const scopeSeg = `<div class="crrav-calscope" role="group" aria-label="Périmètre">
-        <button type="button" class="${opts.scope === 'mine' ? 'on' : ''}" data-act="cal-scope" data-v="mine" aria-pressed="${opts.scope === 'mine'}" title="Tes séries (listes) et les nouveautés">Mes séries</button>
-        <button type="button" class="${opts.scope === 'all' ? 'on' : ''}" data-act="cal-scope" data-v="all" aria-pressed="${opts.scope === 'all'}" title="Tous les épisodes de la période, même ceux hors de tes listes">Tout Crunchyroll</button></div>`;
+        <button type="button" class="${opts.scope === 'mine' ? 'on' : ''}" data-act="cal-scope" data-v="mine" aria-pressed="${opts.scope === 'mine'}" title="Tes séries (listes) et les nouvelles séries Crunchyroll">Mes séries</button>
+        <button type="button" class="${opts.scope === 'all' ? 'on' : ''}" data-act="cal-scope" data-v="all" aria-pressed="${opts.scope === 'all'}" title="Tous les épisodes de la période sur Crunchyroll, même hors de tes listes">Tout Crunchyroll</button></div>`;
     const filterRow2 = `<div class="crrav-calrow2">
         <label class="crrav-calsearch"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
           <input type="search" class="crrav-calq" value="${escapeHtml(qv)}" placeholder="Chercher une série…" aria-label="Chercher dans l’agenda" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search" maxlength="80"></label>
-        <button type="button" class="crrav-calchip sm${opts.onlyCr ? ' on' : ''}" data-act="cal-opt" data-k="calCrOnly" aria-pressed="${opts.onlyCr}" title="Masque les séries dont AniList ne déclare pas de sortie sur Crunchyroll">✓ Sur Crunchyroll</button>
-        <button type="button" class="crrav-calchip sm${opts.confirmed ? ' on' : ''}" data-act="cal-opt" data-k="calConfirmed" aria-pressed="${opts.confirmed}" title="Masque les projections et dates estimées : seulement ce qui est annoncé">✓ Dates confirmées</button>
-        ${active ? '<button type="button" class="crrav-calchip sm reset" data-act="cal-reset">✕ Effacer</button>' : ''}
+        ${active ? '<button type="button" class="crrav-calchip sm reset" data-act="cal-reset">✕ Tout effacer</button>' : ''}
       </div>`;
     const resBits = [];
     if (opts.filter !== 'all') resBits.push(CAL_FILTER_LABEL[opts.filter]);
+    for (const k of opts.flags) resBits.push(CAL_FILTER_LABEL[k]);
     if (qv.trim()) resBits.push(`« ${escapeHtml(qv.trim())} »`);
     if (opts.confirmed) resBits.push('dates confirmées');
-    const resLine = active ? `<p class="crrav-calres" aria-live="polite"><b>${model.events.length}</b> sortie${model.events.length > 1 ? 's' : ''} · ${resBits.join(' · ')}</p>` : '';
+    const resLine = active ? `<p class="crrav-calres" aria-live="polite"><b>${model.events.length}</b> sortie${model.events.length > 1 ? 's' : ''} · ${resBits.join(' + ')} <small>— touche un filtre actif pour le retirer</small></p>` : '';
     const periods = opts.view === 'agenda'
       ? `<div class="crrav-calperiods" role="group" aria-label="Période"><span class="crrav-calfl">Période</span>${CAL_HORIZONS.map((h) => `<button type="button" class="crrav-calchip sm${opts.horizon === h ? ' on' : ''}" data-act="cal-horizon" data-v="${h}" aria-pressed="${opts.horizon === h}">${CAL_HORIZON_LABEL[h]}</button>`).join('')}</div>`
       : '';
@@ -16640,18 +16453,14 @@
 
     // Avis (état des sources).
     const notes = [];
-    if (ap) notes.push(`<p class="crrav-calnote live">🔄 AniList : recherche des dates en cours (${ap.done}/${ap.total})…</p>`);
-    if (CFG.calFutureEnabled && F.loading) notes.push('<p class="crrav-calnote live">🔄 Recherche des nouveautés à venir…</p>');
-    if (STATE.crNew && STATE.crNew.loading) notes.push('<p class="crrav-calnote live">🔄 Recherche des nouvelles séries sur Crunchyroll…</p>');
+    if (ap) notes.push(`<p class="crrav-calnote live">🔄 AniList : recherche des dates des prochains épisodes (${ap.done}/${ap.total})…</p>`);
+    if (STATE.crNew && STATE.crNew.loading) notes.push('<p class="crrav-calnote live">🔄 Lecture des nouvelles séries sur Crunchyroll…</p>');
     else if (STATE.crNew && STATE.crNew.error) notes.push(`<p class="crrav-calnote warn">${escapeHtml(STATE.crNew.error)} <button type="button" class="crrav-calchip sm" data-act="cal-reload">Réessayer</button></p>`);
-    const AIR = STATE.calAir;
-    if (opts.scope === 'all' && AIR) {
-      if (AIR.loading) notes.push('<p class="crrav-calnote live">🔄 Recherche des épisodes de tout Crunchyroll sur cette période…</p>');
-      else if (AIR.error) notes.push(`<p class="crrav-calnote warn">${escapeHtml(AIR.error)} <button type="button" class="crrav-calchip sm" data-act="cal-reload">Réessayer</button></p>`);
-      else if (AIR.partial) notes.push('<p class="crrav-calnote warn">Épisodes hors de tes listes incomplets (AniList a répondu partiellement). <button type="button" class="crrav-calchip sm" data-act="cal-reload">Réessayer</button></p>');
+    const SE = STATE.crSeason;
+    if (opts.scope === 'all' && SE) {
+      if (SE.loading) notes.push('<p class="crrav-calnote live">🔄 Lecture du catalogue de la saison sur Crunchyroll…</p>');
+      else if (SE.error) notes.push(`<p class="crrav-calnote warn">${escapeHtml(SE.error)} <button type="button" class="crrav-calchip sm" data-act="cal-reload">Réessayer</button></p>`);
     }
-    if (F.error) notes.push(`<p class="crrav-calnote warn">${escapeHtml(F.error)} <button type="button" class="crrav-calchip sm" data-act="cal-reload">Réessayer</button></p>`);
-    else if (F.partial) notes.push('<p class="crrav-calnote warn">Liste des nouveautés incomplète (AniList a répondu partiellement). <button type="button" class="crrav-calchip sm" data-act="cal-reload">Réessayer</button></p>');
     if (model.truncated) notes.push(`<p class="crrav-calnote">${model.truncated} sortie${model.truncated > 1 ? 's' : ''} de plus non affichée${model.truncated > 1 ? 's' : ''} — réduis la période.</p>`);
 
     let body;
@@ -16664,7 +16473,6 @@
         <div class="crrav-calemptyacts">
           ${active ? '<button type="button" class="crrav-calchip" data-act="cal-reset">Effacer les filtres</button>' : ''}
           ${wider ? `<button type="button" class="crrav-calchip" data-act="cal-horizon" data-v="${wider}">Élargir à ${CAL_HORIZON_LABEL[wider]}</button>` : ''}
-          ${!opts.est ? '<button type="button" class="crrav-calchip" data-act="cal-opt" data-k="calShowEst">Inclure les dates estimées</button>' : ''}
         </div></div>`;
     } else {
       // Semaine et Mois affichent toujours leur grille, même vide (on navigue dedans).
@@ -16679,9 +16487,8 @@
     const noDate = model.noDate.length
       ? `<details class="crrav-calnodate"><summary>${model.noDate.length} série${model.noDate.length > 1 ? 's' : ''} en diffusion sans date annoncée</summary>
           <p>${model.noDate.map((n) => `<span>${escapeHtml(n.title)}</span>`).join('')}</p>
-          <small>AniList n’a pas (encore) publié leur prochain épisode. Active « Dates estimées » pour les voir quand même.</small></details>` : '';
-    const dbg = (CFG.discoverNewPremieres && !model.counts.new && STATE.newPremieres.debug)
-      ? `<details class="crrav-calnodate"><summary>Pourquoi aucune nouveauté récente ?</summary>${renderNewPremieresDebug(STATE.newPremieres.debug)}</details>` : '';
+          <small>La date de leur prochain épisode n’est pas (encore) connue.</small></details>` : '';
+    const dbg = '';   // (v4.24.0) plus de bloc AniList « Nouveautés » : les nouvelles séries viennent de Crunchyroll
 
     return `<div class="crrav-statswrap crrav-calwrap"><div class="crrav-cal" data-view="${opts.view}">
       <div class="crrav-calbar">
@@ -16689,7 +16496,7 @@
         <div class="crrav-calseg" role="tablist" aria-label="Vue du calendrier">${seg}</div>
         <span class="crrav-calgrow"></span>
         <button type="button" class="crrav-calib" data-act="cal-ics-all" title="Exporter les sorties de cette vue (.ics)" aria-label="Exporter en .ics">${CAL_ICO.dl}<span>.ics</span></button>
-        <button type="button" class="crrav-calib crrav-calsidebtn${ui.side ? ' on' : ''}" data-act="cal-aside" aria-expanded="${ui.side}" title="Options et résumé" aria-label="Options et résumé">${CAL_ICO.gear}</button>
+        <button type="button" class="crrav-calib crrav-calsidebtn${ui.side ? ' on' : ''}" data-act="cal-aside" aria-expanded="${ui.side}" title="Résumé de la période" aria-label="Résumé de la période">${CAL_ICO.gear}</button>
       </div>
       ${calHeroHtml(model.hero, now)}
       <div class="crrav-calchips" role="group" aria-label="Filtrer">${chips}</div>
@@ -16702,8 +16509,8 @@
           ${notes.join('')}${nav}${body}${noDate}${dbg}
         </div>
         <aside class="crrav-calaside">
-          ${mini}${calSummaryHtml(model)}${calOptsHtml(opts)}
-          <p class="crrav-calfoot">Dates : AniList (${F.lastSync ? 'nouveautés mises à jour ' + calDateLabel(F.lastSync) : 'nouveautés en attente'}). Les épisodes « prévus » suivent le rythme hebdomadaire.</p>
+          ${mini}${calSummaryHtml(model)}
+          ${calFootHtml()}
         </aside>
       </div>
     </div></div>`;
@@ -16842,14 +16649,13 @@
     if (!model) return '';
     const miniStart = opts.view === 'month' ? model.range.start : calMonthStart(now, 0);
     const md = new Date(miniStart);
-    const F = STATE.calFuture;
-    return `<div class="crrav-sa crrav-sa-opts" role="dialog" aria-modal="true" aria-label="Options et résumé"><div class="crrav-sa-bg" data-act="cal-aside"></div>
+    return `<div class="crrav-sa crrav-sa-opts" role="dialog" aria-modal="true" aria-label="Résumé de la période"><div class="crrav-sa-bg" data-act="cal-aside"></div>
       <section class="crrav-sa-sheet">
-        <header class="crrav-sa-oh"><h3>Options et résumé</h3><button type="button" class="crrav-sa-x2" data-act="cal-aside" aria-label="Fermer">✕</button></header>
+        <header class="crrav-sa-oh"><h3>Résumé de la période</h3><button type="button" class="crrav-sa-x2" data-act="cal-aside" aria-label="Fermer">✕</button></header>
         <div class="crrav-sa-ob">
           <div class="crrav-calcard2"><h3 class="cap">${CAL_MONTHS[md.getMonth()]} ${md.getFullYear()}</h3>${calMonthGrid(model, miniStart, { mini: true, act: 'cal-goto' })}</div>
-          ${calSummaryHtml(model)}${calOptsHtml(opts)}
-          <p class="crrav-calfoot">Dates : AniList (${F.lastSync ? 'nouveautés mises à jour ' + calDateLabel(F.lastSync) : 'nouveautés en attente'}). Les épisodes « prévus » suivent le rythme hebdomadaire.</p>
+          ${calSummaryHtml(model)}
+          ${calFootHtml()}
         </div>
         <footer class="crrav-sa-foot"><button type="button" class="crrav-sa-btn pri" data-act="cal-aside">Fermer</button></footer>
       </section></div>`;
@@ -16873,22 +16679,25 @@
       return true;
     }
     if (a === 'cal-filter') {
-      if (CAL_FILTERS.includes(act.dataset.v)) { f.calFilter = act.dataset.v; redo(true); }
+      // Statut : un seul à la fois, retoucher le statut actif (ou « Tout ») revient à « Tout ». Repères : on/off, cumulables.
+      const v = act.dataset.v;
+      const cur = calOpts();
+      if (CAL_STATUS.includes(v)) { f.calFilter = (cur.filter === v) ? 'all' : v; redo(true); }
+      else if (CAL_FLAGS.includes(v)) {
+        f.calFilter = cur.filter;     // fige l'ancien réglage éventuel (migration) avant de modifier les repères
+        f.calFlags = cur.flags.includes(v) ? cur.flags.filter((k) => k !== v) : cur.flags.concat(v);
+        redo(true);
+      }
       return true;
     }
     if (a === 'cal-opt') {
-      const k = act.dataset.k;
-      if (k === 'calShowProj') f.calShowProj = !(f.calShowProj !== false);
-      else if (k === 'calShowEst') f.calShowEst = !(f.calShowEst === true);
-      else if (k === 'calCrOnly') f.calCrOnly = !(f.calCrOnly !== false);
-      else if (k === 'calWeekCal') { f.calWeekMode = f.calWeekMode === 'calendar' ? 'rolling' : 'calendar'; ui.off = 0; }
-      else if (k === 'calConfirmed') f.calConfirmed = !(f.calConfirmed === true);
+      if (act.dataset.k === 'calConfirmed') f.calConfirmed = !(f.calConfirmed === true);
       redo(true);
       return true;
     }
-    if (a === 'cal-scope') { f.calScope = act.dataset.v === 'all' ? 'all' : 'mine'; if (f.calScope === 'mine' && f.calFilter === 'offlist') f.calFilter = 'all'; redo(true); return true; }
+    if (a === 'cal-scope') { f.calScope = act.dataset.v === 'all' ? 'all' : 'mine'; redo(true); return true; }
     if (a === 'cal-weekmode') { f.calWeekMode = act.dataset.v ? (act.dataset.v === 'calendar' ? 'calendar' : 'rolling') : (f.calWeekMode === 'calendar' ? 'rolling' : 'calendar'); ui.off = 0; ui.sel = null; redo(true); return true; }
-    if (a === 'cal-reset') { f.calFilter = 'all'; f.calConfirmed = false; ui.q = ''; redo(true); return true; }
+    if (a === 'cal-reset') { f.calFilter = 'all'; f.calFlags = []; f.calConfirmed = false; ui.q = ''; redo(true); return true; }
     if (a === 'cal-series') { openSeriesAgenda(act.dataset.id); return true; }
     if (a === 'cal-sa-close') { STATE.serieAgenda = null; forceRender(); return true; }
     if (a === 'cal-sa-ics' || a === 'cal-sa-ics1') {
@@ -16904,7 +16713,7 @@
       const sa = STATE.serieAgenda;
       const m = sa ? calSeriesModel(sa.id, Date.now()) : null;
       STATE.serieAgenda = null;
-      if (m) { ui.q = m.s.title; f.calView = 'agenda'; f.calFilter = 'all'; f.calHorizon = 365; ui.off = 0; ui.sel = null; saveFilters(); }
+      if (m) { ui.q = m.s.title; f.calView = 'agenda'; f.calFilter = 'all'; f.calFlags = []; f.calHorizon = 365; ui.off = 0; ui.sel = null; saveFilters(); }
       STATE.tab = 'calendrier'; SESSION_NAV.tab = STATE.tab; saveSessionNav(SESSION_NAV);
       forceRender(); calEnsureFuture(calNeededDays(calOpts(), Date.now()));
       return true;
@@ -16950,11 +16759,9 @@
     }
     if (a === 'cal-aside') { ui.side = !ui.side; forceRender(); return true; }
     if (a === 'cal-reload') {
-      const F = STATE.calFuture;
-      F.triedCover = 0; F.error = null; F.wantDays = Math.max(F.wantDays || 0, calNeededDays());
-      loadCalFuture(true);
-      STATE.calAir.tried = new Set(); STATE.calAir.error = null; calEnsureAir(true);
+      STATE.crSeason.tried = new Set(); STATE.crSeason.error = null; STATE.crNew.error = null;
       loadCrNew(true);
+      calEnsureCrSeason(true);
       return true;
     }
     if (a === 'cal-ics') {
@@ -22319,10 +22126,6 @@
             if (!STATE.orphan.series.length || STATE.orphan.fromSnapshot) refreshOrphelines();
           }
           if (STATE.tab === 'calendrier') calEnsureFuture(calNeededDays());
-          if (STATE.tab === 'calendrier' && CFG.discoverNewPremieres
-            && !STATE.newPremieres.series.length && !STATE.newPremieres.loading) {
-            refreshNewPremieres();
-          }
           return;
         }
         // (41) Sous-onglet de la sheet Réglages (voir settingsSubtabs) — même principe
@@ -22814,16 +22617,14 @@
             // continuait d'afficher le détail de l'ANCIEN chargement (avec d'anciens réglages)
             // pendant la brève fenêtre avant le rechargement, ou restait bloqué à `null` (donc
             // invisible) si ce réglage était changé hors de l'onglet Calendrier.
-            STATE.newPremieres.series = [];
-            STATE.newPremieres.debug = null;
+            // (v4.24.0) Le seul réglage restant (fenêtre « Vient de sortir ») ne demande plus aucun rechargement.
             showToast('✓ Réglage enregistré');
             forceRender();
-            if (STATE.tab === 'calendrier' && CFG.discoverNewPremieres) refreshNewPremieres();
           } else if (impact === 'calfuture') {
             // (v4.19.0) Nouveautés lointaines activées/désactivées : on repart d'une liste vierge.
-            const F = STATE.calFuture;
-            F.items = []; F.cover = 0; F.lastSync = null; F.triedCover = 0; F.error = null; F.partial = false;
-            invalidateCache(['calfuture:']);
+            STATE.crNew.items = []; STATE.crNew.lastSync = null; STATE.crNew.tried = false; STATE.crNew.error = null;
+            STATE.crSeason.items = []; STATE.crSeason.lastSync = null; STATE.crSeason.tried = new Set(); STATE.crSeason.error = null;
+            invalidateCache(['crnew:', 'crseason:', 'crnewep:']);
             showToast('✓ Réglage enregistré');
             forceRender();
             if (STATE.tab === 'calendrier') calEnsureFuture(calNeededDays());
@@ -23030,10 +22831,6 @@
       if (!STATE.orphan.series.length || STATE.orphan.fromSnapshot) refreshOrphelines();
     }
     if (STATE.tab === 'calendrier') calEnsureFuture(calNeededDays());
-    if (STATE.tab === 'calendrier' && CFG.discoverNewPremieres
-      && !STATE.newPremieres.series.length && !STATE.newPremieres.loading) {
-      refreshNewPremieres();
-    }
   }
 
   // (4) tirer vers le bas pour actualiser. Ne s'arme que si on est déjà tout en haut,
