@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      4.21.1
+// @version      4.21.3
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '4.21.1';
+  const SCRIPT_VERSION = '4.21.3';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -11345,7 +11345,9 @@
      ce seuil, seul le logo reste, pour ne pas rogner sur les boutons juste à côté. */
   .crrav-brand-text{display:none}
 
-  .crrav-tabs{display:flex;gap:6px;margin:14px 0 0}
+  .crrav-tabs{display:flex;gap:6px;margin:14px 0 0;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;-webkit-overflow-scrolling:touch;padding:2px 2px 4px;margin-left:-2px;margin-right:-2px}
+  .crrav-tabs::-webkit-scrollbar{display:none}
+  .crrav-tabs .crrav-tab{flex:none;white-space:nowrap}
   .crrav-tab{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.12);color:#c9c9d2;
     border-radius:11px;padding:8px 14px;font:700 12.5px/1 system-ui;cursor:pointer;position:relative;
     transition:background .15s ease,color .15s ease,transform .12s ease,box-shadow .18s ease}
@@ -13502,7 +13504,15 @@
   .crrav-calgrid{display:flex;flex-direction:column;gap:12px}
   .crrav-calmain{min-width:0}
   .crrav-calaside{display:none;flex-direction:column;gap:10px;order:-1}
-  .crrav-calaside.open{display:flex}
+  .crrav-sa-opts .crrav-sa-sheet{display:flex;flex-direction:column;padding:0;--h:25;max-width:100%;height:100vh;height:100dvh;max-height:none;border-radius:0}
+  .crrav-sa-oh{flex:none;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:max(14px,env(safe-area-inset-top)) 14px 10px 16px;border-bottom:1px solid rgba(255,255,255,.08)}
+  .crrav-sa-oh h3{margin:0;font:800 18px/1.2 system-ui}
+  .crrav-sa-x2{width:44px;height:44px;border-radius:50%;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);color:#e4e4ea;font:700 15px/1 system-ui;cursor:pointer}
+  .crrav-sa-ob{flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:14px 16px;display:flex;flex-direction:column;gap:12px}
+  .crrav-sa-opts .crrav-sa-foot{flex:none;margin:0;padding:10px 16px calc(10px + env(safe-area-inset-bottom));background:#141419;border-top:1px solid rgba(255,255,255,.08)}
+  .crrav-sa-opts .crrav-calmgrid.mini{max-width:420px;margin:0 auto}
+  @media (min-width:700px){.crrav-sa-opts .crrav-sa-sheet{max-width:560px;height:auto;max-height:90vh;max-height:90dvh;border-radius:20px}}
+  @media (min-width:1160px){.crrav-sa.crrav-sa-opts{display:none}}
   .crrav-calcard2{background:#16161c;border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:13px}
   .crrav-calcard2 h3{margin:0 0 8px;font:800 14px/1.2 system-ui}
   .crrav-calcard2 h3.cap{text-transform:capitalize}
@@ -13662,7 +13672,7 @@
     .crrav-cal[data-view="week"] .crrav-calcards{grid-template-columns:minmax(0,1fr);margin-left:0}
   }
   /* Très large : panneau latéral permanent (mini-mois, résumé, options). */
-  @container cal (min-width:1000px){
+  @container cal (min-width:1060px){
     .crrav-calgrid{flex-direction:row;align-items:flex-start;gap:22px}
     .crrav-calmain{flex:1 1 0}
     .crrav-calaside{display:flex;width:300px;flex:none;position:sticky;top:8px;order:0}
@@ -13752,7 +13762,8 @@
   .crrav-callegend span::before{content:'';display:inline-block;width:9px;height:9px;border-radius:3px;margin-right:5px;vertical-align:-1px;background:#444}
   .crrav-callegend .late::before{background:#f47521}.crrav-callegend .prem::before{background:#8fa8ff}.crrav-callegend .out::before{background:#5fd18a}
   .crrav-callegend .ep::before{background:#2a2a34;box-shadow:inset 0 0 0 1.5px #777}
-  @media (max-width:340px){.crrav-calmgrid:not(.mini) .crrav-calcell{min-height:70px;padding:3px}.crrav-calcnt{display:none}}
+  @media (max-width:340px){.crrav-calmgrid:not(.mini) .crrav-calcell{min-height:70px;padding:3px}.crrav-calcnt{display:none}
+    .crrav-calthumbs{grid-template-columns:minmax(0,1fr)}.crrav-calth{aspect-ratio:3/2}.crrav-calthumbs.t1 .crrav-calth{aspect-ratio:3/2}.crrav-calth:nth-child(n+3){display:none}}
   @container cal (min-width:560px){
     .crrav-cal .crrav-calmgrid:not(.mini) .crrav-calcell{min-height:118px;padding:6px;gap:5px}
     .crrav-cal .crrav-calmgrid:not(.mini) .crrav-calnum{font-size:14px}
@@ -16225,7 +16236,7 @@
         <div class="crrav-calmain">
           ${notes.join('')}${nav}${body}${noDate}${dbg}
         </div>
-        <aside class="crrav-calaside${ui.side ? ' open' : ''}">
+        <aside class="crrav-calaside">
           ${mini}${calSummaryHtml(model)}${calOptsHtml(opts)}
           <p class="crrav-calfoot">Dates : AniList (${F.lastSync ? 'nouveautés mises à jour ' + calDateLabel(F.lastSync) : 'nouveautés en attente'}). Les épisodes « prévus » suivent le rythme hebdomadaire.</p>
         </aside>
@@ -16354,6 +16365,31 @@
     return `<button type="button" class="crrav-agbtn" data-act="cal-series" data-id="${escapeHtml(s.id)}" title="Agenda des prochaines sorties de cette série" aria-label="Agenda de la série">${CAL_ICO.cal}</button>`;
   }
 
+  // (v4.21.2) « Options et résumé » : plein écran (mobile) / grande fenêtre (PC) au lieu d'un bloc
+  // inséré dans la page (qui faisait défiler vers le bas). Rendu dans .crrav-modals : un
+  // `position:fixed` DANS .crrav-cal serait ancré au conteneur (container-type), pas à l'écran.
+  // Sur très grand écran (≥ 1160 px de fenêtre ; le panneau permanent apparaît dès 1060 px de conteneur, barre de défilement comprise) le panneau latéral permanent le remplace : la feuille est alors masquée.
+  function calSideSheetHtml() {
+    if (STATE.tab !== 'calendrier' || !STATE.calUi || !STATE.calUi.side || !(STATE.series || []).length) return '';
+    const now = Date.now();
+    const opts = calOpts();
+    const model = safeCall(() => calModel(opts, now), null, 'cal:side-model');
+    if (!model) return '';
+    const miniStart = opts.view === 'month' ? model.range.start : calMonthStart(now, 0);
+    const md = new Date(miniStart);
+    const F = STATE.calFuture;
+    return `<div class="crrav-sa crrav-sa-opts" role="dialog" aria-modal="true" aria-label="Options et résumé"><div class="crrav-sa-bg" data-act="cal-aside"></div>
+      <section class="crrav-sa-sheet">
+        <header class="crrav-sa-oh"><h3>Options et résumé</h3><button type="button" class="crrav-sa-x2" data-act="cal-aside" aria-label="Fermer">✕</button></header>
+        <div class="crrav-sa-ob">
+          <div class="crrav-calcard2"><h3 class="cap">${CAL_MONTHS[md.getMonth()]} ${md.getFullYear()}</h3>${calMonthGrid(model, miniStart, { mini: true, act: 'cal-goto' })}</div>
+          ${calSummaryHtml(model)}${calOptsHtml(opts)}
+          <p class="crrav-calfoot">Dates : AniList (${F.lastSync ? 'nouveautés mises à jour ' + calDateLabel(F.lastSync) : 'nouveautés en attente'}). Les épisodes « prévus » suivent le rythme hebdomadaire.</p>
+        </div>
+        <footer class="crrav-sa-foot"><button type="button" class="crrav-sa-btn pri" data-act="cal-aside">Fermer</button></footer>
+      </section></div>`;
+  }
+
   // Actions du calendrier (délégation : voir le gestionnaire de clics principal).
   function calHandleAct(act) {
     const a = act.dataset.act;
@@ -16426,6 +16462,7 @@
     if (a === 'cal-goto') {
       const day = act.dataset.day;
       ui.fold[day.slice(0, 7)] = false;
+      ui.side = false;
       forceRender();
       safeCall(() => {
         const el = root.querySelector(`[data-calday="${day}"]`);
@@ -20742,7 +20779,7 @@
       el.className = 'crrav-modals';
       root.appendChild(el);
     }
-    el.innerHTML = listPickerHtml() + confirmModalHtml() + calSeriesSheetHtml();
+    el.innerHTML = listPickerHtml() + confirmModalHtml() + calSeriesSheetHtml() + calSideSheetHtml();
   }
 
   function renderNow() {
@@ -21056,6 +21093,13 @@
         }
       }
     }
+
+    // (v4.21.3) Onglets : la barre défile (téléphone étroit) ; l'onglet actif y est recentré, jamais coupé.
+    safeCall(() => {
+      const t = content.querySelector('.crrav-tabs .crrav-tab[aria-selected="true"]');
+      const bar = t && t.parentElement;
+      if (bar && bar.scrollWidth > bar.clientWidth + 1) bar.scrollLeft = Math.max(0, t.offsetLeft - (bar.clientWidth - t.offsetWidth) / 2);
+    }, undefined, 'tabs:center');
 
     // (9) compteurs animés : uniquement les valeurs numériques pures posées via
     // data-countup dans les templates (list.length, totalRemaining, events.length, in7…) —
@@ -22650,6 +22694,7 @@
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && root && root.style.display !== 'none') {
       if (STATE.serieAgenda) { STATE.serieAgenda = null; forceRender(); return; }
+      if (STATE.tab === 'calendrier' && STATE.calUi && STATE.calUi.side && window.innerWidth < 1160) { STATE.calUi.side = false; forceRender(); return; }
       close();
     }
   });
