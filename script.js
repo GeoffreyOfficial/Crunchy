@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      4.32.0
+// @version      4.34.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '4.32.0';
+  const SCRIPT_VERSION = '4.34.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -13586,23 +13586,9 @@
   .crrav-calib span{display:none}
   .crrav-calico{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;flex:none}
 
-  .crrav-calhero{display:flex;gap:12px;align-items:center;padding:9px;border-radius:16px;border:1px solid rgba(255,255,255,.08);
-    background:linear-gradient(110deg,hsl(var(--h) 52% 22%),#14141a 80%);overflow:hidden}
-  .crrav-calhp,.crrav-calp{overflow:hidden;flex:none;background:linear-gradient(150deg,hsl(var(--h) 60% 44%),hsl(calc(var(--h) + 50) 55% 15%))}
-  .crrav-calhp{width:40px;height:58px;border-radius:8px}
-  .crrav-calhp img,.crrav-calp img{width:100%;height:100%;object-fit:cover;display:block}
+  .crrav-calp{overflow:hidden;flex:none;background:linear-gradient(150deg,hsl(var(--h) 60% 44%),hsl(calc(var(--h) + 50) 55% 15%))}
+  .crrav-calp img{width:100%;height:100%;object-fit:cover;display:block}
   .crrav-calini{display:flex;width:100%;height:100%;align-items:flex-end;padding:4px;font:800 18px/1 system-ui;color:#fff}
-  .crrav-calhc{flex:1 1 0;min-width:0;display:flex;flex-direction:column;gap:3px}
-  .crrav-calhtag{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:center}
-  .crrav-calhtag span{background:#f47521;color:#1a0e05;font:800 9.5px/1 system-ui;letter-spacing:.1em;padding:3px 7px;border-radius:999px}
-  .crrav-calhtag em{font:600 12px/1.2 system-ui;font-style:normal;color:#ffb27c}
-  .crrav-calhtitle{font:900 16px/1.15 system-ui;letter-spacing:-.02em;overflow-wrap:anywhere}
-  .crrav-calhtitle small{font:700 12px/1 system-ui;color:#e4cfd6;letter-spacing:0}
-  .crrav-calhrow{display:flex;align-items:center;gap:10px}
-  .crrav-calhbtn{display:inline-flex;align-items:center;min-height:34px;padding:0 14px;border-radius:10px;background:#f47521;color:#1a0e05;
-    font:800 12.5px/1 system-ui;text-decoration:none}
-  .crrav-calhlate{font:700 12px/1 system-ui;color:#ffb27c}
-  .crrav-calhok{font:700 12px/1 system-ui;color:#5fd18a}
 
   .crrav-calchips,.crrav-calperiods{display:flex;gap:6px;overflow-x:auto;padding:1px 0;scrollbar-width:none;-webkit-overflow-scrolling:touch}
   .crrav-calchips::-webkit-scrollbar,.crrav-calperiods::-webkit-scrollbar{display:none}
@@ -13729,7 +13715,6 @@
     .crrav-calbar{gap:6px}
     .crrav-calseg button{padding:0 7px;font-size:12px}
     .crrav-calib{min-width:36px;height:36px;padding:0 8px}
-    .crrav-calhtitle{font-size:15px}
   }
   /* Moyen (≈ 560–719 px : téléphone en paysage, Fold ouvert étroit) : deux colonnes de lignes denses. */
   @container cal (min-width:560px){
@@ -13743,16 +13728,6 @@
     .crrav-calseg button{flex:none}
     .crrav-calseg button{padding:0 16px;min-height:36px}
     .crrav-calib span{display:inline}
-    .crrav-calhero{height:176px;padding:18px;gap:22px;border-radius:22px}
-    .crrav-calhp{width:96px;height:auto;align-self:stretch;border-radius:12px;box-shadow:0 16px 40px rgba(0,0,0,.5)}
-    .crrav-calhc{height:100%;gap:8px}
-    .crrav-calhtag span{font-size:11px;padding:5px 10px}
-    .crrav-calhtag em{font-size:13px}
-    .crrav-calhtitle{font-size:34px}
-    .crrav-calhtitle small{font-size:17px}
-    .crrav-calhrow{margin-top:auto}
-    .crrav-calhbtn{min-height:40px;padding:0 18px;font-size:13.5px}
-    .crrav-calhlate,.crrav-calhok{font-size:13px}
     .crrav-caldnum{font-size:40px}
     .crrav-cal .crrav-agsec.empty .crrav-caldnum{font-size:22px}
     .crrav-caldlab b{font-size:11.5px;letter-spacing:.14em}
@@ -14053,10 +14028,78 @@
   .crrav-cal .crrav-calcard.proj .crrav-calp img,.crrav-cal .crrav-calcard.est .crrav-calp img{opacity:.78}
   .crrav-cal .crrav-calcard.proj,.crrav-cal .crrav-calcard.est,.crrav-cal .crrav-calcard.undated{outline:1px dashed rgba(255,255,255,.4);outline-offset:-4px}
   .crrav-cal .crrav-calcard.open{box-shadow:0 0 0 2px #f47521}
+  /* (v4.34.0) Animations : entrée en cascade (jours puis tuiles), tuile qui se soulève au survol avec reflet, pastilles et boutons réactifs,
+     aujourd'hui qui pulse, repères qui scintillent. Tout est coupé avec « réduire les animations ». */
+  @keyframes crrav-secin{from{opacity:0;transform:translateY(18px)}}
+  @keyframes crrav-cardin{from{opacity:0;transform:translateY(22px) scale(.93);filter:blur(5px)}}
+  @keyframes crrav-hdrin{from{opacity:0;transform:translateX(-14px)}}
+  @keyframes crrav-pulse{0%{box-shadow:0 0 0 0 rgba(244,117,33,.55)}70%{box-shadow:0 0 0 9px rgba(244,117,33,0)}100%{box-shadow:0 0 0 0 rgba(244,117,33,0)}}
+  @keyframes crrav-glow{0%,100%{filter:brightness(1)}50%{filter:brightness(1.35)}}
+  @keyframes crrav-sheen{from{transform:translateX(-130%) skewX(-18deg)}to{transform:translateX(330%) skewX(-18deg)}}
+  @keyframes crrav-chip{0%{transform:scale(.85)}60%{transform:scale(1.07)}100%{transform:scale(1)}}
+  @keyframes crrav-barin{from{opacity:0;transform:translateY(-10px)}}
+  @keyframes crrav-selin{from{transform:scale(.8)}60%{transform:scale(1.12)}to{transform:scale(1)}}
+  .crrav-cal.enter .crrav-calbar,.crrav-cal.enter .crrav-calchips,.crrav-cal.enter .crrav-calrow2,.crrav-cal.enter .crrav-calnav,.crrav-cal.enter .crrav-calperiods{animation:crrav-barin .45s cubic-bezier(.2,.85,.25,1) backwards}
+  .crrav-cal.enter .crrav-agsec{animation:crrav-secin .6s cubic-bezier(.2,.85,.25,1) backwards}
+  .crrav-cal.enter .crrav-agsec:nth-child(2){animation-delay:.05s}.crrav-cal.enter .crrav-agsec:nth-child(3){animation-delay:.1s}.crrav-cal.enter .crrav-agsec:nth-child(4){animation-delay:.15s}
+  .crrav-cal.enter .crrav-agsec:nth-child(5){animation-delay:.2s}.crrav-cal.enter .crrav-agsec:nth-child(n+6){animation-delay:.25s}
+  .crrav-cal.enter .crrav-caldayh{animation:crrav-hdrin .55s cubic-bezier(.2,.85,.25,1) backwards}
+  .crrav-cal.enter .crrav-calcard{animation:crrav-cardin .65s cubic-bezier(.2,.9,.25,1) backwards}
+  .crrav-cal.enter .crrav-calcard:nth-child(2){animation-delay:.07s}.crrav-cal.enter .crrav-calcard:nth-child(3){animation-delay:.14s}.crrav-cal.enter .crrav-calcard:nth-child(4){animation-delay:.21s}
+  .crrav-cal.enter .crrav-calcard:nth-child(5){animation-delay:.28s}.crrav-cal.enter .crrav-calcard:nth-child(n+6){animation-delay:.35s}
+  .crrav-cal .crrav-calcard{transition:transform .28s cubic-bezier(.2,.85,.25,1),box-shadow .28s,opacity .25s}
+  @media (hover:hover) and (pointer:fine){
+    .crrav-cal .crrav-calcard:hover{transform:translateY(-3px) scale(1.018);z-index:3;box-shadow:0 14px 30px rgba(0,0,0,.55),0 0 0 1px hsla(var(--h,24),80%,62%,.55),0 0 22px hsla(var(--h,24),85%,55%,.28)}
+  }
+  .crrav-cal .crrav-calp{position:relative;overflow:hidden}
+  .crrav-cal .crrav-calp::after{content:'';position:absolute;top:0;bottom:0;left:0;width:34%;pointer-events:none;z-index:3;background:linear-gradient(90deg,transparent,rgba(255,255,255,.22),transparent);transform:translateX(-130%) skewX(-18deg)}
+  @media (hover:hover) and (pointer:fine){ .crrav-cal .crrav-calcard:hover .crrav-calp::after{animation:crrav-sheen .9s ease-out .05s 1 both} }
+  .crrav-cal .crrav-caldayh.today .crrav-caldnum{animation:crrav-pulse 2.4s ease-out infinite;border-radius:10px}
+  .crrav-cal .crrav-calwhen.today{animation:crrav-glow 2.2s ease-in-out infinite}
+  .crrav-cal .crrav-calnew,.crrav-cal .crrav-calvu.todo{animation:crrav-glow 2.8s ease-in-out infinite}
+  .crrav-cal .crrav-calchip,.crrav-cal .crrav-calseg button,.crrav-cal .crrav-calib,.crrav-cal .crrav-calnb,.crrav-cal .crrav-calqa{transition:background .2s,color .2s,border-color .2s,transform .18s cubic-bezier(.2,.85,.25,1),filter .2s,box-shadow .2s}
+  .crrav-cal .crrav-calchip:hover,.crrav-cal .crrav-calib:hover,.crrav-cal .crrav-calnb:hover{transform:translateY(-1px)}
+  .crrav-cal .crrav-calchip:active,.crrav-cal .crrav-calseg button:active,.crrav-cal .crrav-calib:active,.crrav-cal .crrav-calnb:active,.crrav-cal .crrav-calqa:active{transform:scale(.93)}
+  .crrav-cal .crrav-calchip.on,.crrav-cal .crrav-calseg button.on{animation:crrav-chip .35s cubic-bezier(.2,.85,.25,1)}
+  .crrav-cal .crrav-calqa.pri{box-shadow:0 0 0 0 rgba(244,117,33,0);transition:box-shadow .25s,filter .2s,transform .18s}
+  .crrav-cal .crrav-calqa.pri:hover{box-shadow:0 4px 16px rgba(244,117,33,.5)}
+  .crrav-cal .crrav-calcell{transition:background .2s,transform .18s}
+  .crrav-cal .crrav-calcell:not(.blank):hover{transform:scale(1.08)}
+  .crrav-cal .crrav-calcell.sel{animation:crrav-selin .4s cubic-bezier(.2,.85,.25,1)}
+  .crrav-cal.enter .crrav-calcell{animation:crrav-hdrin .5s cubic-bezier(.2,.85,.25,1) backwards}
+  .crrav-cal.enter .crrav-calcell:nth-child(7n+2){animation-delay:.03s}.crrav-cal.enter .crrav-calcell:nth-child(7n+3){animation-delay:.06s}.crrav-cal.enter .crrav-calcell:nth-child(7n+4){animation-delay:.09s}
+  .crrav-cal.enter .crrav-calcell:nth-child(7n+5){animation-delay:.12s}.crrav-cal.enter .crrav-calcell:nth-child(7n+6){animation-delay:.15s}.crrav-cal.enter .crrav-calcell:nth-child(7n){animation-delay:.18s}
+  @media (prefers-reduced-motion:reduce){
+    .crrav-cal *,.crrav-cal *::before,.crrav-cal *::after{animation:none !important;transition:none !important}
+  }
   /* Détail (au toucher) : voile sur la tuile avec statut + actions. */
   .crrav-cal .crrav-calcard .crrav-calc{display:none;position:absolute;inset:0;z-index:5;flex-direction:column;justify-content:space-between;gap:4px;
     padding:7px;background:rgba(10,10,14,.95);min-width:0}
   .crrav-cal .crrav-calcard.open .crrav-calc{display:flex}
+  /* (v4.33.0) PC : le détail s'affiche AU SURVOL (plus de clic) ; mobile : au toucher. Animation : voile qui monte, contenu en cascade. */
+  @media (hover:hover) and (pointer:fine){
+    .crrav-cal .crrav-calcard:hover .crrav-calc,.crrav-cal .crrav-calcard:focus-within .crrav-calc{display:flex}
+  }
+  .crrav-cal .crrav-calcard .crrav-calc{background:linear-gradient(180deg,rgba(14,14,20,.9),rgba(8,8,12,.97));-webkit-backdrop-filter:blur(7px);backdrop-filter:blur(7px);overflow:hidden;border-radius:inherit}
+  .crrav-cal .crrav-calcard.open .crrav-calc,.crrav-cal .crrav-calcard:hover .crrav-calc,.crrav-cal .crrav-calcard:focus-within .crrav-calc{animation:crrav-reveal .34s cubic-bezier(.2,.85,.25,1) both}
+  .crrav-cal .crrav-calcard.open .crrav-calc>*,.crrav-cal .crrav-calcard:hover .crrav-calc>*,.crrav-cal .crrav-calcard:focus-within .crrav-calc>*{animation:crrav-rise .42s cubic-bezier(.2,.85,.25,1) both}
+  .crrav-cal .crrav-calc>:nth-child(2){animation-delay:.05s !important}.crrav-cal .crrav-calc>:nth-child(3){animation-delay:.1s !important}.crrav-cal .crrav-calc>:nth-child(4){animation-delay:.15s !important}.crrav-cal .crrav-calc>:nth-child(5){animation-delay:.2s !important}
+  .crrav-cal .crrav-calcard .crrav-calp img{transition:transform .5s cubic-bezier(.2,.85,.25,1),filter .3s}
+  .crrav-cal .crrav-calcard.open .crrav-calp img,.crrav-cal .crrav-calcard:hover .crrav-calp img{transform:scale(1.08)}
+  @keyframes crrav-reveal{from{opacity:0;clip-path:inset(100% 0 0 0)}to{opacity:1;clip-path:inset(0 0 0 0)}}
+  @keyframes crrav-rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+  @media (prefers-reduced-motion:reduce){.crrav-cal .crrav-calcard .crrav-calc,.crrav-cal .crrav-calcard .crrav-calc>*{animation:none !important}.crrav-cal .crrav-calcard .crrav-calp img{transition:none}}
+  .crrav-cal .crrav-calc .crrav-calsub.one{display:block;flex:0 0 auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  @container ct (max-width:229px){ .crrav-cal .crrav-calc .crrav-calsub.one{display:none} }
+  .crrav-cal .crrav-calinfo{flex:1 1 0;min-height:0;min-width:0;display:flex;flex-direction:column;gap:4px;overflow:hidden}
+  .crrav-cal .crrav-calgenres{flex:0 0 auto;display:flex;flex-wrap:nowrap;gap:4px;overflow:hidden;min-width:0;-webkit-mask-image:linear-gradient(90deg,#000 88%,transparent);mask-image:linear-gradient(90deg,#000 88%,transparent)}
+  .crrav-cal .crrav-calgenres span{flex:0 0 auto;font:700 9.5px/1 system-ui;padding:3px 7px;border-radius:999px;background:hsla(var(--h,24),70%,55%,.2);color:hsl(var(--h,24),85%,78%);border:1px solid hsla(var(--h,24),70%,60%,.35);white-space:nowrap}
+  .crrav-cal .crrav-calsyn{flex:1 1 0;min-height:0;margin:0;overflow:hidden;overflow-wrap:anywhere;font:500 10.5px/1.35 system-ui;color:#c4c4d0;
+    -webkit-mask-image:linear-gradient(180deg,#000 calc(100% - 18px),transparent);mask-image:linear-gradient(180deg,#000 calc(100% - 18px),transparent)}
+  .crrav-cal .crrav-calstar i{display:inline-block;width:1px;height:8px;margin:0 5px;background:rgba(255,255,255,.35);vertical-align:-1px}
+  .crrav-cal .crrav-calstar em{font-style:normal;color:#8fb8ff}
+  @container ct (min-width:230px){ .crrav-cal .crrav-calsyn{font-size:11.5px} .crrav-cal .crrav-calgenres span{font-size:10px} }
+  @container ct (max-width:159px){ .crrav-cal .crrav-calgenres{display:none} }
   .crrav-cal .crrav-calstline{display:flex;flex-wrap:wrap;align-items:center;gap:2px 6px;margin:0}
   .crrav-cal .crrav-calc .crrav-calst{display:inline;margin:0;font:800 11px/1.25 system-ui}
   .crrav-cal .crrav-calago{font:600 10.5px/1.2 system-ui;color:#9a9aa8}
@@ -14073,7 +14116,7 @@
   @container ct (max-width:229px){ .crrav-cal .crrav-calc .crrav-calqa.pri span{display:none} .crrav-cal .crrav-calc .crrav-calqa.pri{padding:0} }
   @container ct (max-width:199px){ .crrav-cal .crrav-calago,.crrav-cal .crrav-calepi{display:none} .crrav-cal .crrav-calstline{flex-wrap:nowrap;min-width:0} .crrav-cal .crrav-calc .crrav-calst{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap} }
   @container ct (max-width:159px){ .crrav-cal .crrav-calc .crrav-calqa[data-act="cal-series"]{display:none} .crrav-cal .crrav-calc{padding:5px} .crrav-cal .crrav-calc .crrav-calacts{gap:4px} }
-  @container ct (max-width:129px){ .crrav-cal .crrav-calc .crrav-calqa[data-act="cal-ics"]{display:none} .crrav-cal .crrav-calc .crrav-calqa{flex-basis:30px;min-width:30px;width:30px;min-height:30px} }
+  @container ct (max-width:129px){ .crrav-cal .crrav-calc .crrav-calqa{flex-basis:30px;min-width:30px;width:30px;min-height:30px} }
   @container cal (max-width:230px){
     .crrav-cal .crrav-calcards{grid-template-columns:minmax(0,1fr)}
   }
@@ -15719,10 +15762,10 @@
     return (season) => { const i = d.indexOf(season); return i >= 0 ? i + 1 : 1; };
   }
   function calScoreOf(s) {
-    if (!s) return null;
-    if (Number.isFinite(s.rating) && s.rating > 0) return s.rating;
-    if (Number.isFinite(s.aniScore) && s.aniScore > 0) return s.aniScore / 20;
-    return null;
+    return s && Number.isFinite(s.rating) && s.rating > 0 ? s.rating : null;
+  }
+  function calAniScoreOf(s) {
+    return s && Number.isFinite(s.aniScore) && s.aniScore > 0 ? s.aniScore / 20 : null;
   }
   function calSeasonTag(r) { return (r.totalSeasons > 1 && r.seasonRank >= 1) ? `S${r.seasonRank} ` : ''; }
   function calSeriesUrls(s, ep) {
@@ -15745,7 +15788,7 @@
         type: 'ep', s, id: s.id, title: s.title || '?', poster: s.poster || '', precision: 'time',
         late: s.remaining > 0 ? s.remaining : 0, lateSeries: s.remaining > 0, fav: !!s.favorite,
         cur, urls, source: 'watchlist', dur: Number.isFinite(s.aniDuration) ? s.aniDuration : 24,
-        listed: true, seen: false, wide: s.wide || '', score: calScoreOf(s),
+        listed: true, seen: false, wide: s.wide || '', score: calScoreOf(s), ani: calAniScoreOf(s),
         seasonEnd: (s.seasonEndTs && s.seasonEndTs > now - DAY) ? { ts: s.seasonEndTs, approx: !!s.plannedApprox } : null,
         left: (() => { const l = plannedRemaining(s); return (l != null && l > 0) ? l : null; })(),
       };
@@ -15822,7 +15865,7 @@
       // (v4.24.0) Date « réécrite » (ré-upload, rattrapage) : épisode daté APRÈS un épisode plus récent → pas une sortie.
       const dated = eps.filter((e) => e.avail || e.air).slice().sort((a, b) => (a.season - b.season) || (a.n - b.n));
       const fx = calStampFix(dated, (e) => e.avail || null, (e) => e.air || null, (e) => e.season);
-      const sorted = calDropRestamped(dated, (e) => fx.get(e).ts);
+      const sorted = calRescueRestamped(dated, calDropRestamped(dated, (e) => fx.get(e).ts), fx);
       const rankOf = calSeasonRanks(s);
       const score = calScoreOf(s);
       const lateSeries = s.remaining > 0;
@@ -15910,6 +15953,26 @@
     const keepSet = new Set();
     for (let a = end; a >= 0; a = prev[a]) keepSet.add(idx[a]);
     return sorted.filter((_, i) => !Number.isFinite(t[i]) || keepSet.has(i));
+  }
+  // (v4.34.0) Un épisode dont la mise en ligne a été réécrite APRÈS ses voisins (ex. « E1 » ré-uploadé le 20 alors que E2-E4 datent du 9 au 23)
+  // n'est pas une sortie à cette date… mais il a bien existé : on le replace à sa DATE DE DIFFUSION d'origine quand elle s'insère
+  // dans la suite (sinon E1 disparaissait et E2 passait pour une « reprise »). Sans date de diffusion cohérente : toujours écarté.
+  function calRescueRestamped(dated, kept, fx) {
+    const keep = new Set(kept);
+    const tsKept = dated.map((e) => (keep.has(e) ? fx.get(e).ts : null));
+    const res = [];
+    dated.forEach((e, i) => {
+      if (keep.has(e)) { res.push(e); return; }
+      const a = e.air;
+      if (!(Number.isFinite(a) && a > 0)) return;
+      let prev = null, next = null;
+      for (let j = i - 1; j >= 0; j--) if (Number.isFinite(tsKept[j])) { prev = tsKept[j]; break; }
+      for (let j = i + 1; j < dated.length; j++) if (Number.isFinite(tsKept[j])) { next = tsKept[j]; break; }
+      if ((prev == null || a >= prev - CAL_RESTAMP_GAP) && (next == null || a <= next + CAL_RESTAMP_GAP)) {
+        fx.set(e, { ts: a, day: true }); tsKept[i] = a; res.push(e);
+      }
+    });
+    return res;
   }
   // (v4.25.0) Dates de mise en ligne RÉÉCRITES EN BLOC (le cas Tsugai : E22, E23 et E24 « sortis » le même jour à 18 h).
   // Quand plusieurs épisodes consécutifs partagent la même minute de mise en ligne alors que leurs dates de DIFFUSION
@@ -16201,7 +16264,7 @@
     Page(page: $page, perPage: 50) {
       pageInfo { hasNextPage }
       media(type: ANIME, status: RELEASING, ${arg}, sort: [POPULARITY_DESC]) {
-        id averageScore title { romaji english native } format genres coverImage { large } season seasonYear externalLinks { site url type }
+        id averageScore title { romaji english native } format genres description(asHtml: false) coverImage { large } season seasonYear externalLinks { site url type }
         nextAiringEpisode { episode airingAt }
         airingSchedule(notYetAired: true, perPage: 12) { nodes { episode airingAt } }
       }
@@ -16248,7 +16311,7 @@
         const link = crLinkFromAnilist(m) || { id: '', slug: '', url: '' };
         items.push({ aniId: m.id, id: 'ani:' + m.id, crId: link.id || '', crSlug: link.slug || '', url: link.url || '', title,
           titles: [t.english, t.romaji, t.native].filter(Boolean), poster: (m.coverImage && m.coverImage.large) || '',
-          aniScore: Number.isFinite(m.averageScore) ? m.averageScore : null, categories: m.genres || [], eps });
+          aniScore: Number.isFinite(m.averageScore) ? m.averageScore : null, categories: m.genres || [], synopsis: aniStripDescription(m.description).slice(0, 320), eps });
       }
       N.items = items; N.lastSync = Date.now();
       cacheSet('anilive:v1', { items, at: N.lastSync });
@@ -16289,9 +16352,9 @@
         if (!(ep.ts > now && ep.ts >= startTs && ep.ts < endTs)) continue;
         if (cmax && ep.ts <= cmax + DAY) continue;                       // déjà daté par Crunchyroll lui-même
         out.push({
-          type: 'air', key: `airani:${it.aniId}:${ep.n}`, id: it.crId || it.id, title: it.title, poster: it.poster || '', wide: '', synopsis: '', categories: it.categories || [],
+          type: 'air', key: `airani:${it.aniId}:${ep.n}`, id: it.crId || it.id, title: it.title, poster: it.poster || '', wide: '', synopsis: it.synopsis || '', categories: it.categories || [],
           ts: ep.ts, precision: 'time', released: false, n: ep.n, abs: ep.n, label: `E${ep.n}`,
-          score: calRatingOf(it.crId, it.aniScore), listed: false, seen: false, crId: it.crId, crSlug: it.crSlug, crOk: true, crSource: 'anilist', followed: null,
+          score: calRatingOf(it.crId), ani: calAniOf(it.aniScore), listed: false, seen: false, crId: it.crId, crSlug: it.crSlug, crOk: true, crSource: 'anilist', followed: null,
           source: 'newpremieres', popularity: 0, urls, epTitle: '', lateSeries: false, late: 0, fav: false, dur: 24, exact: true, proj: false, est: false,
           final: false, left: null, seasonEnd: null, cur: '', isNew: ep.n === 1, announced: true,
         });
@@ -16337,7 +16400,7 @@
         type: 'prem', key: 'premani:' + it.aniId, id: it.id, title: it.title, poster: it.poster || '', wide: '', synopsis: it.synopsis || '',
         categories: it.categories || [], ts: it.ts, precision: prec, season: it.season || null, seasonYear: it.seasonYear || null,
         released: false, n: 1, abs: 1, label, sxe, part: info.part || null, seasonNo: info.season || null,
-        score: calRatingOf(it.crId, it.aniScore), listed: false, seen: false, crId: it.crId, crSlug: it.crSlug, crOk: true, crSource: 'anilist', followed: followed || null,
+        score: calRatingOf(it.crId), ani: calAniOf(it.aniScore), listed: false, seen: false, crId: it.crId, crSlug: it.crSlug, crOk: true, crSource: 'anilist', followed: followed || null,
         source: 'newpremieres', popularity: 0, urls, epTitle: '', lateSeries: false, late: 0, fav: false, dur: 24,
         exact: true, proj: false, est: false, final: false, left: null, seasonEnd: null, cur: '', isNew: true, announced: true,
       });
@@ -16405,11 +16468,13 @@
     return [...map.values()];
   }
   // (v4.31.0) Note du public pour toute carte : Crunchyroll (cache, jamais de requête ici) sinon AniList (/20 → /5).
-  function calRatingOf(crId, aniScore) {
+  // (v4.33.0) Deux notes distinctes, comme dans les autres onglets : « ★ » = Crunchyroll, « AL ★ » = AniList. Plus de repli qui
+  // affichait la note AniList à la place de celle de Crunchyroll (Dark Machine : 3,8 chez CR, 2,5 chez AniList).
+  function calRatingOf(crId) {
     const r = crId ? getRatingCached(crId) : null;
-    if (Number.isFinite(r) && r > 0) return r;
-    return Number.isFinite(aniScore) && aniScore > 0 ? aniScore / 20 : null;
+    return Number.isFinite(r) && r > 0 ? r : null;
   }
+  function calAniOf(v) { return Number.isFinite(v) && v > 0 ? v / 20 : null; }
   // Les notes manquantes (séries du catalogue / annoncées) sont lues en fond, avec le cache habituel (21 j), puis la vue se redessine.
   let calRatingsRunning = false;
   async function calEnsureRatings() {
@@ -16419,13 +16484,23 @@
     for (const it of ((STATE.aniFut && STATE.aniFut.items) || [])) if (it && it.crId) ids.add(it.crId);
     for (const it of ((STATE.aniLive && STATE.aniLive.items) || [])) if (it && it.crId) ids.add(it.crId);
     const mine = new Set((STATE.series || []).map((s) => s.id));
-    const todo = [...ids].filter((id) => !mine.has(id) && cacheGet('rating:' + id, RATING_TTL) == null).slice(0, 120);
-    if (!todo.length) return;
     calRatingsRunning = true;
     try {
+      // (v4.33.0) Une série AniList sans lien Crunchyroll déclaré : on retrouve sa fiche Crunchyroll (recherche, déjà mise en cache) pour
+      // afficher SA note Crunchyroll — jamais la note AniList à sa place.
+      const unresolved = [].concat((STATE.aniLive && STATE.aniLive.items) || [], (STATE.aniFut && STATE.aniFut.items) || []).filter((it) => it && it.aniId && !it.crId);
+      let resolved = 0;
+      await pool(unresolved.slice(0, 40), async (it) => {
+        const t = it.titles || [it.title];
+        const r = await resolveCrunchyrollForPremiere({ id: it.aniId, title: { english: t[0], romaji: t[1] || t[0], native: t[2] }, externalLinks: [] });
+        if (r && r.id && r.confidence === 'confirmed') { it.crId = r.id; it.crSlug = r.slug || it.crSlug || ''; resolved++; }
+      }, 2);
+      for (const it of unresolved) if (it.crId) ids.add(it.crId);
+      const todo = [...ids].filter((id) => !mine.has(id) && cacheGet('rating:' + id, RATING_TTL) == null).slice(0, 120);
+      if (!todo.length) { if (resolved) render(); return; }
       let changed = 0;
       await pool(todo, async (id) => { const v = await getRating(id); if (v != null) changed++; }, Math.max(2, Math.min(4, paceLimit())));
-      if (changed) { LOG(`calendrier : ${changed} note(s) lue(s) pour le catalogue`); render(); }
+      if (changed || resolved) { LOG(`calendrier : ${changed} note(s) lue(s) pour le catalogue`); render(); }
     } catch (e) { safeCall.log(e, 'calEnsureRatings'); }
     finally { calRatingsRunning = false; }
   }
@@ -16433,7 +16508,7 @@
     return {
       id: it.id, title: it.title, poster: it.poster || '', wide: it.wide || '', synopsis: it.synopsis || '', categories: it.categories || [],
       ts: ep.ts, precision: 'time', released: ep.ts <= now, n: ep.n, abs: ep.n, label: `E${ep.n}`, sxe: `S${it.rank || 1}E${ep.n}`,
-      score: calRatingOf(it.id, null), listed: false, seen: false, crId: it.id, crSlug: it.crSlug || '', crOk: true, crSource: 'crunchyroll', followed: null,
+      score: calRatingOf(it.id), ani: calAniOf(it.aniScore), listed: false, seen: false, crId: it.id, crSlug: it.crSlug || '', crOk: true, crSource: 'crunchyroll', followed: null,
       source: 'newpremieres', popularity: 0, urls: calSeriesUrls({ id: it.id, slug: it.crSlug }, { id: ep.id }), epTitle: ep.t || '',
       lateSeries: false, late: 0, fav: false, dur: 24, exact: true, proj: false, est: false, final: false, left: null, seasonEnd: null, cur: '',
     };
@@ -16720,13 +16795,20 @@
     const vu = e.type === 'out' ? (e.seen ? 'seen' : 'unseen') : '';
     const cls = ['crrav-calcard', e.type, stCls, vu, e.listed === false ? 'offlist' : '', e.isNew ? 'isnew' : '', !timed ? 'undated' : '',
       e.proj ? 'proj' : '', e.est ? 'est' : '', calIsFuture(e, now) ? 'fut' : '', ui.open === e.key ? 'open' : ''].filter(Boolean).join(' ');
-    const canIcs = e.type !== 'out' && !(e.type === 'air' && e.ts < now) && (e.precision === 'time' || e.precision === 'day');
     const href = e.urls ? (e.urls.search ? crUrl(e.urls.web) : crUrl(e.urls.watch || e.urls.web)) : '#';
     const watchLbl = e.type === 'prem' || e.type === 'air' ? 'Regarder sur Crunchyroll'
       : (e.type === 'out' && !e.seen) || e.late > 0 ? 'Regarder' : 'Voir la série';
     const watchShort = e.type === 'prem' || e.type === 'air' ? 'Regarder' : watchLbl;
     const igLabel = e.type === 'prem' ? 'Ignorer cette nouveauté' : 'Ignorer cette série';
-    const star = Number.isFinite(e.score) && e.score > 0 ? `<span class="crrav-calstar" title="Note du public">★ ${e.score.toFixed(1)}</span>` : '';
+    const aniN = Number.isFinite(e.ani) && e.ani > 0 ? e.ani : calAniScoreOf(e.s);
+    const crN = Number.isFinite(e.score) && e.score > 0 ? e.score : null;
+    const star = (crN || aniN)
+      ? `<span class="crrav-calstar" title="${[crN ? 'Crunchyroll ' + crN.toFixed(1) + '/5' : '', aniN ? 'AniList ' + aniN.toFixed(1) + '/5' : ''].filter(Boolean).join(' · ')}">${crN ? `★ ${crN.toFixed(1)}` : ''}${crN && aniN ? '<i></i>' : ''}${aniN ? `<em>AL ★ ${aniN.toFixed(1)}</em>` : ''}</span>` : '';
+    // (v4.33.0) Genres + résumé : visibles dans le détail (survol sur PC, toucher sur mobile), pour TOUTES les cartes.
+    const infoCats = ((e.categories && e.categories.length ? e.categories : (e.s && e.s.categories)) || []).filter(Boolean).slice(0, 4);
+    const infoSyn = String(e.synopsis || (e.s && e.s.synopsis) || '').replace(/\s+/g, ' ').trim().slice(0, 420);
+    const info = (infoCats.length || infoSyn)
+      ? `<div class="crrav-calinfo">${infoCats.length ? `<div class="crrav-calgenres">${infoCats.map((g) => `<span>${escapeHtml(g)}</span>`).join('')}</div>` : ''}${infoSyn ? `<p class="crrav-calsyn">${escapeHtml(infoSyn)}</p>` : ''}</div>` : '';
     // (v4.25.0) Le repère dit POURQUOI : début de série, nouvelle saison ou reprise après pause (une nouvelle série
     // porte déjà « Nouveau » à côté de son statut).
     const newLbl = (() => {
@@ -16748,11 +16830,11 @@
       <div class="crrav-calc">
         <div class="crrav-calstline"><span class="crrav-calst ${stCls}">${escapeHtml(status)}</span>${chip ? `<span class="crrav-calepi">${escapeHtml(chip)}</span>` : ''}</div>
         ${timeS ? `<div class="crrav-calago">${escapeHtml(timeB)} · ${escapeHtml(timeS)}</div>` : ''}
-        ${sub ? `<div class="crrav-calsub">${sub}</div>` : ''}
+        ${sub ? `<div class="crrav-calsub${info ? ' one' : ''}">${sub}</div>` : ''}
+        ${info}
         <div class="crrav-calacts">
           <a class="crrav-calqa pri" data-act="cal-link" href="${href}" title="${escapeHtml(watchLbl)}" aria-label="${escapeHtml(watchLbl)}">${CAL_ICO.play}<span>${escapeHtml(watchShort)}</span></a>
           ${(e.type !== 'prem' && e.s) ? `<button type="button" class="crrav-calqa" data-act="cal-series" data-id="${escapeHtml(e.id)}" title="Toutes les prochaines sorties de cette série" aria-label="Agenda de la série">${CAL_ICO.list}<span>Série</span></button>` : ''}
-          ${canIcs ? `<button type="button" class="crrav-calqa" data-act="cal-ics" data-k="${key}" title="Ajouter à mon agenda (.ics)" aria-label="Ajouter à mon agenda">${CAL_ICO.cal}<span>Agenda</span></button>` : ''}
           <button type="button" class="crrav-calqa" data-ignore="${escapeHtml(e.id)}" data-title="${escapeHtml(e.title)}"
             data-source="${e.source}" data-poster="${escapeHtml(e.poster || '')}" data-synopsis="${escapeHtml(e.synopsis || '')}"
             title="${igLabel}" aria-label="${igLabel}">${CAL_ICO.hide}<span>Ignorer</span></button>
@@ -16764,11 +16846,13 @@
   function calDayHeader(ts, now, count, extra, showWhen) {
     const d = new Date(ts);
     const k = calDayKey(ts), tk = calDayKey(now), mk = calDayKey(now + DAY);
-    const lab = k === tk ? "Aujourd'hui" : k === mk ? 'Demain' : k === calDayKey(now - DAY) ? 'Hier' : CAL_DAYS[d.getDay()];
+    // (v4.34.0) Le numéro est déjà en gros : la ligne du bas donne le MOIS (jamais le jour deux fois). Seul « aujourd'hui » a un badge.
+    const rel = k === mk ? 'Demain' : k === calDayKey(now - DAY) ? 'Hier' : '';
+    const lab = k === tk ? (showWhen ? CAL_DAYS[d.getDay()] : "Aujourd'hui") : (rel || CAL_DAYS[d.getDay()]);
     const hot = k === tk ? ' today' : '';
-    const when = k === tk ? ['today', 'aujourd’hui'] : ts < calStartOfDay(now) ? ['past', 'passé'] : ['future', 'à venir'];
+    const sub = [rel ? CAL_DAYS[d.getDay()] : '', CAL_MONTHS_SHORT[d.getMonth()]].filter(Boolean).join(' · ');
     return `<header class="crrav-caldayh${hot}"><span class="crrav-caldnum">${d.getDate()}</span>
-      <span class="crrav-caldlab"><b>${escapeHtml(lab)}${showWhen ? `<span class="crrav-calwhen ${when[0]}">${when[1]}</span>` : ''}</b><small>${CAL_DAYS[d.getDay()]} ${d.getDate()} ${CAL_MONTHS_SHORT[d.getMonth()]}${count != null ? ` · ${count} sortie${count > 1 ? 's' : ''}` : ''}${extra || ''}</small></span></header>`;
+      <span class="crrav-caldlab"><b>${escapeHtml(lab)}${showWhen && k === tk ? '<span class="crrav-calwhen today">aujourd’hui</span>' : ''}</b><small>${sub}${count != null ? ` · ${count} sortie${count > 1 ? 's' : ''}` : ''}${extra || ''}</small></span></header>`;
   }
 
   // Mini-grille mensuelle (utilisée seule en vue Mois, en réduit dans le panneau latéral).
@@ -16907,24 +16991,6 @@
           : `<p class="crrav-calempty">${ts < calStartOfDay(now) ? 'Rien de sorti' : 'Rien de prévu'} ce jour-là.</p>`}</div></section></div>`;
   }
 
-  function calHeroHtml(h, now) {
-    if (!h) return '';
-    const hue = calHue(h.title);
-    const when = calDayKey(h.ts) === calDayKey(now) ? "Aujourd'hui" : calDayKey(h.ts) === calDayKey(now + DAY) ? 'Demain' : calDateLabel(h.ts);
-    const href = crUrl(h.late > 0 ? h.urls.watch : h.urls.web);
-    return `<section class="crrav-calhero" style="--h:${hue}">
-      <div class="crrav-calhp">${calPoster({ poster: h.poster, title: h.title })}</div>
-      <div class="crrav-calhc">
-        <div class="crrav-calhtag"><span>PROCHAINE SORTIE</span><em>${escapeHtml(when)} · ${calTimeLabel(h.ts)} · ${escapeHtml(calCountdown(h.ts, now))}</em></div>
-        <div class="crrav-calhtitle">${escapeHtml(h.title)} <small>${escapeHtml(h.label)}</small></div>
-        <div class="crrav-calhrow">
-          <a class="crrav-calhbtn" data-act="cal-link" href="${href}">${h.late > 0 ? 'Rattraper' : 'Voir la série'}</a>
-          ${h.late > 0 ? `<span class="crrav-calhlate">${h.late} ép. de retard</span>` : '<span class="crrav-calhok">à jour ✓</span>'}
-        </div>
-      </div>
-    </section>`;
-  }
-
   function calSummaryHtml(model) {
     const s = model.summary;
     const h = Math.floor(s.minutes / 60), mn = s.minutes % 60;
@@ -16961,6 +17027,9 @@
     const now = Date.now();
     const model = calModel(opts, now);
     const ap = STATE.anilistProgress;
+    // (v4.34.0) L'animation d'entrée ne rejoue que sur une vraie navigation (ouverture, vue, filtre, période…), jamais sur un rafraîchissement
+    // en fond (notes qui arrivent, dates AniList…) : sinon l'écran clignoterait tout seul.
+    const enter = ui.enter !== false; ui.enter = false;
 
     const seg = [['agenda', 'Agenda'], ['week', 'Semaine'], ['month', 'Mois']]
       .map(([v, l]) => `<button type="button" role="tab" aria-selected="${opts.view === v}" class="${opts.view === v ? 'on' : ''}" data-act="cal-view" data-v="${v}">${l}</button>`).join('');
@@ -17063,15 +17132,13 @@
           <small>La date de leur prochain épisode n’est pas (encore) connue.</small></details>` : '';
     const dbg = '';   // (v4.24.0) plus de bloc AniList « Nouveautés » : les nouvelles séries viennent de Crunchyroll
 
-    return `<div class="crrav-statswrap crrav-calwrap"><div class="crrav-cal" data-view="${opts.view}">
+    return `<div class="crrav-statswrap crrav-calwrap"><div class="crrav-cal${enter ? ' enter' : ''}" data-view="${opts.view}">
       <div class="crrav-calbar">
         <h2 class="crrav-calh">Agenda</h2>
         <div class="crrav-calseg" role="tablist" aria-label="Vue du calendrier">${seg}</div>
         <span class="crrav-calgrow"></span>
-        <button type="button" class="crrav-calib" data-act="cal-ics-all" title="Exporter les sorties de cette vue (.ics)" aria-label="Exporter en .ics">${CAL_ICO.dl}<span>.ics</span></button>
         <button type="button" class="crrav-calib crrav-calsidebtn${ui.side ? ' on' : ''}" data-act="cal-aside" aria-expanded="${ui.side}" title="Résumé de la période" aria-label="Résumé de la période">${CAL_ICO.gear}</button>
       </div>
-      ${calHeroHtml(model.hero, now)}
       <div class="crrav-calchips" role="group" aria-label="Filtrer">${chips}</div>
       ${filterRow2}
       ${periods}
@@ -17157,13 +17224,11 @@
       const mk = calMonthKey(e.ts);
       if (m.events.length > 8 && mk !== lastMonth) { rows += `<h4 class="crrav-sa-mh">${CAL_MONTHS[d.getMonth()]} ${d.getFullYear()}</h4>`; lastMonth = mk; }
       const tag = e.est ? '<em class="est">estimé</em>' : e.exact ? '<em class="ok">annoncé</em>' : '<em class="mute">prévu</em>';
-      const canIcs = e.precision === 'time' || e.precision === 'day';
       rows += `<li class="crrav-sa-r${e.first ? ' first' : ''}${e.final ? ' fin' : ''}${e.est ? ' est' : ''}">
         <span class="crrav-sa-d"><b>${d.getDate()}</b><small>${CAL_MONTHS_SHORT[d.getMonth()]}</small></span>
         <span class="crrav-sa-i"><b>${escapeHtml(e.label)}${e.final ? ' <u>dernier</u>' : ''}</b>
           <small>${CAL_DAYS[d.getDay()]} · ${e.precision === 'time' ? calTimeLabel(e.ts) : 'heure à préciser'} · ${escapeHtml(calCountdown(e.ts, now))}</small></span>
         ${tag}
-        ${canIcs ? `<button type="button" class="crrav-sa-ib" data-act="cal-sa-ics1" data-k="${escapeHtml(e.key)}" title="Ajouter à mon agenda" aria-label="Ajouter ${escapeHtml(e.label)} à mon agenda">${CAL_ICO.cal}</button>` : ''}
       </li>`;
     }
     if (!rows) {
@@ -17172,7 +17237,6 @@
     }
     const sequel = m.sequel ? `<div class="crrav-sa-seq"><span>NOUVELLE SAISON</span><b>${escapeHtml(m.sequel.title)}</b><small>${escapeHtml(calPremiereWhen(m.sequel, now))}</small></div>` : '';
     const href = crUrl(m.late > 0 ? calSeriesUrls(s, s.next).watch : calSeriesUrls(s, s.next).web);
-    const icsOk = m.events.some((e) => e.precision === 'time' || e.precision === 'day');
     return `<div class="crrav-sa" role="dialog" aria-modal="true" aria-label="Agenda de ${escapeHtml(s.title)}" style="--h:${hue}">
       <div class="crrav-sa-bg" data-act="cal-sa-close"></div>
       <section class="crrav-sa-sheet">
@@ -17189,7 +17253,6 @@
         <ul class="crrav-sa-list">${rows}</ul>
         <footer class="crrav-sa-foot">
           <a class="crrav-sa-btn pri" data-act="cal-link" href="${href}">${CAL_ICO.play}<span>${m.late > 0 ? 'Rattraper' : 'Voir la série'}</span></a>
-          ${icsOk ? `<button type="button" class="crrav-sa-btn" data-act="cal-sa-ics">${CAL_ICO.dl}<span>Tout ajouter à mon agenda</span></button>` : ''}
           <button type="button" class="crrav-sa-btn" data-act="cal-sa-focus" data-id="${escapeHtml(s.id)}">${CAL_ICO.cal}<span>Voir dans l’agenda</span></button>
         </footer>
       </section></div>`;
@@ -17241,6 +17304,7 @@
     const ui = calUi();
     const redo = (persist) => { if (persist) saveFilters(); forceRender(); calEnsureFuture(calNeededDays(calOpts(), Date.now())); };
     if (a === 'cal-link') return true;
+    if (a !== 'cal-open' && a !== 'cal-reload') ui.enter = true;
     if (a === 'cal-view') {
       if (CAL_VIEWS.includes(act.dataset.v)) { f.calView = act.dataset.v; ui.off = 0; ui.sel = null; redo(true); }
       return true;
@@ -17290,15 +17354,6 @@
     if (a === 'cal-reset') { f.calFilter = 'all'; f.calFlags = []; f.calSources = null; f.calScope = 'mine'; f.calConfirmed = false; ui.q = ''; redo(true); return true; }
     if (a === 'cal-series') { openSeriesAgenda(act.dataset.id); return true; }
     if (a === 'cal-sa-close') { STATE.serieAgenda = null; forceRender(); return true; }
-    if (a === 'cal-sa-ics' || a === 'cal-sa-ics1') {
-      const sa = STATE.serieAgenda;
-      const m = sa ? calSeriesModel(sa.id, Date.now()) : null;
-      if (m) {
-        const list = a === 'cal-sa-ics' ? m.events : m.events.filter((e) => e.key === act.dataset.k);
-        calDownloadIcs(list, `sorties-${String(m.s.title).replace(/[^A-Za-z0-9]+/g, '-').slice(0, 40)}.ics`);
-      }
-      return true;
-    }
     if (a === 'cal-sa-focus') {
       const sa = STATE.serieAgenda;
       const m = sa ? calSeriesModel(sa.id, Date.now()) : null;
@@ -17339,6 +17394,8 @@
       return true;
     }
     if (a === 'cal-open') {
+      // PC (souris) : le détail est au SURVOL, le clic ne le fige plus ; mobile / tactile : toucher pour ouvrir.
+      try { if (typeof window.matchMedia === 'function' && window.matchMedia('(hover:hover) and (pointer:fine)').matches) return true; } catch (_) { /* ignore */ }
       const key = act.dataset.calkey;
       ui.open = ui.open === key ? null : key;
       if (act.closest) {
@@ -17353,18 +17410,6 @@
       loadCrNew(true);
       calEnsureCrSeason(true);
       if (STATE.aniLive) { STATE.aniLive.error = null; if (calSourcesOf(calOpts()).includes('rest')) loadAniLive(true); }
-      return true;
-    }
-    if (a === 'cal-ics') {
-      const m = calModel(calOpts(), Date.now());
-      const ev = m.events.find((e) => e.key === act.dataset.k);
-      if (ev) calDownloadIcs([ev], `sortie-${String(ev.title).replace(/[^A-Za-z0-9]+/g, '-').slice(0, 40)}.ics`);
-      return true;
-    }
-    if (a === 'cal-ics-all') {
-      const m = calModel(calOpts(), Date.now());
-      const d = new Date();
-      calDownloadIcs(m.events, `mon-crunchy-sorties-${d.getFullYear()}-${calPad(d.getMonth() + 1)}-${calPad(d.getDate())}.ics`);
       return true;
     }
     return false;
@@ -23618,6 +23663,7 @@
     STATE.filters.globalQ = '';
     SESSION_NAV.tab = STATE.tab;
     saveSessionNav(SESSION_NAV);
+    calUi().enter = true;
     if (root && root.style.display !== 'none') { render(); calEnsureFuture(calNeededDays()); return; }
     open();
   }
