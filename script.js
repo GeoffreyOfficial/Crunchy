@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      4.29.0
+// @version      4.30.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '4.29.0';
+  const SCRIPT_VERSION = '4.30.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -13652,7 +13652,7 @@
   .crrav-caldlab b{font:800 12px/1.1 system-ui;letter-spacing:.08em;text-transform:uppercase}
   .crrav-caldayh.today .crrav-caldlab b{color:#ffb27c}
   .crrav-caldlab small{font:600 11.5px/1.2 system-ui;color:#9a9aa8}
-  .crrav-agsec.past{opacity:.45}
+  .crrav-agsec.past{opacity:1}
   .crrav-agsec.empty .crrav-caldayh{padding:6px 2px}
   .crrav-cal .crrav-agsec.empty .crrav-caldayh{padding:5px 2px;gap:8px;align-items:baseline}
   .crrav-cal .crrav-agsec.empty .crrav-caldnum{font-size:15px;min-width:22px}
@@ -13701,7 +13701,8 @@
   .crrav-calcell{min-height:48px;border-radius:9px;border:1px solid transparent;background:#16161c;color:#e4e4ea;display:flex;
     flex-direction:column;align-items:center;gap:4px;padding:6px 2px;font:inherit;cursor:pointer;overflow:hidden}
   .crrav-calcell.blank{background:transparent;cursor:default}
-  .crrav-calcell.past{opacity:.4}
+  .crrav-calcell.past:not(.has){opacity:.4}
+  .crrav-calcell.past .crrav-calnum{opacity:.6}
   .crrav-calcell.today{border-color:#f47521}
   .crrav-calcell.sel{background:rgba(244,117,33,.2);border-color:rgba(244,117,33,.7)}
   .crrav-calnum{font:700 13px/1 system-ui}
@@ -13987,7 +13988,7 @@
 
   /* ── (v4.23.0) Tuiles à image LARGE (style grille Crunchyroll) : titre + S·E en bas à gauche, heure en bas à droite, note en haut ── */
   .crrav-cal .crrav-agsec.past .crrav-caldayh{opacity:.78}
-  .crrav-calcell.past{opacity:.62}
+  .crrav-calcell.past:not(.has){opacity:.62}
   .crrav-calnav{flex-wrap:wrap;gap:6px 10px}
   /* Jours passés / aujourd'hui / à venir : lisibles d'un coup d'œil. */
   .crrav-cal .crrav-agsec.past{background:rgba(255,255,255,.028);border-radius:14px;padding:0 4px 6px;margin-top:6px}
@@ -14039,8 +14040,10 @@
   .crrav-cal .crrav-calcard.out.seen .crrav-calp img,.crrav-cal .crrav-calcard.out.seen .crrav-calini{filter:grayscale(1) brightness(.62)}
   /* (v4.29.0) À venir = grisé (pas encore regardable) ; vu = grisé + « ✓ Vu » bien lisible ; sorti et pas vu = couleurs normales. */
   .crrav-cal .crrav-calcard.fut .crrav-calp img,.crrav-cal .crrav-calcard.fut .crrav-calini{filter:grayscale(1) brightness(.6)}
-  .crrav-cal .crrav-calcard.fut .crrav-calc,.crrav-cal .crrav-calcard.out.seen .crrav-calc{opacity:.72}
+  .crrav-cal .crrav-calcard.fut,.crrav-cal .crrav-calcard.out.seen{opacity:.6}
+  .crrav-cal .crrav-calcard.fut:hover,.crrav-cal .crrav-calcard.out.seen:hover,.crrav-cal .crrav-calcard.open.fut,.crrav-cal .crrav-calcard.open.seen{opacity:.9}
   .crrav-cal .crrav-calcard.out.seen .crrav-calvu{background:#3ea56b;color:#fff;box-shadow:0 0 0 1px rgba(255,255,255,.28)}
+  .crrav-calth.fut,.crrav-calth.vu,.crrav-calmini.fut,.crrav-calmini.vu{opacity:.6}
   .crrav-calth.fut img,.crrav-calth.vu img,.crrav-calth.fut .crrav-calini,.crrav-calth.vu .crrav-calini,
   .crrav-calmini.fut .crrav-calmp img,.crrav-calmini.vu .crrav-calmp img{filter:grayscale(1) brightness(.6)}
   .crrav-calth.vu::before{content:'✓';position:absolute;right:3px;bottom:3px;z-index:1;width:15px;height:15px;border-radius:50%;background:#3ea56b;color:#fff;font:800 10px/15px system-ui;text-align:center}
