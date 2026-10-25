@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Mon Crunchy
 // @namespace    reste-a-voir
-// @version      4.36.0
+// @version      4.37.0
 // @description  Les séries de ta watchlist Crunchyroll qu'il te reste à finir, + un onglet Hors listes (séries commencées mais absentes de tes listes) et un onglet Découverte (tri et recherche, avec ajout direct à une de tes listes) pour dénicher des pépites populaires jamais vues.
 // @author       toi
 // @match        https://www.crunchyroll.com/*
@@ -41,7 +41,7 @@
   // du cache : au démarrage, si le cache a été écrit par une autre version (ou par aucune),
   // il est vidé automatiquement (voir enforceCacheSchema). Garder ce nombre aligné avec
   // l'en-tête @version tout en haut du fichier.
-  const SCRIPT_VERSION = '4.36.0';
+  const SCRIPT_VERSION = '4.37.0';
   LOG('script chargé v' + SCRIPT_VERSION + ' sur', location.href);
 
   // ─────────────────────────────────────────────────────────────
@@ -14047,6 +14047,36 @@
   .crrav-cal .crrav-calcard.proj .crrav-calp img,.crrav-cal .crrav-calcard.est .crrav-calp img{opacity:.78}
   .crrav-cal .crrav-calcard.proj,.crrav-cal .crrav-calcard.est,.crrav-cal .crrav-calcard.undated{outline:1px dashed rgba(255,255,255,.4);outline-offset:-4px}
   .crrav-cal .crrav-calcard.open{box-shadow:0 0 0 2px #f47521}
+  /* (v4.37.0) Feuille de détail (tactile) */
+  .crrav-calsheet{position:fixed;inset:0;z-index:2147483000;display:flex;align-items:flex-end;justify-content:center;background:rgba(0,0,0,.6);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px);animation:crrav-fade .22s ease both}
+  .crrav-calsheetp{position:relative;width:min(100%,560px);max-height:82vh;max-height:82dvh;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;background:#15151b;border:1px solid rgba(255,255,255,.1);border-bottom:0;
+    border-radius:20px 20px 0 0;padding:0 0 calc(14px + env(safe-area-inset-bottom,0px));box-shadow:0 -16px 50px rgba(0,0,0,.6);animation:crrav-sheetup .34s cubic-bezier(.2,.85,.25,1) both}
+  .crrav-calsheetx{position:absolute;top:10px;right:10px;z-index:6;width:34px;height:34px;border-radius:50%;border:0;background:rgba(0,0,0,.6);color:#fff;font:700 15px/1 system-ui;cursor:pointer}
+  .crrav-calsheetbody .crrav-calp{position:relative;width:100%;aspect-ratio:16/9;max-height:34vh;border-radius:20px 20px 0 0}
+  .crrav-calsheetbody .crrav-calp img{width:100%;height:100%;object-fit:cover}
+  .crrav-calsheetc{display:flex;flex-direction:column;gap:8px;padding:14px 16px 4px;min-width:0}
+  .crrav-calsheetc .crrav-calst{font:800 15px/1.25 system-ui;display:block}
+  .crrav-calsheetc .crrav-calago{font:600 12.5px/1.3 system-ui;color:#9a9aa8}
+  .crrav-calsheetc .crrav-calsub{display:block;font:500 12.5px/1.4 system-ui;color:#8c8c9c}
+  .crrav-calsheetc .crrav-calsub::before{content:none}
+  .crrav-calsheetc .crrav-calinfo{display:flex;flex-direction:column;gap:8px}
+  .crrav-calsheetc .crrav-calgenres{display:flex;flex-wrap:wrap;gap:6px}
+  .crrav-calsheetc .crrav-calgenres span{font:700 11.5px/1 system-ui;padding:5px 10px;border-radius:999px;background:hsla(var(--h,24),70%,55%,.2);color:hsl(var(--h,24),85%,80%);border:1px solid hsla(var(--h,24),70%,60%,.35)}
+  .crrav-calsheetc .crrav-calsyn{display:block;margin:0;font:500 14px/1.5 system-ui;color:#d0d0da;overflow:visible;overflow-wrap:anywhere}
+  .crrav-calsheetc .crrav-calacts{display:flex;flex-wrap:wrap;gap:8px;margin:6px 0 0}
+  .crrav-calsheetc .crrav-calqa{min-height:40px;width:auto;min-width:0;padding:0 14px;border-radius:11px;font:700 13px/1 system-ui;flex:0 0 auto}
+  .crrav-calsheetc .crrav-calqa span{display:inline}
+  .crrav-calsheetc .crrav-calqa.pri{flex:1 1 auto}
+  .crrav-cal .crrav-calsheetbody .crrav-calp{height:auto;aspect-ratio:16/9;max-height:34vh;width:100%;border-radius:20px 20px 0 0}
+  .crrav-cal .crrav-calsheetbody .crrav-caltr{display:none}
+  .crrav-cal .crrav-calsheetc .crrav-calinfo{flex:0 0 auto;overflow:visible;gap:8px}
+  .crrav-cal .crrav-calsheetc .crrav-calgenres{flex-wrap:wrap;overflow:visible;-webkit-mask-image:none;mask-image:none;gap:6px}
+  .crrav-cal .crrav-calsheetc .crrav-calgenres span{font-size:11.5px;padding:5px 10px}
+  .crrav-cal .crrav-calsheetc .crrav-calsyn{flex:0 0 auto;overflow:visible;padding:0;font:500 14px/1.5 system-ui;color:#d0d0da}
+  .crrav-cal .crrav-calsheetc .crrav-calsub{display:block;white-space:normal;overflow:visible}
+  @keyframes crrav-fade{from{opacity:0}}
+  @keyframes crrav-sheetup{from{transform:translateY(100%)}}
+  @media (prefers-reduced-motion:reduce){.crrav-calsheet,.crrav-calsheetp{animation:none !important}}
   /* (v4.34.0) Animations : entrée en cascade (jours puis tuiles), tuile qui se soulève au survol avec reflet, pastilles et boutons réactifs,
      aujourd'hui qui pulse, repères qui scintillent. Tout est coupé avec « réduire les animations ». */
   @keyframes crrav-secin{from{opacity:0;transform:translateY(18px)}}
@@ -14095,6 +14125,7 @@
   .crrav-cal .crrav-calcard .crrav-calc{display:none;position:absolute;inset:0;z-index:5;flex-direction:column;justify-content:space-between;gap:4px;
     padding:7px;background:rgba(10,10,14,.95);min-width:0}
   .crrav-cal .crrav-calcard.open .crrav-calc{display:flex}
+  @media (hover:none),(pointer:coarse){ .crrav-cal .crrav-calcard .crrav-calc{display:none !important} }
   /* (v4.33.0) PC : le détail s'affiche AU SURVOL (plus de clic) ; mobile : au toucher. Animation : voile qui monte, contenu en cascade. */
   @media (hover:hover) and (pointer:fine){
     .crrav-cal .crrav-calcard:hover .crrav-calc,.crrav-cal .crrav-calcard:focus-within .crrav-calc{display:flex}
@@ -16805,7 +16836,7 @@
     return e.precision === 'time' ? e.ts > now : e.ts >= calStartOfDay(now) + DAY;
   }
   const calGreyCls = (e, now) => (calIsFuture(e, now) ? ' fut' : (e.type === 'out' && e.seen ? ' vu' : ''));
-  function calCardHtml(e, now, ui) {
+  function calCardHtml(e, now, ui, sheet) {
     const hue = calHue(e.title);
     const timed = e.precision === 'time';
     const key = escapeHtml(e.key);
@@ -16863,8 +16894,8 @@
     const star = (crN || aniN)
       ? `<span class="crrav-calstar" title="${[crN ? 'Crunchyroll ' + crN.toFixed(1) + '/5' : '', aniN ? 'AniList ' + aniN.toFixed(1) + '/5' : ''].filter(Boolean).join(' · ')}">${crN ? `★ ${crN.toFixed(1)}` : ''}${crN && aniN ? '<i></i>' : ''}${aniN ? `<em>AL ★ ${aniN.toFixed(1)}</em>` : ''}</span>` : '';
     // (v4.33.0) Genres + résumé : visibles dans le détail (survol sur PC, toucher sur mobile), pour TOUTES les cartes.
-    const infoCats = ((e.categories && e.categories.length ? e.categories : (e.s && e.s.categories)) || []).filter(Boolean).slice(0, 4);
-    const infoSyn = String(e.synopsis || (e.s && e.s.synopsis) || '').replace(/\s+/g, ' ').trim().slice(0, 420);
+    const infoCats = ((e.categories && e.categories.length ? e.categories : (e.s && e.s.categories)) || []).filter(Boolean).slice(0, sheet ? 8 : 4);
+    const infoSyn = String(e.synopsis || (e.s && e.s.synopsis) || '').replace(/\s+/g, ' ').trim().slice(0, sheet ? 1800 : 420);
     const info = (infoCats.length || infoSyn)
       ? `<div class="crrav-calinfo">${infoCats.length ? `<div class="crrav-calgenres">${infoCats.map((g) => `<span>${escapeHtml(g)}</span>`).join('')}</div>` : ''}${infoSyn ? `<p class="crrav-calsyn">${escapeHtml(infoSyn)}</p>` : ''}</div>` : '';
     // (v4.25.0) Le repère dit POURQUOI : début de série, nouvelle saison ou reprise après pause (une nouvelle série
@@ -16879,13 +16910,12 @@
       + ((e.type === 'ep' && e.first && e.late > 0) ? `<span class="crrav-callate">−${e.late}</span>` : '')
       + (e.fav ? '<span class="crrav-calfav" title="Favori">♥</span>' : '');
     const timeShort = timed && timeB ? timeB.replace(/h00$/, 'h') : '';
-    return `<article class="${cls}" style="--h:${hue}" data-calkey="${key}" data-act="cal-open">
-      <div class="crrav-calp">${calWideImg(e)}
+    const pBlock = `<div class="crrav-calp">${calWideImg(e)}
         ${star}${tr ? `<span class="crrav-caltr">${tr}</span>` : ''}
         <span class="crrav-calov"><span class="crrav-calttl">${escapeHtml(e.title)}</span><span class="crrav-calmeta"><span class="crrav-calsx">${escapeHtml(sxe)}</span></span></span>
         ${timeShort ? `<span class="crrav-calt"><b>${escapeHtml(timeShort)}</b></span>` : ''}
-      </div>
-      <div class="crrav-calc">
+      </div>`;
+    const cBlock = `<div class="crrav-calc">
         <div class="crrav-calstline"><span class="crrav-calst ${stCls}">${escapeHtml(status)}</span>${chip ? `<span class="crrav-calepi">${escapeHtml(chip)}</span>` : ''}</div>
         ${timeS ? `<div class="crrav-calago">${escapeHtml(timeB)} · ${escapeHtml(timeS)}</div>` : ''}
         ${sub ? `<div class="crrav-calsub${info ? ' one' : ''}">${sub}</div>` : ''}
@@ -16897,10 +16927,35 @@
             data-source="${e.source}" data-poster="${escapeHtml(e.poster || '')}" data-synopsis="${escapeHtml(e.synopsis || '')}"
             title="${igLabel}" aria-label="${igLabel}">${CAL_ICO.hide}<span>Ignorer</span></button>
         </div>
-      </div>
+      </div>`;
+    if (sheet) {
+      const inner = cBlock.replace(/^<div class="crrav-calc">/, '').replace(/<\/div>$/, '');
+      return `<div class="crrav-calsheetbody" style="--h:${hue}">${pBlock}<div class="crrav-calsheetc">${inner}</div></div>`;
+    }
+    return `<article class="${cls}" style="--h:${hue}" data-calkey="${key}" data-act="cal-open">
+      ${pBlock}
+      ${cBlock}
     </article>`;
   }
 
+  // (v4.37.0) Téléphone / tablette : toucher une carte ouvre une FEUILLE plein largeur (affiche, notes, genres, résumé défilable, boutons à taille
+  // normale) au lieu du minuscule voile de la tuile (illisible à 2 colonnes). La souris garde le survol.
+  function calSheetHtml(e, now, ui) {
+    return `<div class="crrav-calsheet" data-act="cal-sheet-close"><div class="crrav-calsheetp" data-act="cal-sheet-keep" role="dialog" aria-modal="true" aria-label="${escapeHtml(e.title)}">
+      <button type="button" class="crrav-calsheetx" data-act="cal-sheet-close" aria-label="Fermer">✕</button><div class="crrav-cal crrav-calsheetscope">${calCardHtml(e, now, ui, true)}</div></div></div>`;
+  }
+  // Posée dans .crrav-modals (comme les autres feuilles) : un `position:fixed` DANS .crrav-content serait ancré à son `transform` d'animation.
+  function calSheetOverlayHtml() {
+    if (STATE.tab !== 'calendrier' || !STATE.calUi || !STATE.calUi.sheet) return '';
+    const now = Date.now();
+    const model = safeCall(() => calModel(calOpts(), now), null, 'cal:sheet-model');
+    const ev = model && model.events.find((x) => x.key === STATE.calUi.sheet);
+    if (!ev) { STATE.calUi.sheet = null; return ''; }
+    return calSheetHtml(ev, now, STATE.calUi);
+  }
+  function calIsTouchUi() {
+    try { return typeof window.matchMedia === 'function' && !window.matchMedia('(hover:hover) and (pointer:fine)').matches; } catch (_) { return false; }
+  }
   function calDayHeader(ts, now, count, extra, showWhen) {
     const d = new Date(ts);
     const k = calDayKey(ts), tk = calDayKey(now), mk = calDayKey(now + DAY);
@@ -17363,6 +17418,8 @@
     const ui = calUi();
     const redo = (persist) => { if (persist) saveFilters(); forceRender(); calEnsureFuture(calNeededDays(calOpts(), Date.now())); };
     if (a === 'cal-link') return true;
+    if (a === 'cal-sheet-keep') return true;
+    if (a === 'cal-sheet-close') { ui.sheet = null; const sh = root && root.querySelector && root.querySelector('.crrav-calsheet'); if (sh) sh.remove(); return true; }
     if (a !== 'cal-open' && a !== 'cal-reload') ui.enter = true;
     if (a === 'cal-view') {
       if (CAL_VIEWS.includes(act.dataset.v)) { f.calView = act.dataset.v; ui.off = 0; ui.sel = null; redo(true); }
@@ -17456,6 +17513,7 @@
       // PC (souris) : le détail est au SURVOL, le clic ne le fige plus ; mobile / tactile : toucher pour ouvrir.
       try { if (typeof window.matchMedia === 'function' && window.matchMedia('(hover:hover) and (pointer:fine)').matches) return true; } catch (_) { /* ignore */ }
       const key = act.dataset.calkey;
+      if (calIsTouchUi() && key) { ui.sheet = key; forceRender(); return true; }
       ui.open = ui.open === key ? null : key;
       if (act.closest) {
         root.querySelectorAll('.crrav-calcard.open').forEach((n) => { if (n !== act) n.classList.remove('open'); });
@@ -21753,7 +21811,7 @@
       el.className = 'crrav-modals';
       root.appendChild(el);
     }
-    el.innerHTML = listPickerHtml() + confirmModalHtml() + calSeriesSheetHtml() + calSideSheetHtml();
+    el.innerHTML = listPickerHtml() + confirmModalHtml() + calSeriesSheetHtml() + calSideSheetHtml() + calSheetOverlayHtml();
   }
 
   function renderNow() {
